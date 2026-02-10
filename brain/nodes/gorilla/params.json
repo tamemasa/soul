@@ -1,0 +1,7 @@
+{
+  "risk_tolerance": 0.8,
+  "innovation_weight": 0.9,
+  "safety_weight": 0.3,
+  "thoroughness": 0.4,
+  "consensus_flexibility": 0.5
+}

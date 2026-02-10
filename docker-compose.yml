@@ -1,0 +1,62 @@
+services:
+  brain-panda:
+    build:
+      context: ./brain
+    container_name: soul-brain-panda
+    user: "${SOUL_UID:-1000}:${SOUL_GID:-1000}"
+    environment:
+      - NODE_NAME=panda
+      - HOME=/home/soul
+    volumes:
+      - shared:/shared
+      - ./brain/nodes/panda/CLAUDE.md:/brain/CLAUDE.md:ro
+      - ./brain/nodes/panda/params.json:/brain/params.json
+      - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+    restart: unless-stopped
+
+  brain-gorilla:
+    build:
+      context: ./brain
+    container_name: soul-brain-gorilla
+    user: "${SOUL_UID:-1000}:${SOUL_GID:-1000}"
+    environment:
+      - NODE_NAME=gorilla
+      - HOME=/home/soul
+    volumes:
+      - shared:/shared
+      - ./brain/nodes/gorilla/CLAUDE.md:/brain/CLAUDE.md:ro
+      - ./brain/nodes/gorilla/params.json:/brain/params.json
+      - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+    restart: unless-stopped
+
+  brain-triceratops:
+    build:
+      context: ./brain
+    container_name: soul-brain-triceratops
+    user: "${SOUL_UID:-1000}:${SOUL_GID:-1000}"
+    environment:
+      - NODE_NAME=triceratops
+      - HOME=/home/soul
+    volumes:
+      - shared:/shared
+      - ./brain/nodes/triceratops/CLAUDE.md:/brain/CLAUDE.md:ro
+      - ./brain/nodes/triceratops/params.json:/brain/params.json
+      - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: ./scheduler
+    container_name: soul-scheduler
+    user: "${SOUL_UID:-1000}:${SOUL_GID:-1000}"
+    volumes:
+      - shared:/shared
+    restart: unless-stopped
+
+volumes:
+  shared:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/shared

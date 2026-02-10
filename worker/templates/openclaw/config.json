@@ -1,0 +1,6 @@
+{
+  "name": "openclaw",
+  "description": "OpenClaw application worker node",
+  "template": "openclaw",
+  "capabilities": ["git", "build", "deploy", "monitor"]
+}

@@ -1,0 +1,19 @@
+# Environment
+.env
+
+# Runtime data (shared volume)
+shared/inbox/*
+shared/discussions/*
+shared/decisions/*
+shared/evaluations/*
+shared/logs/*
+shared/archive/*
+shared/workspace/*
+shared/workers/*
+!shared/**/.gitkeep
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
