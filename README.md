@@ -109,6 +109,7 @@ soul/
 ├── scheduler/
 │   ├── Dockerfile              # スケジューライメージ
 │   └── cron-tasks.sh           # 定期評価・クリーンアップ
+├── network-restrict.sh          # LAN隔離用iptablesルール管理
 ├── examples/
 │   └── sample-task.json        # タスク投入サンプル
 └── shared/                     # コンテナ間共有ボリューム (bind mount)
@@ -301,6 +302,29 @@ Brainノード間の通信は共有ボリューム上のJSONファイルで行�
 | `consensus_flexibility` | 合意への柔軟性 (0:固執 - 1:柔軟) | 0.4 | 0.5 | 0.8 |
 
 これらのパラメータは相互評価によって動的にチューニングされる。
+
+## Network Security
+
+コンテナはLAN内デバイスへのアクセスが制限されている。
+インターネット（Claude API）とコンテナ間通信は許可される。
+
+```
+┌─────────────┐     ┌──────────────┐     ┌──────────┐
+│ Soul        │ ──✓──▶ Internet     │     │ LAN      │
+│ Containers  │     │ (Claude API) │     │ 192.168. │
+│ (br-soul)   │ ──✗──────────────────────▶│ 11.0/24  │
+└─────────────┘     └──────────────┘     └──────────┘
+```
+
+- **仕組み**: 専用Dockerブリッジ `br-soul` + iptables `DOCKER-USER` チェーンでLANサブネットへの通信をDROP
+- **自動適用**: `./soul up` 時にルール適用、`./soul down` 時に除去
+- **手動操作**:
+  ```bash
+  sudo ./network-restrict.sh status   # 現在のルール確認
+  sudo ./network-restrict.sh apply    # ルール適用
+  sudo ./network-restrict.sh remove   # ルール除去
+  ```
+- **LAN範囲の変更**: `network-restrict.sh` 内の `LAN_SUBNET` を編集
 
 ## Tech Stack
 

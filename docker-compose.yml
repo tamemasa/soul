@@ -12,6 +12,8 @@ services:
       - ./brain/nodes/panda/CLAUDE.md:/brain/CLAUDE.md:ro
       - ./brain/nodes/panda/params.json:/brain/params.json
       - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+    networks:
+      - soul-net
     restart: unless-stopped
 
   brain-gorilla:
@@ -27,6 +29,8 @@ services:
       - ./brain/nodes/gorilla/CLAUDE.md:/brain/CLAUDE.md:ro
       - ./brain/nodes/gorilla/params.json:/brain/params.json
       - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+    networks:
+      - soul-net
     restart: unless-stopped
 
   brain-triceratops:
@@ -42,6 +46,8 @@ services:
       - ./brain/nodes/triceratops/CLAUDE.md:/brain/CLAUDE.md:ro
       - ./brain/nodes/triceratops/params.json:/brain/params.json
       - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+    networks:
+      - soul-net
     restart: unless-stopped
 
   scheduler:
@@ -51,7 +57,15 @@ services:
     user: "${SOUL_UID:-1000}:${SOUL_GID:-1000}"
     volumes:
       - shared:/shared
+    networks:
+      - soul-net
     restart: unless-stopped
+
+networks:
+  soul-net:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-soul
 
 volumes:
   shared:
