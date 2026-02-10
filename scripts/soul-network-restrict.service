@@ -1,0 +1,13 @@
+[Unit]
+Description=Soul System - Docker container network restrictions
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/masaru/soul/scripts/network-restrict.sh apply
+ExecStop=/home/masaru/soul/scripts/network-restrict.sh remove
+
+[Install]
+WantedBy=multi-user.target

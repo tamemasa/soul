@@ -8,12 +8,12 @@ case "${1:-}" in
   up)
     echo "Starting Soul system..."
     docker compose -f "${SCRIPT_DIR}/docker-compose.yml" up -d
-    sudo "${SCRIPT_DIR}/network-restrict.sh" apply
+    sudo "${SCRIPT_DIR}/scripts/network-restrict.sh" apply
     echo "Soul system is running. Use './soul chat' to interact."
     ;;
   down)
     echo "Stopping Soul system..."
-    sudo "${SCRIPT_DIR}/network-restrict.sh" remove
+    sudo "${SCRIPT_DIR}/scripts/network-restrict.sh" remove
     docker compose -f "${SCRIPT_DIR}/docker-compose.yml" down
     ;;
   chat)

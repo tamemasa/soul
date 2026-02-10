@@ -51,7 +51,7 @@
 |--------|------|------|
 | **Panda** (パンダ) | 安全重視 | リスク回避、安定性優先、テスト・検証を重視 |
 | **Gorilla** (ゴリラ) | 冒険的 | 革新性・スピード優先、新技術推奨、挑戦的 |
-| **Triceratops** (トリケラトプス) | 調停者 | バランス重視、実用的妥協点を見出す、デッドロック打破 |
+| **Triceratops** (トリケラトプス) | 調停者・決定発表者 | バランス重視、実用的妥協点を見出す、デッドロック打破、合意決定の公式発表 |
 
 各ノードは独立したDockerコンテナで稼働し、Claude Codeをエージェントとして搭載する。
 性格は `CLAUDE.md`（システムプロンプト）と `params.json`（数値パラメータ）で定義される。
@@ -86,6 +86,7 @@ soul/
 │   │   └── worker-manager.sh   # Worker作成・管理
 │   ├── protocols/
 │   │   ├── discussion.md       # 議論プロンプトテンプレート
+│   │   ├── announcement.md     # 決定発表プロンプトテンプレート
 │   │   ├── evaluation.md       # 評価プロンプトテンプレート
 │   │   └── task-execution.md   # タスク実行テンプレート
 │   └── nodes/
@@ -112,7 +113,8 @@ soul/
 ├── scheduler/
 │   ├── Dockerfile              # スケジューライメージ
 │   └── cron-tasks.sh           # 定期評価・クリーンアップ
-├── network-restrict.sh          # LAN隔離用iptablesルール管理
+├── scripts/
+│   └── network-restrict.sh      # LAN隔離用iptablesルール管理
 ├── examples/
 │   └── sample-task.json        # タスク投入サンプル
 └── shared/                     # コンテナ間共有ボリューム (bind mount)
@@ -188,8 +190,8 @@ SOUL_GID=1000
 
 - **ダッシュボード**: ノード状態・統計サマリ・最近の議論
 - **タスク投入**: フォームからタスクや質問を投入
-- **議論ビューア**: ラウンドごとの投票・意見をタイムライン形式で表示
-- **決定一覧**: 合意結果と実行結果の閲覧
+- **議論ビューア**: ラウンドごとの投票・意見をタイムライン形式で表示。ユーザーコメントもタイムラインにインラインで表示され、各Brainが未回答のラウンドでは「検討中…」インジケーターを表示
+- **決定一覧**: 合意結果と実行結果の閲覧。パイプラインステッパー（Discussion → Announcement → Executing → Completed）で進捗を可視化。トリケラトプスによるAnnouncement（決定発表・要約）とパンダによるExecution Result（実行結果）を分離表示
 - **パラメータ管理**: スライダーで各ノードのparams.jsonをリアルタイム編集
 - **評価履歴**: 相互評価サイクルの詳細とリチューニング結果
 - **ログビューア**: ノード別のログをリアルタイム表示
@@ -268,10 +270,21 @@ Brainノード間の通信は共有ボリューム上のJSONファイルで行�
    → discussions/{task_id}/round_1/{node_name}.json
 4. Round 2: 他ノードの意見を読み、修正意見を書き込み (必要な場合)
    → discussions/{task_id}/round_2/{node_name}.json
-5. 合意判定: 2/3同意 → decisions/{task_id}.json
+5. 合意判定: 2/3同意 → decisions/{task_id}.json (status: pending_announcement)
 6. 不合意時: 最大Round 3実施 → それでも不一致ならトリケラトプスが調停
-7. 決定に基づきExecutor(担当ノード)がタスクを実行
+7. 決定発表: トリケラトプスが議論を要約し、決定内容と理由を発表 (status: announced)
+8. 実行: パンダが決定に基づきタスクを実行 (status: executing → completed)
 ```
+
+#### ステータス遷移
+
+```
+discussing → decided → pending_announcement → announced → executing → completed
+                             ↑ トリケラトプス発表      ↑ パンダ実行開始
+```
+
+- **pending_announcement**: 合意成立後、トリケラトプスの発表待ち
+- **announced**: トリケラトプスが決定を発表済み、パンダの実行待ち
 
 ### データフォーマット
 
@@ -346,11 +359,11 @@ Brainノード間の通信は共有ボリューム上のJSONファイルで行�
 - **自動適用**: `./soul up` 時にルール適用、`./soul down` 時に除去
 - **手動操作**:
   ```bash
-  sudo ./network-restrict.sh status   # 現在のルール確認
-  sudo ./network-restrict.sh apply    # ルール適用
-  sudo ./network-restrict.sh remove   # ルール除去
+  sudo ./scripts/network-restrict.sh status   # 現在のルール確認
+  sudo ./scripts/network-restrict.sh apply    # ルール適用
+  sudo ./scripts/network-restrict.sh remove   # ルール除去
   ```
-- **LAN範囲の変更**: `network-restrict.sh` 内の `LAN_SUBNET` を編集
+- **LAN範囲の変更**: `scripts/network-restrict.sh` 内の `LAN_SUBNET` を編集
 
 ## Tech Stack
 
