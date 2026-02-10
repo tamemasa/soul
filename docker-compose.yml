@@ -10,7 +10,6 @@ services:
     volumes:
       - shared:/shared
       - ./brain/nodes/panda/CLAUDE.md:/brain/CLAUDE.md:ro
-      - ./brain/nodes/panda/params.json:/brain/params.json
       - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
     networks:
       - soul-net
@@ -27,7 +26,6 @@ services:
     volumes:
       - shared:/shared
       - ./brain/nodes/gorilla/CLAUDE.md:/brain/CLAUDE.md:ro
-      - ./brain/nodes/gorilla/params.json:/brain/params.json
       - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
     networks:
       - soul-net
@@ -44,7 +42,6 @@ services:
     volumes:
       - shared:/shared
       - ./brain/nodes/triceratops/CLAUDE.md:/brain/CLAUDE.md:ro
-      - ./brain/nodes/triceratops/params.json:/brain/params.json
       - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
     networks:
       - soul-net

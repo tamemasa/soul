@@ -20,9 +20,9 @@ run_evaluation() {
 
     # Gather target's current params
     local target_params=""
-    local target_params_file="${SHARED_DIR}/../brain/nodes/${target}/params.json"
-    if [[ -f "/brain/nodes/${target}/params.json" ]]; then
-      target_params=$(cat "/brain/nodes/${target}/params.json" 2>/dev/null || echo "{}")
+    local target_params_file="${SHARED_DIR}/nodes/${target}/params.json"
+    if [[ -f "${target_params_file}" ]]; then
+      target_params=$(cat "${target_params_file}" 2>/dev/null || echo "{}")
     fi
 
     local protocol
@@ -216,18 +216,26 @@ apply_retuning() {
     ')
   done
 
-  # Write new params to a retune request file
-  # The actual container recreation is handled by the host-level manager
+  # Merge new params into target's current params.json
+  local target_params_file="${SHARED_DIR}/nodes/${target}/params.json"
+  if [[ -f "${target_params_file}" ]]; then
+    local merged
+    merged=$(jq -s '.[0] * .[1]' "${target_params_file}" <(echo "${new_params}"))
+    echo "${merged}" > "${target_params_file}"
+    log "Params updated for ${target}: ${merged}"
+  fi
+
+  # Also write retune log for audit trail
   local retune_file="${SHARED_DIR}/evaluations/${cycle_id}/retune_${target}.json"
   cat > "${retune_file}" <<EOF
 {
   "target": "${target}",
   "cycle_id": "${cycle_id}",
   "new_params": ${new_params},
-  "requested_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "status": "pending"
+  "applied_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "status": "applied"
 }
 EOF
 
-  log "Retune request created for ${target}"
+  log "Retune applied for ${target}"
 }

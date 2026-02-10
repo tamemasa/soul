@@ -23,12 +23,13 @@ log() {
 }
 
 load_params() {
-  if [[ -f "${BRAIN_DIR}/params.json" ]]; then
-    export RISK_TOLERANCE=$(jq -r '.risk_tolerance // 0.5' "${BRAIN_DIR}/params.json")
-    export INNOVATION_WEIGHT=$(jq -r '.innovation_weight // 0.5' "${BRAIN_DIR}/params.json")
-    export SAFETY_WEIGHT=$(jq -r '.safety_weight // 0.5' "${BRAIN_DIR}/params.json")
-    export THOROUGHNESS=$(jq -r '.thoroughness // 0.5' "${BRAIN_DIR}/params.json")
-    export CONSENSUS_FLEXIBILITY=$(jq -r '.consensus_flexibility // 0.5' "${BRAIN_DIR}/params.json")
+  local params_file="${SHARED_DIR}/nodes/${NODE_NAME}/params.json"
+  if [[ -f "${params_file}" ]]; then
+    export RISK_TOLERANCE=$(jq -r '.risk_tolerance // 0.5' "${params_file}")
+    export INNOVATION_WEIGHT=$(jq -r '.innovation_weight // 0.5' "${params_file}")
+    export SAFETY_WEIGHT=$(jq -r '.safety_weight // 0.5' "${params_file}")
+    export THOROUGHNESS=$(jq -r '.thoroughness // 0.5' "${params_file}")
+    export CONSENSUS_FLEXIBILITY=$(jq -r '.consensus_flexibility // 0.5' "${params_file}")
     log "Params loaded: risk=${RISK_TOLERANCE} innovation=${INNOVATION_WEIGHT} safety=${SAFETY_WEIGHT}"
   fi
 }

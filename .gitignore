@@ -12,6 +12,11 @@ shared/workspace/*
 shared/workers/*
 !shared/**/.gitkeep
 
+# Node params are tracked (initial + retuned values)
+!shared/nodes/
+!shared/nodes/*/
+!shared/nodes/*/params.json
+
 # Claude Code
 .claude/
 

@@ -334,7 +334,7 @@ cmd_show_params() {
   for node in "${ALL_NODES[@]}"; do
     [[ -z "${target_node}" || "${target_node}" == "${node}" ]] || continue
 
-    local params_file="${SOUL_DIR}/brain/nodes/${node}/params.json"
+    local params_file="${SHARED_DIR}/nodes/${node}/params.json"
     if [[ -f "${params_file}" ]]; then
       local node_color="${NC}"
       case "${node}" in
@@ -361,7 +361,7 @@ cmd_set_param() {
     return
   fi
 
-  local params_file="${SOUL_DIR}/brain/nodes/${node}/params.json"
+  local params_file="${SHARED_DIR}/nodes/${node}/params.json"
   if [[ ! -f "${params_file}" ]]; then
     echo -e "${RED}Node not found: ${node}${NC}"
     return

@@ -90,14 +90,11 @@ soul/
 │   │   └── task-execution.md   # タスク実行テンプレート
 │   └── nodes/
 │       ├── panda/
-│       │   ├── CLAUDE.md       # パンダの性格・判断基準
-│       │   └── params.json     # チューニング可能パラメータ
+│       │   └── CLAUDE.md       # パンダの性格・判断基準
 │       ├── gorilla/
-│       │   ├── CLAUDE.md
-│       │   └── params.json
+│       │   └── CLAUDE.md
 │       └── triceratops/
-│           ├── CLAUDE.md
-│           └── params.json
+│           └── CLAUDE.md
 ├── gateway/
 │   ├── soul-chat.sh            # 対話型チャットUI (REPL + 単発コマンド)
 │   └── commands.sh             # チャットコマンド実装
@@ -113,6 +110,10 @@ soul/
 ├── examples/
 │   └── sample-task.json        # タスク投入サンプル
 └── shared/                     # コンテナ間共有ボリューム (bind mount)
+    ├── nodes/                  # ノードパラメータ (全Brainから読み書き可能)
+    │   ├── panda/params.json
+    │   ├── gorilla/params.json
+    │   └── triceratops/params.json
     ├── inbox/                  # タスクキュー
     ├── discussions/            # 議論プロセス
     ├── decisions/              # 合意結果・実行結果
@@ -291,7 +292,8 @@ Brainノード間の通信は共有ボリューム上のJSONファイルで行�
 
 ## Brain Personality Parameters
 
-`params.json` で各ノードの振る舞いを数値制御する:
+`shared/nodes/{node}/params.json` で各ノードの振る舞いを数値制御する。
+共有ボリューム上にあるため、相互評価によるリチューニングが直接反映される:
 
 | パラメータ | 説明 | Panda | Gorilla | Triceratops |
 |-----------|------|-------|---------|-------------|
