@@ -103,6 +103,12 @@ soul/
 │   ├── entrypoint.sh           # Workerエントリーポイント
 │   └── templates/
 │       └── openclaw/           # OpenClaw用テンプレート
+├── web-ui/
+│   ├── Dockerfile              # Web UIイメージ
+│   ├── server.js               # Express APIサーバー
+│   ├── routes/                 # APIエンドポイント
+│   ├── lib/                    # ファイル読み書きヘルパー
+│   └── public/                 # フロントエンド (HTML/CSS/JS)
 ├── scheduler/
 │   ├── Dockerfile              # スケジューライメージ
 │   └── cron-tasks.sh           # 定期評価・クリーンアップ
@@ -169,13 +175,31 @@ SOUL_GID=1000
 ./soul up        # 全コンテナ起動
 ./soul down      # 全コンテナ停止
 ./soul chat      # 対話型チャットUI起動
+./soul web       # Web UI の URL を表示
 ./soul logs      # Docker logs をフォロー
 ./soul rebuild   # 全コンテナ再ビルド・再起動
 ```
 
 ## User Interface
 
-`./soul chat` で起動するチャット型インターフェイスからBrainシステムをフル操作できる。
+### Web UI
+
+ブラウザから `http://<host-ip>:3000` でアクセスできるWeb UIを搭載。
+
+- **ダッシュボード**: ノード状態・統計サマリ・最近の議論
+- **タスク投入**: フォームからタスクや質問を投入
+- **議論ビューア**: ラウンドごとの投票・意見をタイムライン形式で表示
+- **決定一覧**: 合意結果と実行結果の閲覧
+- **パラメータ管理**: スライダーで各ノードのparams.jsonをリアルタイム編集
+- **評価履歴**: 相互評価サイクルの詳細とリチューニング結果
+- **ログビューア**: ノード別のログをリアルタイム表示
+
+SSE（Server-Sent Events）によりファイル変更を自動検知して画面を更新する。
+ポート番号は `.env` の `WEB_UI_PORT` で変更可能（デフォルト: 3000）。
+
+### Chat UI
+
+`./soul chat` で起動するチャット型インターフェイスからもBrainシステムをフル操作できる。
 
 ```
   ____              _

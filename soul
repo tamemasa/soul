@@ -20,6 +20,11 @@ case "${1:-}" in
     shift || true
     exec bash "${SCRIPT_DIR}/gateway/soul-chat.sh" "$@"
     ;;
+  web)
+    local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    port="${WEB_UI_PORT:-3000}"
+    echo "Soul Web UI: http://${local_ip:-localhost}:${port}"
+    ;;
   logs)
     docker compose -f "${SCRIPT_DIR}/docker-compose.yml" logs -f "${@:2}"
     ;;
@@ -34,6 +39,7 @@ case "${1:-}" in
     echo "  up        Start the Soul system"
     echo "  down      Stop the Soul system"
     echo "  chat      Open interactive chat with the Brains"
+    echo "  web       Show Web UI URL"
     echo "  logs      Follow Docker container logs"
     echo "  rebuild   Rebuild and restart all containers"
     echo ""

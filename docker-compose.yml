@@ -58,6 +58,22 @@ services:
       - soul-net
     restart: unless-stopped
 
+  web-ui:
+    build:
+      context: ./web-ui
+    container_name: soul-web-ui
+    user: "${SOUL_UID:-1000}:${SOUL_GID:-1000}"
+    environment:
+      - SHARED_DIR=/shared
+      - PORT=3000
+    volumes:
+      - shared:/shared
+    ports:
+      - "${WEB_UI_PORT:-3000}:3000"
+    networks:
+      - soul-net
+    restart: unless-stopped
+
 networks:
   soul-net:
     driver: bridge
