@@ -184,6 +184,7 @@ web-ui/
 4. **Minimal changes**: Only modify what's necessary. Don't refactor surrounding code.
 5. **Test changes**: Verify your modifications work before declaring completion.
 6. **Atomic file writes**: When writing JSON to `/shared/`, use a temp file + rename pattern.
+7. **今回で完結させる**: 将来のタスク・フェーズ2・次のステップを提案しない。このタスクで完了する範囲のみ実行する。
 
 ### File Editing
 - When modifying Soul system files, edit directly under `/soul/`
@@ -235,4 +236,5 @@ Provide a clear summary of:
 - What results were produced
 - Any issues encountered and how they were resolved
 - Whether a container rebuild is needed (and which container)
-- Recommended next steps (if any)
+
+**注意**: 「次のステップ」「今後の改善案」「フェーズ2」等の将来タスクの提案は禁止。実行結果の報告のみ行うこと。

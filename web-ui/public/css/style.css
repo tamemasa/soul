@@ -1107,6 +1107,7 @@ body {
 
 /* ─── Responsive ─── */
 @media (max-width: 768px) {
+  /* Bottom navigation */
   #sidebar {
     position: fixed;
     bottom: 0; top: auto; left: 0;
@@ -1115,31 +1116,141 @@ body {
     border-right: none;
     border-top: 1px solid var(--border);
     background: var(--bg-secondary);
+    z-index: 100;
   }
   .logo, .sidebar-footer { display: none; }
   #nav-links {
     flex-direction: row;
     overflow-x: auto;
-    padding: 4px;
+    -webkit-overflow-scrolling: touch;
+    padding: 4px 2px;
     width: 100%;
     justify-content: space-around;
+    gap: 0;
   }
   .nav-item {
     flex-direction: column;
-    font-size: 10px;
-    padding: 6px 8px;
+    font-size: 9px;
+    padding: 6px 4px;
     gap: 2px;
     border-left: none !important;
+    border-radius: 0;
+    min-width: 0;
+    flex: 1;
+    text-align: center;
+    justify-content: center;
   }
-  .nav-item.active { border-left: none; border-bottom: 2px solid var(--accent); }
+  .nav-item.active { border-left: none; border-bottom: 2px solid var(--accent); background: none; }
   .nav-text { display: none; }
-  #app { margin-left: 0; padding: 16px; padding-bottom: 70px; }
-  #app.detail-view { padding-bottom: 0; height: calc(100vh - 56px); }
-  .grid-3 { grid-template-columns: 1fr; }
-  .grid-2 { grid-template-columns: 1fr; }
-  .stats-row { flex-direction: column; }
+  .nav-icon { width: 16px; height: 16px; }
+
+  /* Main content area */
+  #app { margin-left: 0; padding: 12px; padding-bottom: 64px; }
+  #app.detail-view { padding-bottom: 0; height: calc(100vh - 52px); }
+
+  /* Page header */
+  .page-header { margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
+  .page-title { font-size: 17px; }
+
+  /* Grids & stats */
+  .grid-3 { grid-template-columns: 1fr; gap: 8px; }
+  .grid-2 { grid-template-columns: 1fr; gap: 8px; }
+  .stats-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .stat-box { padding: 12px 10px; min-width: 0; }
+  .stat-value { font-size: 20px; }
+  .stat-label { font-size: 10px; }
+
+  /* Cards */
+  .card { padding: 12px 14px; margin-bottom: 8px; border-radius: var(--radius); }
+  .card-title { font-size: 13px; }
+
+  /* Pipeline stepper */
+  .pipeline-stepper {
+    padding: 10px 8px;
+    gap: 0;
+    margin: 16px 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .pipeline-label { font-size: 10px; }
+  .pipeline-connector { width: 16px; margin: 0 2px; }
+
+  /* Timeline */
+  .timeline { margin-left: 4px; padding-left: 16px; }
+  .timeline-item { margin-bottom: 16px; }
+  .timeline-item::before { left: -21px; top: 5px; width: 6px; height: 6px; }
+  .timeline-round { font-size: 10px; margin-bottom: 10px; }
+  .timeline-response { margin-bottom: 12px; }
+  .response-header { flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .response-opinion { font-size: 12px; line-height: 1.6; }
+  .timeline-decision-card { padding: 10px 12px; }
+  .timeline-announcement-card { padding: 10px 12px; }
+  .timeline-comment { padding: 10px 12px; }
+  .timeline-comment .comment-body { font-size: 12px; }
+  .timeline-comment-item::before { left: -20px; }
+
+  /* Execution progress */
+  .execution-progress { padding: 12px; margin-top: 12px; }
+  .execution-progress-title { font-size: 14px; }
+  .execution-result-box { padding: 12px; margin-top: 12px; }
+  .progress-event-text { font-size: 12px; padding: 6px 10px; }
+  .progress-event-tool { padding: 8px 10px; font-size: 11px; }
+  .progress-tool-input { font-size: 10px; }
+
+  /* Announcement */
+  .announcement-box { padding: 12px; }
+  .announcement-summary { font-size: 12px; }
+  .announcement-keypoints li { font-size: 12px; padding-left: 14px; }
+  .announcement-keypoints li::before { width: 6px; height: 6px; top: 10px; }
+
+  /* Result content */
+  .result-content { padding: 12px; font-size: 12px; }
+  .result-content h2 { font-size: 15px; }
+  .result-content h3 { font-size: 13px; }
+
+  /* Forms */
+  .form-input, .form-textarea, .form-select { padding: 8px 10px; font-size: 14px; }
+  .form-textarea { min-height: 80px; }
+
+  /* Tables */
+  .data-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* Parameters */
   .param-row { flex-wrap: wrap; }
-  .param-label { width: 100%; }
+  .param-label { width: 100%; font-size: 11px; }
+
+  /* Comments */
+  .comment-form-footer { flex-wrap: wrap; gap: 8px; }
+
+  /* Mini pipeline */
+  .mini-pipeline { flex-wrap: wrap; gap: 2px; }
+  .mini-pipeline-stage { padding: 3px 7px; font-size: 10px; }
+  .mini-pipeline-arrow { margin: 0 2px; font-size: 10px; }
+
+  /* Badges */
+  .badge { font-size: 10px; padding: 2px 6px; }
+  .badge-node { font-size: 10px; padding: 2px 8px; }
+
+  /* Log viewer */
+  .log-content { padding: 10px; font-size: 10px; max-height: 400px; }
+
+  /* Empty state */
+  .empty-state { padding: 32px 16px; font-size: 12px; }
+
+  /* Buttons - larger tap targets */
+  .btn { padding: 10px 16px; font-size: 13px; }
+  .btn-sm { padding: 7px 12px; font-size: 12px; }
+
+  /* Section label */
+  .section-label { font-size: 10px; margin-bottom: 10px; }
+
+  /* Decision box */
+  .decision-box { padding: 12px; }
 }
 
 /* ─── Buddy Monitor ─── */

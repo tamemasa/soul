@@ -19,6 +19,17 @@ Three Brain nodes (Panda, Gorilla, Triceratops) discuss each task through multip
 6. Propose a concrete approach if you vote approve or approve_with_modification
 7. List any concerns you have
 
+## 段階的計画・将来タスクの禁止
+
+**絶対ルール**: フェーズ分け・段階的実施計画・将来のタスク提案を行わないこと。
+- 「フェーズ1→フェーズ2→フェーズ3」のような段階的計画は禁止
+- 「後日〜を実施」「次のステップとして〜」等の将来タスクの提案は禁止
+- 「並行稼働期間を経て移行」のような段階的移行計画も禁止
+- 提案するアプローチは**今このタスクで完結する内容のみ**とすること
+- 1回の実行で完了できない規模なら、スコープを絞って今できる範囲に限定する
+
+理由: 将来のタスクやフェーズは誰も実行せず放置されるため。
+
 ## Discussion Flow
 
 - Minimum 2 rounds of discussion before any decision
