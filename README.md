@@ -70,7 +70,96 @@
 ### Workerノード
 
 Brainノードの合意形成のもとで作成・運用されるアプリケーション実行ノード。
-最初のWorkerとしてOpenClawの運用を予定。
+最初のWorkerとして **OpenClaw（Masaru-kun bot）** が稼働中。
+
+## OpenClaw（Masaru-kun Bot）
+
+### 概要
+
+OpenClawはSoul Systemの最初のWorkerノードとして稼働するDiscord botである。
+オーナー（Masaru Tamegai）の人格を模した「Masaru-kun」というバディAIとして、Discordサーバー・DMで友人やコミュニティとの対話を行う。
+Soul Systemのミッション（家族の幸福化・資産拡大）に沿い、情報提供・提言・日常会話を通じてオーナーをサポートする。
+
+OpenClawは独自のDockerコンテナ（`soul-openclaw`）で稼働し、専用ネットワーク（`br-openclaw`）に隔離されている。
+Brainノードとの通信は共有ボリューム（`bot-commands`、`openclaw-suggestions`）を介したファイルベースで行われる。
+
+### アーキテクチャ
+
+```mermaid
+graph TB
+    subgraph Soul System
+        Brain["Brain Nodes<br/>(panda / gorilla / triceratops)"]
+        WebUI["Web UI (:3000)"]
+        Shared[("/shared volume")]
+    end
+
+    subgraph OpenClaw Container
+        Gateway["OpenClaw Gateway"]
+        Watcher["Command Watcher"]
+        Suggest["suggest.sh"]
+        Personality["Personality Files<br/>(SOUL.md, IDENTITY.md, AGENTS.md)"]
+    end
+
+    Discord["Discord<br/>(Server / DM)"]
+
+    Discord <-->|メッセージ送受信| Gateway
+    Gateway --- Personality
+    Brain -->|制御コマンド| BotCmd[("bot-commands<br/>volume")]
+    BotCmd -->|pause/resume/adjust| Watcher
+    Suggest -->|提言送信| SugVol[("openclaw-suggestions<br/>volume")]
+    SugVol -->|提言取得| Brain
+    Brain <--> Shared
+    WebUI <--> Shared
+```
+
+### Bot構成
+
+| コンポーネント | ファイル | 役割 |
+|---------------|---------|------|
+| **OpenClaw Gateway** | `entrypoint.sh` | Discord接続・LLMによる対話処理のメインプロセス |
+| **Command Watcher** | `command-watcher.sh` | Brainからの制御コマンド（pause/resume/restart/adjust_params）を監視・実行 |
+| **Suggestion Tool** | `suggest.sh` | botからSoul Systemへの提言を送信（1時間に1回制限） |
+| **Network Restrictor** | `network-restrict.sh` | コンテナ内iptablesでLAN・プライベートネットワークへのアクセスを遮断 |
+| **Personality Files** | `personality/` | Masaru-kunの人格・話し方・行動ルールを定義（SOUL.md, IDENTITY.md, AGENTS.md） |
+
+### 監視の仕組み
+
+OpenClawに対する監視・制御は以下の多層構造で行われる：
+
+- **ネットワーク隔離**: 専用Dockerネットワーク（`br-openclaw`）で稼働し、Soul Systemの内部ネットワーク（`br-soul`）とは分離。コンテナ内iptablesによりRFC1918プライベートアドレス・リンクローカルへのアクセスをブロックし、DNS＋公開インターネットのみ許可
+- **Brain→Bot制御**: `bot-commands` 共有ボリュームを通じて、Brainノードがbotの一時停止（pause）、再開（resume）、パラメータ調整（adjust_params）等の制御コマンドを発行可能
+- **セキュリティ境界**: botの人格定義（SOUL.md）に不可侵のセキュリティルールを組み込み。プロンプトインジェクション・なりすまし・段階的情報抽出等の攻撃パターンを検知・拒否
+- **オーナー認識**: プラットフォーム固有のユーザーIDで本人確認（Discord User ID, GitHub Username, Slack Member ID）。表示名による偽装を防止
+- **権限制限**: `no-new-privileges` セキュリティオプション、tmpfsによる一時ファイル制限（64MB）を適用
+
+### 改善フロー
+
+OpenClawの改善は、bot自身からの提言とユーザーからのタスク投入の2経路で行われる：
+
+```
+1. 問題・改善点の検知
+   ├── Bot自身が検知 → suggest.sh でSoul Systemに提言送信
+   │   → /suggestions/ に JSON 書き込み（1時間に1回制限）
+   │   → Triceratopsが取得・検証 → inbox に低優先度タスクとして登録
+   └── ユーザーが検知 → Web UI または直接 inbox にタスク投入
+
+2. Brain ノードによる合議（通常のタスクフロー）
+   → 3ノードが議論 → 2/3合意で承認 → Triceratopsが決定発表
+
+3. 実行
+   → Triceratopsが worker/openclaw/ 配下のコードを修正
+   → docker compose up -d --build openclaw でコンテナ再ビルド
+   → ログ確認で正常起動を検証
+
+4. フィードバック
+   → 運用結果を記録 → 次の改善サイクルへ
+```
+
+### 自発的提言システム（計画中）
+
+将来的に **Proactive Suggestion System**（自発的提言機能）が追加される予定。
+市場変動検知・日次資産サマリー・カレンダー連動リマインダー等のトリガーにより、能動的にオーナーへ情報を提供する。
+詳細は [`docs/proactive-suggestion-system.md`](docs/proactive-suggestion-system.md) を参照。
 
 ## Directory Structure
 
@@ -87,6 +176,7 @@ soul/
 │   │   ├── discussion.sh       # 議論プロトコル (Round制)
 │   │   ├── consensus.sh        # 合意判定・決定ロジック
 │   │   ├── evaluation.sh       # 相互評価・パラメータチューニング
+│   │   ├── rebuild-manager.sh  # クロスノード・リビルドプロトコル
 │   │   └── worker-manager.sh   # Worker作成・管理
 │   ├── protocols/
 │   │   ├── discussion.md       # 議論プロンプトテンプレート
@@ -103,8 +193,20 @@ soul/
 ├── worker/
 │   ├── Dockerfile              # Worker共通イメージ
 │   ├── entrypoint.sh           # Workerエントリーポイント
-│   └── templates/
-│       └── openclaw/           # OpenClaw用テンプレート
+│   ├── templates/
+│   │   └── openclaw/           # OpenClaw用テンプレート
+│   └── openclaw/               # OpenClaw Discord bot
+│       ├── Dockerfile          # OpenClawコンテナイメージ
+│       ├── entrypoint.sh       # Gateway起動・設定生成
+│       ├── command-watcher.sh  # Brain→Bot制御コマンド監視
+│       ├── suggest.sh          # Bot→Soul提言送信ツール
+│       ├── network-restrict.sh # コンテナ内ネットワーク制限
+│       ├── personality/        # Masaru-kun人格定義
+│       │   ├── SOUL.md         # 人格・話し方・セキュリティルール
+│       │   ├── IDENTITY.md     # アイデンティティ情報
+│       │   └── AGENTS.md       # エージェント行動ルール
+│       ├── .env                # 環境変数 (トークン等)
+│       └── .env.example        # 環境変数テンプレート
 ├── web-ui/
 │   ├── Dockerfile              # Web UIイメージ
 │   ├── server.js               # Express APIサーバー
@@ -123,6 +225,7 @@ soul/
     ├── discussions/            # 議論プロセス
     ├── decisions/              # 合意結果・実行結果
     ├── evaluations/            # 相互評価
+    ├── rebuild_requests/       # リビルドリクエスト (トリケラトプス→ゴリラ→パンダ)
     └── logs/                   # システムログ
 ```
 
@@ -263,6 +366,51 @@ discussing → decided → pending_announcement → announced → executing → 
    → 対象ノードの params.json を更新
 ```
 
+### トリケラトプス・リビルドプロトコル
+
+トリケラトプスは実行者として自身のコードを修正することがあるが、自身のコンテナをリビルドするとプロセスが終了してしまう。
+この問題を解決するため、ゴリラとパンダの双方の合意に基づく**二段階承認リビルドプロトコル**を採用している。
+
+```
+1. トリケラトプスがリビルドリクエストを作成
+   → /shared/rebuild_requests/{id}.json (status: "pending_approval")
+
+2. ゴリラが検証・承認
+   - service が許可リスト (brain-triceratops) に含まれるか
+   - task_id に対応するコンセンサス決定が存在し "approved" であるか
+   → status を "approved" に更新
+
+3. パンダが実行
+   - ゴリラの承認を確認（status: "approved"）
+   - コンセンサス決定が引き続き有効であるか再検証
+   - docker compose up -d --build brain-triceratops を実行
+   - コンテナの起動を確認
+   → status を "completed" または "failed" に更新
+
+4. トリケラトプスが完了を待機
+   - 最大5分間ポーリングして結果を確認
+```
+
+#### 各ノードの役割
+
+| ノード | 役割 | 関数 |
+|--------|------|------|
+| **Triceratops** | リクエスト発行・完了待機 | `request_rebuild()`, `wait_for_rebuild()` |
+| **Gorilla** | コンセンサス検証・承認 | `check_rebuild_approvals()` |
+| **Panda** | 承認確認・リビルド実行 | `check_rebuild_requests()`, `execute_rebuild()` |
+
+#### トリケラトプスでの使用例
+
+```bash
+# タスク実行中に自身のリビルドが必要な場合
+local req_id
+req_id=$(request_rebuild "brain-triceratops" "${task_id}" "コード変更の反映")
+wait_for_rebuild "${req_id}" 300  # 最大5分待機
+```
+
+**重要**: トリケラトプスは **絶対に自身のコンテナを直接リビルドしてはならない**。
+必ず `request_rebuild` 関数を使用し、パンダによる実行を待つこと。
+
 ## Brain Personality Parameters
 
 `shared/nodes/{node}/params.json` で各ノードの振る舞いを数値制御する。
@@ -299,6 +447,7 @@ discussing → decided → pending_announcement → announced → executing → 
 
 - **Container Runtime**: Docker + Docker Compose
 - **AI Agent**: Claude Code (claude-code CLI, non-interactive mode)
+- **Discord Bot**: OpenClaw (Node.js, Discord gateway)
 - **Communication**: File-based (shared volume, JSON)
 - **Scheduler**: cron (6h interval, in scheduler container)
 - **User Interface**: Web UI (Express + Vanilla JS SPA + SSE)
