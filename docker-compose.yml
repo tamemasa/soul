@@ -18,6 +18,7 @@ services:
       - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
       - ${PWD}:/soul
       - /var/run/docker.sock:/var/run/docker.sock
+      - bot-commands:/shared/bot_commands
     networks:
       - soul-net
     restart: unless-stopped
@@ -64,6 +65,8 @@ services:
       - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
       - ${PWD}:/soul
       - /var/run/docker.sock:/var/run/docker.sock
+      - openclaw-home:/openclaw:ro
+      - openclaw-suggestions:/openclaw-suggestions
     networks:
       - soul-net
     restart: unless-stopped
@@ -104,6 +107,8 @@ services:
     volumes:
       - openclaw-data:/app/data
       - openclaw-home:/home/openclaw/.openclaw
+      - openclaw-suggestions:/suggestions
+      - bot-commands:/bot_commands
     networks:
       - openclaw-net
     restart: unless-stopped
@@ -133,3 +138,5 @@ volumes:
       device: ${PWD}/shared
   openclaw-data:
   openclaw-home:
+  openclaw-suggestions:
+  bot-commands:
