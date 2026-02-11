@@ -54,9 +54,9 @@ get_active_session() {
     done
     echo "${latest}"
   else
-    # Fallback: use docker exec to list sessions
+    # Fallback: use docker exec to list sessions (sh -c needed for glob expansion)
     local files
-    files=$(docker exec "${OPENCLAW_CONTAINER}" ls -t "${OPENCLAW_REMOTE_SESSIONS}"/*.jsonl 2>/dev/null | head -1)
+    files=$(docker exec "${OPENCLAW_CONTAINER}" sh -c "ls -t ${OPENCLAW_REMOTE_SESSIONS}/*.jsonl" 2>/dev/null | head -1)
     if [[ -n "${files}" ]]; then
       echo "docker:${files}"
     else
