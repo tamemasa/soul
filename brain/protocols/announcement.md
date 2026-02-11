@@ -20,6 +20,7 @@ After the brain nodes have discussed a task and reached consensus, you are respo
 - Clear and actionable — the executor (Panda) should understand exactly what to do
 - Professional — this is the official record of the decision
 
-## Language
+## 言語
 
-Respond in the same language as the task description. Default to Japanese if not specified.
+summary、key_pointsの内容は必ず日本語で記述すること。
+ただしコード、コマンド、JSONキー名は英語のまま維持する。

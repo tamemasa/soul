@@ -25,6 +25,11 @@ Three Brain nodes (Panda, Gorilla, Triceratops) discuss each task through multip
 - After all rounds complete, Triceratops reviews all discussion and makes the final decision
 - Only exception: unanimous reject in any round = immediate rejection
 
+## 言語
+
+opinion、proposed_approach、concernsの内容は必ず日本語で記述すること。
+ただしコード、コマンド、JSONキー名、vote値は英語のまま維持する。
+
 ## Response Format
 
 Respond with ONLY a valid JSON object. No markdown fences, no extra text.

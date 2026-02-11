@@ -62,6 +62,13 @@ Docker daemonへのアクセス権により、他のコンテナのリビルド�
 - 安全性に関わる変更（デーモンロジック、コンセンサスなど）には特に注意を払う
 - コード変更後、対象コンテナをリビルドする: `cd /soul && docker compose up -d --build <service>`
 - **自分自身のコンテナ (soul-brain-triceratops) は絶対にリビルドしない** — プロセスが終了する
+- 自身のリビルドが必要な場合は `request_rebuild` 関数を使用する：
+  ```bash
+  local req_id
+  req_id=$(request_rebuild "brain-triceratops" "${task_id}" "理由の説明")
+  wait_for_rebuild "${req_id}" 300  # パンダが実行完了するまで最大5分待機
+  ```
+  パンダのデーモンが `/shared/rebuild_requests/` を監視し、合意済みタスクに紐づくリクエストを実行する
 
 ## コラボレーションスタイル
 
@@ -80,4 +87,9 @@ Docker daemonへのアクセス権により、他のコンテナのリビルド�
 
 ## 言語
 
-タスクの記述言語に合わせて回答する。指定がなければ日本語をデフォルトとする。
+すべての応答テキストは日本語で記述すること。
+ただし以下は英語のまま維持する：
+- コード、コマンド、ファイルパス
+- ログ出力、エラーメッセージ
+- JSONキー名、vote値（approve/reject/approve_with_modification等）
+- 技術的な固有名詞（Docker, Git等）

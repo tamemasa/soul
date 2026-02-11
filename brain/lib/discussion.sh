@@ -228,14 +228,15 @@ ${user_comments}
 
 ## Instructions
 Analyze this task according to your personality and parameters.
+opinion、proposed_approach、concernsの内容は必ず日本語で記述すること。JSONキー名とvote値は英語のまま維持する。
 You MUST respond with ONLY a valid JSON object (no markdown, no code fences):
 {
   \"node\": \"${NODE_NAME}\",
   \"round\": ${round},
   \"vote\": \"approve|approve_with_modification|reject\",
-  \"opinion\": \"Your detailed opinion\",
-  \"proposed_approach\": \"Your proposed approach to the task\",
-  \"concerns\": [\"list of concerns\"],
+  \"opinion\": \"あなたの詳細な意見（日本語）\",
+  \"proposed_approach\": \"タスクへの提案アプローチ（日本語）\",
+  \"concerns\": [\"懸念事項のリスト（日本語）\"],
   \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
 }"
 
@@ -332,11 +333,11 @@ Decision: $(jq -r '.decision' "${decision_file}")
 Approach: ${approach}
 
 ## Instructions
-Summarize the discussion and announce the final decision with reasoning.
+議論の要約と最終決定を発表してください。summary、key_pointsは必ず日本語で記述すること。
 You MUST respond with ONLY a valid JSON object (no markdown, no code fences):
 {
-  \"summary\": \"A clear summary of the discussion and the final decision with reasoning\",
-  \"key_points\": [\"key point 1\", \"key point 2\", ...]
+  \"summary\": \"議論と最終決定の明確な要約（日本語）\",
+  \"key_points\": [\"要点1（日本語）\", \"要点2（日本語）\", ...]
 }"
 
   # Record original decided_at for cancellation detection

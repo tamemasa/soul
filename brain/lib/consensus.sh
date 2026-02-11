@@ -113,27 +113,29 @@ Concerns: ${concerns}"
   local task_content
   task_content=$(cat "${discussion_dir}/task.json")
 
-  local prompt="You are the Triceratops chairperson in the Soul system.
-After ${final_round} rounds of discussion among all brain nodes, you must now render the final decision.
+  local prompt="あなたはSoul Systemのトリケラトプス議長です。
+全ブレインノードによる${final_round}ラウンドの議論を経て、最終判断を下してください。
 
-## Task:
+## タスク:
 ${task_content}
 
-## Full Discussion History:
+## 議論全履歴:
 ${all_responses}
 ${user_comments}
 
-## Instructions:
-Review all perspectives from the discussion. As the chairperson:
-1. Synthesize the key arguments from all nodes
-2. Consider safety concerns (Panda), innovation opportunities (Gorilla), and practical balance
-3. Make a final decision that best serves the task goals
+## 指示:
+議論のすべての観点をレビューし、議長として：
+1. 全ノードの主要な論点を統合する
+2. 安全性の懸念（パンダ）、革新の機会（ゴリラ）、実用的バランスを考慮する
+3. タスクの目標に最も適した最終判断を下す
+
+reasoning、final_approachは日本語で記述すること。JSONキー名とdecision値は英語のまま維持する。
 
 Respond with ONLY a valid JSON object:
 {
   \"decision\": \"approved|rejected\",
-  \"final_approach\": \"The synthesized approach incorporating the best ideas from discussion\",
-  \"reasoning\": \"Why this decision was made, referencing specific node arguments\",
+  \"final_approach\": \"議論の最良のアイデアを統合したアプローチ\",
+  \"reasoning\": \"この判断に至った理由（各ノードの論点を参照）\",
   \"decided_by\": \"triceratops\"
 }"
 

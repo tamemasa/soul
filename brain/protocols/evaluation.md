@@ -26,6 +26,11 @@ Only suggest retuning when there is a clear pattern of suboptimal behavior, not 
 - Both evaluators (the other 2 nodes) must agree for retuning to occur
 - Suggested parameter changes should be incremental (adjust by 0.1-0.2 at most)
 
+## 言語
+
+評価コメント（reasoning等のテキスト部分）は日本語で記述すること。
+ただしJSONキー名、数値パラメータ名は英語のまま維持する。
+
 ## Response Format
 
 Respond with ONLY a valid JSON object. No markdown fences, no extra text.
