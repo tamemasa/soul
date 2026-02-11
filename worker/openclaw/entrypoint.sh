@@ -120,6 +120,7 @@ config.channels = config.channels || {};
 config.channels.discord = Object.assign(config.channels.discord || {}, {
   enabled: true,
   token: process.env.DISCORD_BOT_TOKEN,
+  allowBots: true,
   guilds: { '*': { requireMention: false } },
   dm: { enabled: true, policy: 'pairing' },
   textChunkLimit: 2000,
