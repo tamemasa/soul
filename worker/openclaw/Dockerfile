@@ -22,11 +22,18 @@ WORKDIR /app
 
 COPY entrypoint.sh /app/entrypoint.sh
 COPY network-restrict.sh /app/network-restrict.sh
-RUN chmod +x /app/entrypoint.sh /app/network-restrict.sh
+COPY suggest.sh /app/suggest.sh
+COPY command-watcher.sh /app/command-watcher.sh
+RUN chmod +x /app/entrypoint.sh /app/network-restrict.sh /app/suggest.sh /app/command-watcher.sh
+
+# Install jq for JSON handling in suggest.sh
+RUN apt-get update && apt-get install -y --no-install-recommends jq \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copy Masaru personality files
 COPY personality/SOUL.md /app/personality/SOUL.md
 COPY personality/IDENTITY.md /app/personality/IDENTITY.md
+COPY personality/AGENTS.md /app/personality/AGENTS.md
 
 # Start as root so we can apply iptables rules, then drop to openclaw via gosu
 ENV HOME=/home/openclaw
