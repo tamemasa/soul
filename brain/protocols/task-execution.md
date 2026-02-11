@@ -13,9 +13,9 @@ The Soul system is an autonomous multi-agent framework with 3 brain nodes that d
 
 | Container | Role |
 |-----------|------|
-| `soul-brain-panda` | Safety-focused node. Primary executor of approved tasks |
+| `soul-brain-panda` | Safety-focused node. Risk management and asset preservation perspective |
 | `soul-brain-gorilla` | Innovation-driven coordinator. Creates discussions, triggers consensus |
-| `soul-brain-triceratops` | Mediator. Announces decisions, breaks deadlocks |
+| `soul-brain-triceratops` | Mediator + executor. Announces decisions, breaks deadlocks, executes approved tasks |
 | `soul-scheduler` | Cron-based evaluation triggers (every 6h) |
 | `soul-web-ui` | Express.js + Vanilla JS SPA dashboard (port 3000) |
 
@@ -32,7 +32,7 @@ inbox/ → discussions/ → decisions/ → execution → archive/
 2. 3 nodes discuss in rounds (max 3) under `discussions/{task_id}/`
 3. Gorilla evaluates consensus → `decisions/{task_id}.json`
 4. Triceratops announces the decision
-5. Executor (usually panda) executes → `decisions/{task_id}_result.json`
+5. Executor (triceratops) executes → `decisions/{task_id}_result.json`
 6. Task moved to `archive/`
 
 ### Brain Daemon (`/brain/soul-daemon.sh`)

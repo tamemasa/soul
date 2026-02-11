@@ -11,6 +11,7 @@ services:
     environment:
       - NODE_NAME=panda
       - HOME=/home/soul
+      - CLAUDE_MODEL=sonnet
     volumes:
       - shared:/shared
       - ./brain/nodes/panda/CLAUDE.md:/brain/CLAUDE.md:ro
@@ -33,6 +34,7 @@ services:
     environment:
       - NODE_NAME=gorilla
       - HOME=/home/soul
+      - CLAUDE_MODEL=sonnet
     volumes:
       - shared:/shared
       - ./brain/nodes/gorilla/CLAUDE.md:/brain/CLAUDE.md:ro
@@ -55,6 +57,7 @@ services:
     environment:
       - NODE_NAME=triceratops
       - HOME=/home/soul
+      - CLAUDE_MODEL=opus
     volumes:
       - shared:/shared
       - ./brain/nodes/triceratops/CLAUDE.md:/brain/CLAUDE.md:ro

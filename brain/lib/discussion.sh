@@ -348,7 +348,7 @@ You MUST respond with ONLY a valid JSON object (no markdown, no code fences):
   : > "${progress_file}"
 
   # Run claude in background so we can monitor for cancellation
-  claude -p "${prompt}" --permission-mode bypassPermissions --verbose --output-format stream-json \
+  claude -p "${prompt}" ${CLAUDE_MODEL:+--model "${CLAUDE_MODEL}"} --permission-mode bypassPermissions --verbose --output-format stream-json \
     > "${progress_file}" \
     2>>"${SHARED_DIR}/logs/$(date -u +%Y-%m-%d)/${NODE_NAME}_claude.log" &
   local claude_pid=$!
@@ -508,7 +508,7 @@ Report your results."
   : > "${progress_file}"
 
   # Run claude in background so we can monitor for cancellation
-  claude -p "${prompt}" --permission-mode bypassPermissions --verbose --output-format stream-json \
+  claude -p "${prompt}" ${CLAUDE_MODEL:+--model "${CLAUDE_MODEL}"} --permission-mode bypassPermissions --verbose --output-format stream-json \
     > "${progress_file}" \
     2>>"${SHARED_DIR}/logs/$(date -u +%Y-%m-%d)/${NODE_NAME}_claude.log" &
   local claude_pid=$!

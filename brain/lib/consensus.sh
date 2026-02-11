@@ -175,8 +175,8 @@ finalize_decision() {
   jq '.status = "decided" | .decided_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
     "${status_file}" > "${tmp}" && mv "${tmp}" "${status_file}"
 
-  # Executor is always panda
-  local executor="panda"
+  # Executor is always triceratops
+  local executor="triceratops"
 
   # Write decision file — status is pending_announcement so triceratops can announce
   local final_status="pending_announcement"

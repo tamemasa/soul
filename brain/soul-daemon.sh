@@ -46,7 +46,7 @@ invoke_claude() {
 $(cat "${context_file}")"
   fi
 
-  claude -p "${full_prompt}" --permission-mode bypassPermissions --output-format text 2>>"${SHARED_DIR}/logs/$(date -u +%Y-%m-%d)/${NODE_NAME}_claude.log" || {
+  claude -p "${full_prompt}" ${CLAUDE_MODEL:+--model "${CLAUDE_MODEL}"} --permission-mode bypassPermissions --output-format text 2>>"${SHARED_DIR}/logs/$(date -u +%Y-%m-%d)/${NODE_NAME}_claude.log" || {
     log "ERROR: Claude invocation failed"
     echo '{"error": "claude invocation failed"}'
   }
@@ -99,7 +99,7 @@ main_loop() {
     # 5. Check for decisions pending announcement (triceratops only)
     check_pending_announcements || log "WARN: check_pending_announcements error"
 
-    # 6. Check for announced decisions that need execution (panda)
+    # 6. Check for announced decisions that need execution (triceratops)
     check_pending_decisions || log "WARN: check_pending_decisions error"
 
     sleep "${POLL_INTERVAL}"
