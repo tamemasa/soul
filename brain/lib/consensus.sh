@@ -183,7 +183,43 @@ finalize_decision() {
   # Write decision file — status is pending_announcement so triceratops can announce
   local final_status="pending_announcement"
   if [[ "${decision}" == "rejected" ]]; then
-    final_status="rejected"
+    # Check if there's a previous execution in history that needs rollback
+    local history_file="${SHARED_DIR}/decisions/${task_id}_history.json"
+    local has_prev_exec=false
+    if [[ -f "${history_file}" ]]; then
+      local exec_count
+      exec_count=$(jq '[.[] | select(.result != null and .result.result != null)] | length' "${history_file}" 2>/dev/null || echo 0)
+      [[ ${exec_count} -gt 0 ]] && has_prev_exec=true
+    fi
+
+    if [[ "${has_prev_exec}" == "true" ]]; then
+      # Previous execution exists — trigger rollback via announcement+execution pipeline
+      final_status="pending_announcement"
+
+      local rb="【ロールバック実行】\nこのタスクは以前実行済みですが、再議論でリジェクトされました。前回の実行内容を取り消してください。\n"
+
+      # Include user's request
+      local comments_file="${discussion_dir}/comments.json"
+      if [[ -f "${comments_file}" ]]; then
+        local last_msg
+        last_msg=$(jq -r '[.[] | select(.author == "user")] | last | .message // ""' "${comments_file}" 2>/dev/null)
+        [[ -n "${last_msg}" ]] && rb="${rb}\n## ユーザの要求\n${last_msg}\n"
+      fi
+
+      # Include previous execution result so executor knows what to undo
+      local prev_result
+      prev_result=$(jq -r '[.[] | select(.result != null and .result.result != null)] | last | .result.result // ""' "${history_file}" 2>/dev/null)
+      [[ -n "${prev_result}" ]] && rb="${rb}\n## 前回の実行結果（取り消し対象）\n${prev_result}\n"
+
+      # Prepend triceratops rejection reasoning if available
+      [[ -n "${approach}" ]] && rb="## リジェクト理由\n${approach}\n\n${rb}"
+
+      rb="${rb}\n## 指示\n上記の前回実行内容を元に戻してください。ファイルの変更、設定の追加等があれば削除・復元してください。"
+      approach="${rb}"
+      log "Previous execution found for ${task_id}, triggering rollback execution"
+    else
+      final_status="rejected"
+    fi
   fi
 
   local escaped_approach
