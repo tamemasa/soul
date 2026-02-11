@@ -17,6 +17,17 @@ shared/workers/*
 !shared/nodes/*/
 !shared/nodes/*/params.json
 
+# pnpm cache
+shared/.pnpm-store/
+
+# Attachments (user uploads)
+shared/attachments/*
+!shared/attachments/.gitkeep
+
+# Runtime health/activity data
+shared/health.json
+shared/nodes/*/activity.json
+
 # Claude Code
 .claude/
 
