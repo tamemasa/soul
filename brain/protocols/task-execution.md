@@ -210,6 +210,21 @@ docker compose -f /soul/docker-compose.yml restart web-ui
 - Rebuild only the specific container that was modified
 - Check logs after rebuild to verify successful startup
 
+### Self-Rebuild (Triceratops Only)
+
+Triceratops cannot rebuild itself directly. Use the cross-node rebuild mechanism:
+
+```bash
+# Request Panda to rebuild brain-triceratops
+local req_id
+req_id=$(request_rebuild "brain-triceratops" "${task_id}" "Reason for rebuild")
+# Wait for Panda's daemon to execute the rebuild (max 5 minutes)
+wait_for_rebuild "${req_id}" 300
+```
+
+The `request_rebuild` function writes to `/shared/rebuild_requests/` and Panda's daemon
+automatically detects and executes the rebuild after verifying the task was approved through consensus.
+
 ---
 
 ## Output Format

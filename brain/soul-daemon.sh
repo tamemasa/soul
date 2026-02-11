@@ -11,6 +11,10 @@ source "${BRAIN_DIR}/lib/discussion.sh"
 source "${BRAIN_DIR}/lib/evaluation.sh"
 source "${BRAIN_DIR}/lib/consensus.sh"
 source "${BRAIN_DIR}/lib/worker-manager.sh"
+source "${BRAIN_DIR}/lib/buddy-monitor.sh"
+source "${BRAIN_DIR}/lib/rebuild-manager.sh"
+source "${BRAIN_DIR}/lib/proactive-suggestions.sh"
+source "${BRAIN_DIR}/lib/panda-openclaw-monitor.sh"
 
 log() {
   local timestamp
@@ -73,6 +77,8 @@ ensure_dirs() {
   mkdir -p "${SHARED_DIR}/evaluations"
   mkdir -p "${SHARED_DIR}/logs"
   mkdir -p "${SHARED_DIR}/nodes/${NODE_NAME}"
+  mkdir -p "${SHARED_DIR}/buddy"
+  mkdir -p "${SHARED_DIR}/rebuild_requests"
   set_activity "idle"
 }
 
@@ -101,6 +107,22 @@ main_loop() {
 
     # 6. Check for announced decisions that need execution (triceratops)
     check_pending_decisions || log "WARN: check_pending_decisions error"
+
+    # 7. Check for rebuild approvals (gorilla) and execution (panda)
+    check_rebuild_approvals || log "WARN: check_rebuild_approvals error"
+    check_rebuild_requests || log "WARN: check_rebuild_requests error"
+
+    # 8. Pick up OpenClaw suggestions (triceratops only)
+    check_openclaw_suggestions || log "WARN: check_openclaw_suggestions error"
+
+    # 9. Monitor OpenClaw buddy health (triceratops only, self-throttled to 15min)
+    check_openclaw_health || log "WARN: check_openclaw_health error"
+
+    # 10. Proactive suggestion engine (triceratops only, self-throttled to 60s)
+    check_proactive_suggestions || log "WARN: check_proactive_suggestions error"
+
+    # 11. Panda's OpenClaw policy compliance monitor (panda only, self-throttled to 5min)
+    check_panda_openclaw_monitor || log "WARN: check_panda_openclaw_monitor error"
 
     sleep "${POLL_INTERVAL}"
   done

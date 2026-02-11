@@ -216,6 +216,129 @@ check_pending_decisions() {
   done
 }
 
+check_openclaw_suggestions() {
+  # Only triceratops picks up OpenClaw suggestions
+  [[ "${NODE_NAME}" == "triceratops" ]] || return 0
+
+  local suggestions_dir="/openclaw-suggestions"
+  [[ -d "${suggestions_dir}" ]] || return 0
+
+  local ratelimit_file="${SHARED_DIR}/openclaw/suggestions/_ratelimit.json"
+  local ONE_HOUR=3600
+
+  for suggestion_file in "${suggestions_dir}"/*.json; do
+    [[ -f "${suggestion_file}" ]] || continue
+
+    local filename
+    filename=$(basename "${suggestion_file}")
+
+    # Read and validate suggestion
+    local title description
+    title=$(jq -r '.title // ""' "${suggestion_file}" 2>/dev/null)
+    description=$(jq -r '.description // ""' "${suggestion_file}" 2>/dev/null)
+
+    if [[ -z "${title}" ]]; then
+      log "OpenClaw suggestion ${filename}: missing title, discarding"
+      rm -f "${suggestion_file}"
+      continue
+    fi
+
+    # Sanitize: truncate long inputs
+    title="${title:0:200}"
+    description="${description:0:2000}"
+
+    # Rate limit check (1 suggestion per hour)
+    local now_epoch last_epoch elapsed
+    now_epoch=$(date +%s)
+
+    if [[ -f "${ratelimit_file}" ]]; then
+      local last_ts
+      last_ts=$(jq -r '.openclaw // ""' "${ratelimit_file}" 2>/dev/null)
+      if [[ -n "${last_ts}" ]]; then
+        last_epoch=$(date -d "${last_ts}" +%s 2>/dev/null || echo 0)
+        elapsed=$((now_epoch - last_epoch))
+        if [[ ${elapsed} -lt ${ONE_HOUR} ]]; then
+          local remaining=$(( (ONE_HOUR - elapsed) / 60 ))
+          log "OpenClaw suggestion rate-limited (${remaining}min remaining), discarding: ${title}"
+          rm -f "${suggestion_file}"
+          continue
+        fi
+      fi
+    fi
+
+    # Generate task ID and register as inbox task
+    local ts rand task_id now_ts
+    ts="${now_epoch}"
+    rand=$((RANDOM % 9000 + 1000))
+    task_id="task_${ts}_${rand}"
+    now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    local task_json
+    task_json=$(jq -n \
+      --arg id "${task_id}" \
+      --arg title "[OpenClaw] ${title}" \
+      --arg desc "${description:-${title}}" \
+      --arg created "${now_ts}" \
+      '{
+        id: $id,
+        type: "task",
+        title: $title,
+        description: $desc,
+        priority: "low",
+        source: "openclaw",
+        created_at: $created,
+        status: "pending"
+      }')
+
+    # Write task to inbox atomically
+    local inbox_file="${SHARED_DIR}/inbox/${task_id}.json"
+    local tmp_inbox
+    tmp_inbox=$(mktemp)
+    echo "${task_json}" > "${tmp_inbox}"
+    mv "${tmp_inbox}" "${inbox_file}"
+
+    # Log suggestion record
+    local suggestion_record
+    suggestion_record=$(jq -n \
+      --arg id "${task_id}" \
+      --arg title "${title}" \
+      --arg desc "${description}" \
+      --arg task_id "${task_id}" \
+      --arg created "${now_ts}" \
+      '{
+        id: $id,
+        title: $title,
+        description: $desc,
+        task_id: $task_id,
+        source: "openclaw-direct",
+        created_at: $created
+      }')
+
+    local suggestions_log_dir="${SHARED_DIR}/openclaw/suggestions"
+    mkdir -p "${suggestions_log_dir}"
+    local tmp_sugg
+    tmp_sugg=$(mktemp)
+    echo "${suggestion_record}" > "${tmp_sugg}"
+    mv "${tmp_sugg}" "${suggestions_log_dir}/${task_id}.json"
+
+    # Update rate limit (merge with existing data)
+    mkdir -p "$(dirname "${ratelimit_file}")"
+    local existing_rl
+    existing_rl=$(cat "${ratelimit_file}" 2>/dev/null || echo '{}')
+    local ratelimit_data
+    ratelimit_data=$(echo "${existing_rl}" | jq --arg ts "${now_ts}" '. + { openclaw: $ts, global: $ts }')
+    local tmp_rl
+    tmp_rl=$(mktemp)
+    echo "${ratelimit_data}" > "${tmp_rl}"
+    mv "${tmp_rl}" "${ratelimit_file}"
+
+    # Remove processed suggestion file
+    rm -f "${suggestion_file}"
+
+    log "OpenClaw suggestion registered as task ${task_id}: ${title}"
+  done
+}
+
 check_evaluation_requests() {
   local evaluations_dir="${SHARED_DIR}/evaluations"
   for eval_dir in "${evaluations_dir}"/*/; do
