@@ -113,7 +113,8 @@ soul/
 ├── scheduler/
 │   ├── Dockerfile              # スケジューライメージ
 │   └── cron-tasks.sh           # 定期評価・クリーンアップ
-├── network-restrict.sh           # LAN隔離用iptablesルール管理
+├── scripts/
+│   └── network-restrict.sh      # LAN隔離用iptablesルール管理
 └── shared/                     # コンテナ間共有ボリューム (bind mount)
     ├── nodes/                  # ノードパラメータ (全Brainから読み書き可能)
     │   ├── panda/params.json
@@ -356,11 +357,11 @@ discussing → decided → pending_announcement → announced → executing → 
 - **自動適用**: `./soul up` 時にルール適用、`./soul down` 時に除去
 - **手動操作**:
   ```bash
-  sudo ./network-restrict.sh status   # 現在のルール確認
-  sudo ./network-restrict.sh apply    # ルール適用
-  sudo ./network-restrict.sh remove   # ルール除去
+  sudo ./scripts/network-restrict.sh status   # 現在のルール確認
+  sudo ./scripts/network-restrict.sh apply    # ルール適用
+  sudo ./scripts/network-restrict.sh remove   # ルール除去
   ```
-- **LAN範囲の変更**: `network-restrict.sh` 内の `LAN_SUBNET` を編集
+- **LAN範囲の変更**: `scripts/network-restrict.sh` 内の `LAN_SUBNET` を編集
 
 ## Tech Stack
 
