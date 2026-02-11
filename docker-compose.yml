@@ -2,8 +2,12 @@ services:
   brain-panda:
     build:
       context: ./brain
+      args:
+        DOCKER_GID: "${DOCKER_GID:-984}"
     container_name: soul-brain-panda
     user: "${SOUL_UID:-1000}:${SOUL_GID:-1000}"
+    group_add:
+      - "${DOCKER_GID:-984}"
     environment:
       - NODE_NAME=panda
       - HOME=/home/soul
@@ -11,6 +15,8 @@ services:
       - shared:/shared
       - ./brain/nodes/panda/CLAUDE.md:/brain/CLAUDE.md:ro
       - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+      - ${PWD}:/soul
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - soul-net
     restart: unless-stopped
@@ -18,8 +24,12 @@ services:
   brain-gorilla:
     build:
       context: ./brain
+      args:
+        DOCKER_GID: "${DOCKER_GID:-984}"
     container_name: soul-brain-gorilla
     user: "${SOUL_UID:-1000}:${SOUL_GID:-1000}"
+    group_add:
+      - "${DOCKER_GID:-984}"
     environment:
       - NODE_NAME=gorilla
       - HOME=/home/soul
@@ -27,6 +37,8 @@ services:
       - shared:/shared
       - ./brain/nodes/gorilla/CLAUDE.md:/brain/CLAUDE.md:ro
       - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+      - ${PWD}:/soul
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - soul-net
     restart: unless-stopped
@@ -34,8 +46,12 @@ services:
   brain-triceratops:
     build:
       context: ./brain
+      args:
+        DOCKER_GID: "${DOCKER_GID:-984}"
     container_name: soul-brain-triceratops
     user: "${SOUL_UID:-1000}:${SOUL_GID:-1000}"
+    group_add:
+      - "${DOCKER_GID:-984}"
     environment:
       - NODE_NAME=triceratops
       - HOME=/home/soul
@@ -43,6 +59,8 @@ services:
       - shared:/shared
       - ./brain/nodes/triceratops/CLAUDE.md:/brain/CLAUDE.md:ro
       - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+      - ${PWD}:/soul
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - soul-net
     restart: unless-stopped
@@ -74,11 +92,34 @@ services:
       - soul-net
     restart: unless-stopped
 
+  openclaw:
+    build:
+      context: ./worker/openclaw
+    container_name: soul-openclaw
+    env_file:
+      - ./worker/openclaw/.env
+    volumes:
+      - openclaw-data:/app/data
+      - openclaw-home:/home/openclaw/.openclaw
+    networks:
+      - openclaw-net
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m
+
 networks:
   soul-net:
     driver: bridge
     driver_opts:
       com.docker.network.bridge.name: br-soul
+  openclaw-net:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-openclaw
 
 volumes:
   shared:
@@ -87,3 +128,5 @@ volumes:
       type: none
       o: bind
       device: ${PWD}/shared
+  openclaw-data:
+  openclaw-home:
