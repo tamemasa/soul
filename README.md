@@ -115,8 +115,6 @@ soul/
 │   └── cron-tasks.sh           # 定期評価・クリーンアップ
 ├── scripts/
 │   └── network-restrict.sh      # LAN隔離用iptablesルール管理
-├── examples/
-│   └── sample-task.json        # タスク投入サンプル
 └── shared/                     # コンテナ間共有ボリューム (bind mount)
     ├── nodes/                  # ノードパラメータ (全Brainから読み書き可能)
     │   ├── panda/params.json

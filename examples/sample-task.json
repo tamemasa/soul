@@ -1,9 +1,0 @@
-{
-  "id": "task_sample_001",
-  "type": "task",
-  "title": "共有ワークスペースにシステムステータスレポートを生成する",
-  "description": "Soul systemの現在のステータスをまとめたレポートを /shared/workspace/status-report.md に生成してください。各Brainノードの稼働状態、直近の議論履歴、Workerノードの状態を含めてください。",
-  "priority": "low",
-  "created_at": "2026-02-10T12:00:00Z",
-  "status": "pending"
-}
