@@ -293,6 +293,48 @@ check_openclaw_suggestions() {
     title="${title:0:200}"
     description="${description:0:2000}"
 
+    # Duplicate check: skip if an [OpenClaw] task with the same title already exists
+    local openclaw_title="[OpenClaw] ${title}"
+    local duplicate_found=false
+
+    # Check inbox tasks
+    for existing_task in "${SHARED_DIR}/inbox"/*.json; do
+      [[ -f "${existing_task}" ]] || continue
+      local existing_title
+      existing_title=$(jq -r '.title // ""' "${existing_task}" 2>/dev/null)
+      if [[ "${existing_title}" == "${openclaw_title}" ]]; then
+        duplicate_found=true
+        break
+      fi
+    done
+
+    # Check decisions (in-progress, executing, completed, etc.)
+    if [[ "${duplicate_found}" == "false" ]]; then
+      for existing_decision in "${SHARED_DIR}/decisions"/*.json; do
+        [[ -f "${existing_decision}" ]] || continue
+        # Skip auxiliary files
+        local dec_basename
+        dec_basename=$(basename "${existing_decision}")
+        [[ "${dec_basename}" != *_result.json ]] || continue
+        [[ "${dec_basename}" != *_history.json ]] || continue
+        [[ "${dec_basename}" != *_progress.jsonl ]] || continue
+        [[ "${dec_basename}" != *_announce_progress.jsonl ]] || continue
+
+        local existing_title
+        existing_title=$(jq -r '.title // ""' "${existing_decision}" 2>/dev/null)
+        if [[ "${existing_title}" == "${openclaw_title}" ]]; then
+          duplicate_found=true
+          break
+        fi
+      done
+    fi
+
+    if [[ "${duplicate_found}" == "true" ]]; then
+      log "OpenClaw suggestion duplicate detected, skipping: ${title}"
+      rm -f "${approval_file}" "${suggestion_file}"
+      continue
+    fi
+
     # Generate task ID and register as inbox task
     local now_epoch ts rand task_id now_ts
     now_epoch=$(date +%s)
