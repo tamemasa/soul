@@ -20,7 +20,7 @@ const ALL_NODES = ['panda', 'gorilla', 'triceratops'];
  */
 export function renderTimeline(rounds, options = {}) {
   const {
-    comments = [], isDiscussing = false, currentRound = 0,
+    comments = [], isDiscussing = false, currentRound = 0, maxRounds = 3,
     decision = null, result = null, isExecuting = false, progress = null,
     history = [], isAnnouncing = false, announceProgress = null,
     taskId = null
@@ -39,55 +39,81 @@ export function renderTimeline(rounds, options = {}) {
 
   const finalRound = decision?.final_round ?? Infinity;
 
-  // Build time ranges for each round to position comments
-  const roundTimes = (rounds || []).map(round => {
+  // Build earliest response time for each round (for chronological cutoffs)
+  const roundEarliestTime = {};
+  for (const round of (rounds || [])) {
     const times = round.responses
       .map(r => new Date(r.timestamp).getTime())
       .filter(t => !isNaN(t));
-    return { round: round.round, latest: times.length ? Math.max(...times) : 0 };
-  });
-
-  function getCommentPosition(comment) {
-    const ct = new Date(comment.created_at).getTime();
-    let afterRound = 0;
-    for (const rt of roundTimes) {
-      if (rt.latest && rt.latest <= ct) afterRound = rt.round;
-    }
-    return afterRound;
+    roundEarliestTime[round.round] = times.length ? Math.min(...times) : 0;
   }
 
-  const commentsByPosition = {};
-  (comments || []).forEach(c => {
-    const pos = getCommentPosition(c);
-    if (!commentsByPosition[pos]) commentsByPosition[pos] = [];
-    commentsByPosition[pos].push(c);
-  });
+  // Collect all floating events: comments + unmatched history + unmatched current decision
+  // These are rendered chronologically between rounds
+  const floatingEvents = [];
 
-  // Determine the last round number
-  const lastRoundNum = (rounds || []).length > 0
-    ? Math.max(...(rounds || []).map(r => r.round))
-    : 0;
+  for (const c of (comments || [])) {
+    floatingEvents.push({
+      type: 'comment', comment: c,
+      time: new Date(c.created_at).getTime()
+    });
+  }
 
-  // Check if there are post-round events that need chronological interleaving
-  const unmatchedHistory = history.filter(e => {
-    const fr = e.decision?.final_round ?? -1;
-    return !(rounds || []).some(r => r.round === fr);
-  });
-  const unmatchedDecision = decision && finalRound !== Infinity && !(rounds || []).some(r => r.round === finalRound);
-  const needsInterleave = unmatchedHistory.length > 0 || unmatchedDecision;
+  for (const entry of history) {
+    const fr = entry.decision?.final_round ?? -1;
+    if (!(rounds || []).some(r => r.round === fr)) {
+      floatingEvents.push({
+        type: 'history', entry,
+        time: new Date(entry.decision?.decided_at || 0).getTime()
+      });
+    }
+  }
+
+  if (decision && finalRound !== Infinity && !(rounds || []).some(r => r.round === finalRound)) {
+    floatingEvents.push({
+      type: 'decision',
+      time: new Date(decision.decided_at || 0).getTime()
+    });
+  }
+
+  const typeOrder = { comment: 0, history: 1, decision: 2 };
+  floatingEvents.sort((a, b) => (a.time - b.time) || (typeOrder[a.type] - typeOrder[b.type]));
+
+  let floatingIdx = 0;
+
+  // Render all floating events whose timestamp is before cutoffTime
+  // If cutoffTime is null, render all remaining events
+  function renderFloatingBefore(cutoffTime) {
+    let out = '';
+    while (floatingIdx < floatingEvents.length) {
+      const ev = floatingEvents[floatingIdx];
+      if (cutoffTime && ev.time >= cutoffTime) break;
+      floatingIdx++;
+      if (ev.type === 'comment') {
+        out += renderCommentItems([ev.comment], taskId);
+      } else if (ev.type === 'history') {
+        out += renderDecisionItem(ev.entry.decision);
+        out += renderAnnouncementItem(ev.entry.decision);
+        out += renderExecutionItem(ev.entry.result, false, null, ev.entry.decision);
+      } else if (ev.type === 'decision') {
+        out += renderDecisionItem(decision);
+        out += renderAnnouncementItem(decision, isAnnouncing, announceProgress);
+        out += renderExecutionItem(result, isExecuting, progress, decision);
+      }
+    }
+    return out;
+  }
 
   let html = '<div class="timeline">';
 
-  // Comments before round 1
-  if (commentsByPosition[0]) {
-    html += renderCommentItems(commentsByPosition[0], taskId);
-  }
+  // Floating events before the first round
+  const firstRoundStart = (rounds || []).length > 0
+    ? (roundEarliestTime[(rounds || [])[0].round] || null)
+    : null;
+  html += renderFloatingBefore(firstRoundStart);
 
-  // Track which history entries have been rendered
-  const renderedHistory = new Set();
-
-  // Render each round + inline decision/announcement/execution after final round
-  (rounds || []).forEach(round => {
+  // Render each round + inline matched history/decision, then floating events
+  (rounds || []).forEach((round, i) => {
     const respondedNodes = round.responses.map(r => r.node);
     const isActive = round.round === currentRound && isDiscussing;
     const pendingNodes = isActive
@@ -108,13 +134,28 @@ export function renderTimeline(rounds, options = {}) {
       `).join('')}
     </div>`;
 
+    // Show indicator when all nodes responded but decision not yet generated
+    if (isActive && pendingNodes.length === 0 && !decision) {
+      const isFinalRound = currentRound >= maxRounds;
+      const label = isFinalRound ? '最終決定を生成中…' : '合意を確認中…';
+      html += `
+      <div class="timeline-item timeline-decision-item">
+        <div class="timeline-round">Decision</div>
+        <div class="timeline-response timeline-response-pending">
+          <div class="response-header">
+            ${nodeBadge('triceratops')}
+            <span class="pending-indicator">${label}</span>
+          </div>
+        </div>
+      </div>`;
+    }
+
     // Insert history decision+execution if a previous cycle ended at this round
     if (historyByRound[round.round]) {
       const h = historyByRound[round.round];
       html += renderDecisionItem(h.decision);
       html += renderAnnouncementItem(h.decision);
       html += renderExecutionItem(h.result, false, null, h.decision);
-      renderedHistory.add(round.round);
     }
 
     // Insert current decision + announcement + execution after the round where consensus was reached
@@ -124,60 +165,11 @@ export function renderTimeline(rounds, options = {}) {
       html += renderExecutionItem(result, isExecuting, progress, decision);
     }
 
-    // Comments after this round — skip last round if we need chronological interleaving
-    if (commentsByPosition[round.round] && !(round.round === lastRoundNum && needsInterleave)) {
-      html += renderCommentItems(commentsByPosition[round.round], taskId);
-    }
+    // Render floating events between this round and the next
+    const nextRound = (rounds || [])[i + 1];
+    const nextCutoff = nextRound ? (roundEarliestTime[nextRound.round] || null) : null;
+    html += renderFloatingBefore(nextCutoff);
   });
-
-  // Chronological interleaving of last-round comments with unmatched history/decision
-  if (needsInterleave) {
-    const postEvents = [];
-
-    // Collect last round's comments
-    for (const c of (commentsByPosition[lastRoundNum] || [])) {
-      postEvents.push({
-        type: 'comment', comment: c,
-        time: new Date(c.created_at).getTime()
-      });
-    }
-
-    // Collect unmatched history entries
-    for (const entry of unmatchedHistory) {
-      if (!renderedHistory.has(entry.decision?.final_round ?? -1)) {
-        postEvents.push({
-          type: 'history', entry,
-          time: new Date(entry.decision?.decided_at || 0).getTime()
-        });
-      }
-    }
-
-    // Collect current decision (if unmatched)
-    if (unmatchedDecision) {
-      postEvents.push({
-        type: 'decision',
-        time: new Date(decision.decided_at || 0).getTime()
-      });
-    }
-
-    // Sort chronologically; comments before decisions at the same timestamp
-    const typeOrder = { comment: 0, history: 1, decision: 2 };
-    postEvents.sort((a, b) => (a.time - b.time) || (typeOrder[a.type] - typeOrder[b.type]));
-
-    for (const ev of postEvents) {
-      if (ev.type === 'comment') {
-        html += renderCommentItems([ev.comment], taskId);
-      } else if (ev.type === 'history') {
-        html += renderDecisionItem(ev.entry.decision);
-        html += renderAnnouncementItem(ev.entry.decision);
-        html += renderExecutionItem(ev.entry.result, false, null, ev.entry.decision);
-      } else if (ev.type === 'decision') {
-        html += renderDecisionItem(decision);
-        html += renderAnnouncementItem(decision, isAnnouncing, announceProgress);
-        html += renderExecutionItem(result, isExecuting, progress, decision);
-      }
-    }
-  }
 
   html += '</div>';
   return html;

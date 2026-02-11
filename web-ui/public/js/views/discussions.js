@@ -93,7 +93,11 @@ export async function renderDiscussionDetail(app, taskId) {
   const isAnnouncing = data.decision?.status === 'announcing';
 
   // Determine effective status for pipeline
-  const effectiveStatus = data.decision?.status || data.status?.status || 'discussing';
+  // When discussion is reopened (new round requested), status.json takes priority over stale decision
+  const discussionStatus = data.status?.status || 'discussing';
+  const effectiveStatus = (discussionStatus === 'discussing')
+    ? discussionStatus
+    : (data.decision?.status || discussionStatus);
   const pipelineHtml = renderPipeline(effectiveStatus, data.result);
 
   app.innerHTML = `
@@ -120,6 +124,7 @@ export async function renderDiscussionDetail(app, taskId) {
         comments: data.comments || [],
         isDiscussing,
         currentRound,
+        maxRounds: data.status?.max_rounds || 3,
         decision: data.decision,
         result: data.result,
         isExecuting,
@@ -239,10 +244,11 @@ export async function renderDiscussionDetail(app, taskId) {
   }
 
   // Status polling handles lightweight in-place updates (badge, pipeline)
-  // and only does full re-render when status actually changes
+  // and does full re-render when status, round responses, or comments change
   const isTerminal = !!data.result?.result || effectiveStatus === 'completed';
   if (!isTerminal && !isExecuting && !isAnnouncing) {
-    startStatusPolling(taskId, app, effectiveStatus);
+    const initialFingerprint = buildFingerprint(data, effectiveStatus);
+    startStatusPolling(taskId, app, initialFingerprint);
   }
 }
 
@@ -256,7 +262,17 @@ function stopStatusPolling() {
   }
 }
 
-function startStatusPolling(taskId, app, lastStatus) {
+function buildFingerprint(data, status) {
+  const currentRound = data.status?.current_round || 0;
+  const totalResponses = (data.rounds || []).reduce((sum, r) => sum + (r.responses?.length || 0), 0);
+  const commentCount = (data.comments || []).length;
+  const hasDecision = data.decision ? 1 : 0;
+  const hasAnnouncement = data.decision?.announcement?.summary ? 1 : 0;
+  const hasResult = data.result?.result ? 1 : 0;
+  return `${status}_r${currentRound}_n${totalResponses}_c${commentCount}_d${hasDecision}_a${hasAnnouncement}_x${hasResult}`;
+}
+
+function startStatusPolling(taskId, app, lastFingerprint) {
   stopStatusPolling();
 
   async function poll() {
@@ -270,6 +286,7 @@ function startStatusPolling(taskId, app, lastStatus) {
       if (!resp.ok) return;
       const data = await resp.json();
       const newStatus = data.decision?.status || data.status?.status || 'discussing';
+      const newFingerprint = buildFingerprint(data, newStatus);
 
       // Update pipeline in-place
       const pipelineEl = document.querySelector('.pipeline-stepper');
@@ -287,8 +304,8 @@ function startStatusPolling(taskId, app, lastStatus) {
         badgeEl.textContent = newStatus;
       }
 
-      // If status changed significantly, do full re-render
-      if (newStatus !== lastStatus) {
+      // If any relevant data changed, do full re-render
+      if (newFingerprint !== lastFingerprint) {
         stopStatusPolling();
         renderDiscussionDetail(app, taskId);
       }
@@ -400,9 +417,12 @@ function renderProgressEvents(events) {
 
   container.innerHTML = html;
 
-  // Auto-scroll to bottom on progress update
+  // Auto-scroll only if user is already near the bottom
   const scrollArea = document.getElementById('detail-scroll-area');
-  if (scrollArea) scrollArea.scrollTop = scrollArea.scrollHeight;
+  if (scrollArea) {
+    const distanceFromBottom = scrollArea.scrollHeight - scrollArea.scrollTop - scrollArea.clientHeight;
+    if (distanceFromBottom < 150) scrollArea.scrollTop = scrollArea.scrollHeight;
+  }
 }
 
 // --- Announcement progress polling ---
@@ -506,9 +526,12 @@ function renderAnnounceProgressEvents(events) {
 
   container.innerHTML = html;
 
-  // Auto-scroll to bottom on progress update
+  // Auto-scroll only if user is already near the bottom
   const scrollArea = document.getElementById('detail-scroll-area');
-  if (scrollArea) scrollArea.scrollTop = scrollArea.scrollHeight;
+  if (scrollArea) {
+    const distanceFromBottom = scrollArea.scrollHeight - scrollArea.scrollTop - scrollArea.clientHeight;
+    if (distanceFromBottom < 150) scrollArea.scrollTop = scrollArea.scrollHeight;
+  }
 }
 
 function renderPipeline(status, result) {
