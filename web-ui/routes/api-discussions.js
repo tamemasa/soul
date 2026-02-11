@@ -221,6 +221,25 @@ module.exports = function (sharedDir) {
 
     // If requesting a new round, update status
     if (shouldRequestRound && !shouldSkipToExecution) {
+      // Archive previous decision + result into history if they exist
+      const decisionFile = path.join(sharedDir, 'decisions', `${taskId}.json`);
+      const resultFile = path.join(sharedDir, 'decisions', `${taskId}_result.json`);
+      const historyFile = path.join(sharedDir, 'decisions', `${taskId}_history.json`);
+      const prevDecision = await readJson(decisionFile);
+      const prevResult = await readJson(resultFile);
+      if (prevDecision) {
+        const history = await readJson(historyFile) || [];
+        history.push({ decision: prevDecision, result: prevResult || null });
+        await writeJsonAtomic(historyFile, history);
+        // Remove stale result/progress from previous cycle
+        const progressFile = path.join(sharedDir, 'decisions', `${taskId}_progress.jsonl`);
+        const announceProgressFile = path.join(sharedDir, 'decisions', `${taskId}_announce_progress.jsonl`);
+        await fs.unlink(decisionFile).catch(() => {});
+        await fs.unlink(resultFile).catch(() => {});
+        await fs.unlink(progressFile).catch(() => {});
+        await fs.unlink(announceProgressFile).catch(() => {});
+      }
+
       const nextRound = (status.current_round || 1) + 1;
       const newMax = Math.max(status.max_rounds || 3, nextRound);
 
@@ -262,7 +281,7 @@ module.exports = function (sharedDir) {
         status: 'announced',
         final_round: 0,
         final_approach: approach,
-        executor: 'panda',
+        executor: 'triceratops',
         decided_at: utcTimestamp()
       };
       await writeJsonAtomic(decisionFile, newDecision);

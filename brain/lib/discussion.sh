@@ -535,15 +535,26 @@ Report your results."
   local result
   result=$(jq -r 'select(.type == "result") | .result // ""' "${progress_file}" 2>/dev/null | tail -1)
 
-  # Check if we got a valid result
+  # If result is empty, check if execution actually succeeded
   if [[ -z "${result}" ]]; then
-    log "ERROR: No result extracted from progress file for task ${task_id}"
-    # Mark as failed
-    tmp=$(mktemp)
-    jq '.status = "failed" | .failed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .failure_reason = "no result extracted from execution"' \
-      "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
-    set_activity "idle"
-    return
+    local subtype
+    subtype=$(jq -r 'select(.type == "result") | .subtype // ""' "${progress_file}" 2>/dev/null | tail -1)
+
+    if [[ "${subtype}" == "success" ]]; then
+      log "WARN: Empty result but subtype=success for task ${task_id}, extracting from last assistant message"
+      # Extract last assistant text block as fallback
+      result=$(jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text // ""' \
+        "${progress_file}" 2>/dev/null | tail -n 50 | head -c 10000)
+    fi
+
+    if [[ -z "${result}" ]]; then
+      log "ERROR: No result extracted from progress file for task ${task_id}"
+      tmp=$(mktemp)
+      jq '.status = "failed" | .failed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .failure_reason = "no result extracted from execution"' \
+        "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+      set_activity "idle"
+      return
+    fi
   fi
 
   # Save execution result
