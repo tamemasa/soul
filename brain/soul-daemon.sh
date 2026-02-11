@@ -46,10 +46,24 @@ invoke_claude() {
 $(cat "${context_file}")"
   fi
 
-  claude -p "${full_prompt}" --output-format text 2>>"${SHARED_DIR}/logs/$(date -u +%Y-%m-%d)/${NODE_NAME}_claude.log" || {
+  claude -p "${full_prompt}" --permission-mode bypassPermissions --output-format text 2>>"${SHARED_DIR}/logs/$(date -u +%Y-%m-%d)/${NODE_NAME}_claude.log" || {
     log "ERROR: Claude invocation failed"
     echo '{"error": "claude invocation failed"}'
   }
+}
+
+set_activity() {
+  local status="$1"
+  local detail="${2:-}"
+  local activity_file="${SHARED_DIR}/nodes/${NODE_NAME}/activity.json"
+  mkdir -p "$(dirname "${activity_file}")"
+  local ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [[ "${status}" == "idle" ]]; then
+    echo "{\"status\":\"idle\",\"updated_at\":\"${ts}\"}" > "${activity_file}"
+  else
+    echo "{\"status\":\"${status}\",${detail}\"updated_at\":\"${ts}\"}" > "${activity_file}"
+  fi
 }
 
 ensure_dirs() {
@@ -58,6 +72,8 @@ ensure_dirs() {
   mkdir -p "${SHARED_DIR}/decisions"
   mkdir -p "${SHARED_DIR}/evaluations"
   mkdir -p "${SHARED_DIR}/logs"
+  mkdir -p "${SHARED_DIR}/nodes/${NODE_NAME}"
+  set_activity "idle"
 }
 
 main_loop() {
@@ -80,7 +96,10 @@ main_loop() {
     # 4. Check for evaluation requests
     check_evaluation_requests || log "WARN: check_evaluation_requests error"
 
-    # 5. Check for decisions that need execution
+    # 5. Check for decisions pending announcement (triceratops only)
+    check_pending_announcements || log "WARN: check_pending_announcements error"
+
+    # 6. Check for announced decisions that need execution (panda)
     check_pending_decisions || log "WARN: check_pending_decisions error"
 
     sleep "${POLL_INTERVAL}"

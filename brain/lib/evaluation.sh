@@ -12,6 +12,7 @@ run_evaluation() {
     local eval_file="${eval_dir}/${NODE_NAME}_evaluates_${target}.json"
     [[ -f "${eval_file}" ]] && continue
 
+    set_activity "evaluating" "\"target\":\"${target}\",\"cycle_id\":\"${cycle_id}\","
     log "Evaluating node: ${target}"
 
     # Gather target's recent activity
@@ -63,6 +64,9 @@ Respond with ONLY a valid JSON object:
     local response
     response=$(invoke_claude "${prompt}")
 
+    # Strip markdown code fences if Claude wrapped the response
+    response=$(echo "${response}" | sed '/^```\(json\)\?$/d')
+
     if echo "${response}" | jq . > /dev/null 2>&1; then
       echo "${response}" > "${eval_file}"
     else
@@ -83,6 +87,7 @@ Respond with ONLY a valid JSON object:
 EOF
     fi
 
+    set_activity "idle"
     log "Evaluation of ${target} submitted"
   done
 
