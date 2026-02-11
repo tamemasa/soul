@@ -140,10 +140,7 @@ web-ui/
 ### Other
 ```
 /soul/scheduler/                # Cron container (6h evaluation cycle)
-/soul/gateway/soul-chat.sh      # CLI chat interface
-/soul/soul                      # Main entry script (up/down/chat/rebuild)
 /soul/docker-compose.yml        # Container orchestration
-/soul/scripts/network-restrict.sh  # LAN isolation (iptables)
 /soul/CLAUDE.md                 # Project-level rules
 ```
 

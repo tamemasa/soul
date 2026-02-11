@@ -21,8 +21,8 @@
 │        └───────────────┼─────────────────────┘              │
 │                        │                                    │
 │               ┌────────▼────────┐    ┌──────────────────┐   │
-│               │  /shared volume │    │  ./soul chat     │   │
-│               │                 │◄───│  (Gateway UI)    │   │
+│               │  /shared volume │    │  Web UI (:3000)  │   │
+│               │                 │◄───│  (Express + SSE) │   │
 │               │  inbox/         │    └──────────────────┘   │
 │               │  discussions/   │                           │
 │               │  decisions/     │                           │
@@ -71,7 +71,6 @@ Brainノードの合意形成のもとで作成・運用されるアプリケー
 
 ```
 soul/
-├── soul                        # メインCLIエントリーポイント
 ├── docker-compose.yml          # 全サービス定義
 ├── .env                        # 環境変数 (SOUL_UID, SOUL_GID等)
 ├── .env.example                # 環境変数テンプレート
@@ -96,9 +95,6 @@ soul/
 │       │   └── CLAUDE.md
 │       └── triceratops/
 │           └── CLAUDE.md
-├── gateway/
-│   ├── soul-chat.sh            # 対話型チャットUI (REPL + 単発コマンド)
-│   └── commands.sh             # チャットコマンド実装
 ├── worker/
 │   ├── Dockerfile              # Worker共通イメージ
 │   ├── entrypoint.sh           # Workerエントリーポイント
@@ -113,8 +109,6 @@ soul/
 ├── scheduler/
 │   ├── Dockerfile              # スケジューライメージ
 │   └── cron-tasks.sh           # 定期評価・クリーンアップ
-├── scripts/
-│   └── network-restrict.sh      # LAN隔離用iptablesルール管理
 └── shared/                     # コンテナ間共有ボリューム (bind mount)
     ├── nodes/                  # ノードパラメータ (全Brainから読み書き可能)
     │   ├── panda/params.json
@@ -151,10 +145,10 @@ cp .env.example .env
 # .env を編集し ANTHROPIC_API_KEY を設定
 
 # 3. 起動
-./soul up
+docker compose up -d
 
-# 4. チャットインターフェイスを開く
-./soul chat
+# 4. Web UIにアクセス
+# http://<host-ip>:3000
 ```
 
 ### Authentication
@@ -169,20 +163,16 @@ SOUL_UID=1000
 SOUL_GID=1000
 ```
 
-### CLI Commands
+### Commands
 
 ```bash
-./soul up        # 全コンテナ起動
-./soul down      # 全コンテナ停止
-./soul chat      # 対話型チャットUI起動
-./soul web       # Web UI の URL を表示
-./soul logs      # Docker logs をフォロー
-./soul rebuild   # 全コンテナ再ビルド・再起動
+docker compose up -d       # 全コンテナ起動
+docker compose down        # 全コンテナ停止
+docker compose logs -f     # Docker logs をフォロー
+docker compose up -d --build  # 全コンテナ再ビルド・再起動
 ```
 
 ## User Interface
-
-### Web UI
 
 ブラウザから `http://<host-ip>:3000` でアクセスできるWeb UIを搭載。
 
@@ -196,63 +186,6 @@ SOUL_GID=1000
 
 SSE（Server-Sent Events）によりファイル変更を自動検知して画面を更新する。
 ポート番号は `.env` の `WEB_UI_PORT` で変更可能（デフォルト: 3000）。
-
-### Chat UI
-
-`./soul chat` で起動するチャット型インターフェイスからもBrainシステムをフル操作できる。
-
-```
-  ____              _
- / ___|  ___  _   _| |
- \___ \ / _ \| | | | |
-  ___) | (_) | |_| | |
- |____/ \___/ \__,_|_|
-
-  3-Brain Autonomous Agent System
-
-soul> セキュリティ監査を実施して
-  Task submitted: task_1770708677_9395
-
-soul> /status
-  ═══ Soul System Status ═══
-  ● panda (running)
-  ● gorilla (running)
-  ● triceratops (running)
-
-soul> /discussion task_1770708677_9395
-  ── Round 1 ──
-  panda [approve_with_modification] 内部パラメータの詳細は公開しないよう注意...
-  gorilla [approve] 生き生きとした紹介にすべき...
-  triceratops [approve] 各ノードを公平に描写すべき...
-  ── Decision ──
-  Result: approved
-  Executor: panda
-```
-
-### Chat Commands
-
-| コマンド | 説明 |
-|---------|------|
-| (自由テキスト) | Brainにタスクとして投入 |
-| `/task <説明>` | タスクを明示的に投入 |
-| `/ask <質問>` | Brainに質問（実行なし、議論のみ） |
-| `/status` | システム全体のステータス表示 |
-| `/discussions` | アクティブな議論一覧 |
-| `/discussion <id>` | 議論の詳細（各ノードの意見・投票）を表示 |
-| `/decisions` | 合意済み決定の一覧 |
-| `/eval` | 相互評価サイクルを手動発火 |
-| `/params [node]` | パラメータ表示（全ノードor指定ノード） |
-| `/set <node> <key> <val>` | パラメータを直接変更 |
-| `/workers` | Workerノード一覧 |
-| `/logs [node] [lines]` | 直近ログ表示 |
-| `/restart <node>` | Brainノードコンテナを再起動 |
-| `/help` | ヘルプ表示 |
-
-単発コマンドとしても実行可能:
-```bash
-./soul chat /status        # ステータスだけ表示して終了
-./soul chat /params panda  # パンダのパラメータ確認
-```
 
 ## Communication Protocol
 
@@ -318,7 +251,7 @@ discussing → decided → pending_announcement → announced → executing → 
 
 ```
 1. scheduler が6時間毎に evaluations/{cycle_id}/ を作成し評価タスクを発行
-   (手動発火: ./soul chat /eval)
+   (手動発火: Web UIから実行)
 2. 各Brainが他2ノードを評価 (スコア: decision_quality, collaboration, effectiveness, parameter_balance)
    → evaluations/{cycle_id}/{evaluator}_evaluates_{target}.json
 3. 2/3が「パラメータ変更が必要」(needs_retuning=true) と合意
@@ -354,14 +287,8 @@ discussing → decided → pending_announcement → announced → executing → 
 ```
 
 - **仕組み**: 専用Dockerブリッジ `br-soul` + iptables `DOCKER-USER` チェーンでLANサブネットへの通信をDROP
-- **自動適用**: `./soul up` 時にルール適用、`./soul down` 時に除去
-- **手動操作**:
-  ```bash
-  sudo ./scripts/network-restrict.sh status   # 現在のルール確認
-  sudo ./scripts/network-restrict.sh apply    # ルール適用
-  sudo ./scripts/network-restrict.sh remove   # ルール除去
-  ```
-- **LAN範囲の変更**: `scripts/network-restrict.sh` 内の `LAN_SUBNET` を編集
+- **適用**: iptablesルールを手動で設定するか、systemd serviceとして登録
+- **LAN範囲の変更**: iptablesルール内の `LAN_SUBNET` を編集
 
 ## Tech Stack
 
@@ -369,7 +296,7 @@ discussing → decided → pending_announcement → announced → executing → 
 - **AI Agent**: Claude Code (claude-code CLI, non-interactive mode)
 - **Communication**: File-based (shared volume, JSON)
 - **Scheduler**: cron (6h interval, in scheduler container)
-- **User Interface**: Bash-based interactive chat (gateway)
+- **User Interface**: Web UI (Express + Vanilla JS SPA + SSE)
 - **Target Platform**: Raspberry Pi (ARM64) / Linux (x86_64)
 
 ## Design Principles
