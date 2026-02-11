@@ -12,9 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g @anthropic-ai/claude-code \
+    && npm install -g @modelcontextprotocol/server-memory @modelcontextprotocol/server-sequential-thinking \
     && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
     && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
+    && pip3 install --break-system-packages mcp-server-fetch \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Create writable home for non-root execution and add docker group
