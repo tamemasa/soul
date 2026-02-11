@@ -23,8 +23,9 @@ WORKDIR /app
 COPY entrypoint.sh /app/entrypoint.sh
 COPY network-restrict.sh /app/network-restrict.sh
 COPY suggest.sh /app/suggest.sh
+COPY write-approval.sh /app/write-approval.sh
 COPY command-watcher.sh /app/command-watcher.sh
-RUN chmod +x /app/entrypoint.sh /app/network-restrict.sh /app/suggest.sh /app/command-watcher.sh
+RUN chmod +x /app/entrypoint.sh /app/network-restrict.sh /app/suggest.sh /app/write-approval.sh /app/command-watcher.sh
 
 # Install jq for JSON handling in suggest.sh
 RUN apt-get update && apt-get install -y --no-install-recommends jq \

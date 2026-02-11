@@ -25,8 +25,8 @@ UNIFIED_OPENCLAW_CONTAINER="soul-openclaw"
 UNIFIED_OPENCLAW_SESSIONS="/home/openclaw/.openclaw/agents/main/sessions"
 UNIFIED_OPENCLAW_PERSONALITY_DIR="/home/openclaw/.openclaw/workspace"
 
-# Parallel mode: when true, security/integrity findings are logged but not shown in UI alerts
-UNIFIED_PARALLEL_MODE=true
+# Parallel mode disabled: unified monitor is now the sole monitor (legacy monitors removed)
+UNIFIED_PARALLEL_MODE=false
 
 # Main entry point - called from daemon loop
 check_unified_openclaw_monitor() {

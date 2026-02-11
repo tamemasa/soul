@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
-# suggest.sh - Submit a suggestion to the Soul system
+# suggest.sh - Submit a suggestion to the Soul system (pending approval)
 # Usage: suggest.sh "Title" ["Description"]
 #
-# Writes a suggestion JSON file to /suggestions/ volume.
-# The Soul system (triceratops) picks it up, validates, rate-limits (1/hour),
-# and registers it as a low-priority task for Brain node review.
-#
-# Rate limiting is enforced on the Soul system side.
-# If multiple suggestions are written within 1 hour, only the first is accepted.
+# Writes a pending suggestion JSON file to /suggestions/ volume.
+# The file must be approved via approve-suggest before Triceratops picks it up.
+# Pending files (pending_suggestion_*.json) are ignored by the Soul system.
 
 set -euo pipefail
 
 SUGGESTIONS_DIR="/suggestions"
-RATELIMIT_FILE="${SUGGESTIONS_DIR}/.last_submitted"
 
 title="${1:-}"
 description="${2:-}"
@@ -20,26 +16,14 @@ description="${2:-}"
 if [[ -z "${title}" ]]; then
   echo "Usage: suggest.sh \"Title\" [\"Description\"]"
   echo "Submit a suggestion to the Soul system."
-  echo "Limited to 1 suggestion per hour."
+  echo "The suggestion will be created as pending. Use approve-suggest to approve or reject it."
   exit 1
 fi
 
-# Client-side rate limit check (courtesy; real enforcement is on Soul side)
-if [[ -f "${RATELIMIT_FILE}" ]]; then
-  last_epoch=$(cat "${RATELIMIT_FILE}" 2>/dev/null || echo 0)
-  now_epoch=$(date +%s)
-  elapsed=$((now_epoch - last_epoch))
-  if [[ ${elapsed} -lt 3600 ]]; then
-    remaining=$(( (3600 - elapsed) / 60 ))
-    echo "Rate limited. Next suggestion allowed in ${remaining} minute(s)."
-    exit 1
-  fi
-fi
-
-# Generate a unique filename
+# Generate a unique filename with pending_ prefix
 ts=$(date +%s)
 rand=$((RANDOM % 9000 + 1000))
-filename="suggestion_${ts}_${rand}.json"
+filename="pending_suggestion_${ts}_${rand}.json"
 
 # Create suggestion JSON
 now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -56,8 +40,7 @@ EOF
 
 mv "${tmp_file}" "${SUGGESTIONS_DIR}/${filename}"
 
-# Update client-side rate limit
-date +%s > "${RATELIMIT_FILE}"
-
-echo "Suggestion submitted: ${title}"
-echo "It will be reviewed by the Soul system's Brain nodes as a low-priority task."
+echo "Suggestion created as pending: ${filename}"
+echo "Title: ${title}"
+echo "To approve: approve-suggest ${filename} approve"
+echo "To reject:  approve-suggest ${filename} reject"

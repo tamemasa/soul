@@ -77,13 +77,14 @@ OWNER_CTX="${OPENCLAW_HOME}/workspace/OWNER_CONTEXT.md"
 } > "${OWNER_CTX}"
 log "OWNER_CONTEXT.md deployed to workspace."
 
-# Set up suggestion tool (symlink to PATH for easy access)
+# Set up suggestion tools (symlink to PATH for easy access)
 if [[ -f /app/suggest.sh ]]; then
   ln -sf /app/suggest.sh /usr/local/bin/suggest
+  ln -sf /app/write-approval.sh /usr/local/bin/write-approval
   # Ensure suggestions directory is writable by both OpenClaw and Triceratops
   mkdir -p /suggestions
   chmod 1777 /suggestions 2>/dev/null || true
-  log "Suggestion tool available: suggest \"Title\" \"Description\""
+  log "Suggestion tools available: suggest, write-approval"
 fi
 
 # Check required env vars

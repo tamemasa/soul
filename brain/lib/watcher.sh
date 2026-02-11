@@ -223,23 +223,69 @@ check_openclaw_suggestions() {
   local suggestions_dir="/openclaw-suggestions"
   [[ -d "${suggestions_dir}" ]] || return 0
 
-  local ratelimit_file="${SHARED_DIR}/openclaw/suggestions/_ratelimit.json"
-  local ONE_HOUR=3600
+  # OWNER_DISCORD_ID is required for approval verification
+  if [[ -z "${OWNER_DISCORD_ID:-}" ]]; then
+    return 0
+  fi
 
-  for suggestion_file in "${suggestions_dir}"/*.json; do
-    [[ -f "${suggestion_file}" ]] || continue
+  for approval_file in "${suggestions_dir}"/approval_pending_suggestion_*.json; do
+    [[ -f "${approval_file}" ]] || continue
 
-    local filename
-    filename=$(basename "${suggestion_file}")
+    local approval_filename
+    approval_filename=$(basename "${approval_file}")
 
-    # Read and validate suggestion
+    # Read approval response
+    local suggestion_filename decision discord_user_id
+    suggestion_filename=$(jq -r '.suggestion_file // ""' "${approval_file}" 2>/dev/null)
+    decision=$(jq -r '.decision // ""' "${approval_file}" 2>/dev/null)
+    discord_user_id=$(jq -r '.discord_user_id // ""' "${approval_file}" 2>/dev/null)
+
+    # Validate approval response
+    if [[ -z "${suggestion_filename}" || -z "${decision}" || -z "${discord_user_id}" ]]; then
+      log "OpenClaw approval ${approval_filename}: missing required fields, discarding"
+      rm -f "${approval_file}"
+      continue
+    fi
+
+    local suggestion_file="${suggestions_dir}/${suggestion_filename}"
+
+    # Verify Discord user ID matches owner (NEVER trust display names)
+    if [[ "${discord_user_id}" != "${OWNER_DISCORD_ID}" ]]; then
+      log "OpenClaw approval REJECTED: Discord user ID mismatch (got: ${discord_user_id}, expected: ${OWNER_DISCORD_ID})"
+      rm -f "${approval_file}"
+      rm -f "${suggestion_file}"
+      continue
+    fi
+
+    # Handle rejection
+    if [[ "${decision}" == "reject" ]]; then
+      log "OpenClaw suggestion rejected by owner: ${suggestion_filename}"
+      rm -f "${approval_file}"
+      rm -f "${suggestion_file}"
+      continue
+    fi
+
+    # Handle approval — verify pending suggestion file exists
+    if [[ "${decision}" != "approve" ]]; then
+      log "OpenClaw approval ${approval_filename}: invalid decision '${decision}', discarding"
+      rm -f "${approval_file}"
+      continue
+    fi
+
+    if [[ ! -f "${suggestion_file}" ]]; then
+      log "OpenClaw approval ${approval_filename}: pending suggestion not found, discarding"
+      rm -f "${approval_file}"
+      continue
+    fi
+
+    # Read and validate suggestion content
     local title description
     title=$(jq -r '.title // ""' "${suggestion_file}" 2>/dev/null)
     description=$(jq -r '.description // ""' "${suggestion_file}" 2>/dev/null)
 
     if [[ -z "${title}" ]]; then
-      log "OpenClaw suggestion ${filename}: missing title, discarding"
-      rm -f "${suggestion_file}"
+      log "OpenClaw suggestion ${suggestion_filename}: missing title, discarding"
+      rm -f "${approval_file}" "${suggestion_file}"
       continue
     fi
 
@@ -247,27 +293,9 @@ check_openclaw_suggestions() {
     title="${title:0:200}"
     description="${description:0:2000}"
 
-    # Rate limit check (1 suggestion per hour)
-    local now_epoch last_epoch elapsed
-    now_epoch=$(date +%s)
-
-    if [[ -f "${ratelimit_file}" ]]; then
-      local last_ts
-      last_ts=$(jq -r '.openclaw // ""' "${ratelimit_file}" 2>/dev/null)
-      if [[ -n "${last_ts}" ]]; then
-        last_epoch=$(date -d "${last_ts}" +%s 2>/dev/null || echo 0)
-        elapsed=$((now_epoch - last_epoch))
-        if [[ ${elapsed} -lt ${ONE_HOUR} ]]; then
-          local remaining=$(( (ONE_HOUR - elapsed) / 60 ))
-          log "OpenClaw suggestion rate-limited (${remaining}min remaining), discarding: ${title}"
-          rm -f "${suggestion_file}"
-          continue
-        fi
-      fi
-    fi
-
     # Generate task ID and register as inbox task
-    local ts rand task_id now_ts
+    local now_epoch ts rand task_id now_ts
+    now_epoch=$(date +%s)
     ts="${now_epoch}"
     rand=$((RANDOM % 9000 + 1000))
     task_id="task_${ts}_${rand}"
@@ -297,7 +325,7 @@ check_openclaw_suggestions() {
     echo "${task_json}" > "${tmp_inbox}"
     mv "${tmp_inbox}" "${inbox_file}"
 
-    # Log suggestion record
+    # Log suggestion record (include approval details)
     local suggestion_record
     suggestion_record=$(jq -n \
       --arg id "${task_id}" \
@@ -305,12 +333,14 @@ check_openclaw_suggestions() {
       --arg desc "${description}" \
       --arg task_id "${task_id}" \
       --arg created "${now_ts}" \
+      --arg approved_by "${discord_user_id}" \
       '{
         id: $id,
         title: $title,
         description: $desc,
         task_id: $task_id,
-        source: "openclaw-direct",
+        source: "openclaw-approved",
+        approved_by_discord_id: $approved_by,
         created_at: $created
       }')
 
@@ -321,21 +351,21 @@ check_openclaw_suggestions() {
     echo "${suggestion_record}" > "${tmp_sugg}"
     mv "${tmp_sugg}" "${suggestions_log_dir}/${task_id}.json"
 
-    # Update rate limit (merge with existing data)
-    mkdir -p "$(dirname "${ratelimit_file}")"
-    local existing_rl
-    existing_rl=$(cat "${ratelimit_file}" 2>/dev/null || echo '{}')
-    local ratelimit_data
-    ratelimit_data=$(echo "${existing_rl}" | jq --arg ts "${now_ts}" '. + { openclaw: $ts, global: $ts }')
-    local tmp_rl
-    tmp_rl=$(mktemp)
-    echo "${ratelimit_data}" > "${tmp_rl}"
-    mv "${tmp_rl}" "${ratelimit_file}"
+    # Remove processed files
+    rm -f "${approval_file}" "${suggestion_file}"
 
-    # Remove processed suggestion file
-    rm -f "${suggestion_file}"
+    log "OpenClaw suggestion approved by owner (${discord_user_id}), registered as task ${task_id}: ${title}"
+  done
 
-    log "OpenClaw suggestion registered as task ${task_id}: ${title}"
+  # Clean up stale pending suggestions without approval (older than 24 hours)
+  for pending_file in "${suggestions_dir}"/pending_suggestion_*.json; do
+    [[ -f "${pending_file}" ]] || continue
+    local file_age
+    file_age=$(( $(date +%s) - $(stat -c %Y "${pending_file}" 2>/dev/null || echo 0) ))
+    if [[ ${file_age} -gt 86400 ]]; then
+      log "Cleaning up stale pending suggestion: $(basename "${pending_file}")"
+      rm -f "${pending_file}"
+    fi
   done
 }
 

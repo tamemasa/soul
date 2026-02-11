@@ -5,20 +5,14 @@ const { writeJsonAtomic } = require('../lib/shared-writer');
 
 module.exports = function (sharedDir) {
   const router = Router();
-  // Legacy directories (kept for backward compatibility during parallel operation)
-  const buddyDir = path.join(sharedDir, 'buddy');
-  const oldPendingDir = path.join(sharedDir, 'openclaw', 'monitor', 'pending_actions');
-  // Unified monitoring directory
   const monitorDir = path.join(sharedDir, 'monitoring');
 
   // ===== Unified API Endpoints =====
 
-  // GET /api/openclaw/status - Unified monitor status (reads from /shared/monitoring/latest.json)
+  // GET /api/openclaw/status - Monitor status (reads from /shared/monitoring/latest.json)
   router.get('/openclaw/status', async (req, res) => {
     const unified = await readJson(path.join(monitorDir, 'latest.json'));
     const integrity = await readJson(path.join(monitorDir, 'integrity.json'));
-    // Also read buddy state for backward compat during parallel period
-    const buddyState = await readJson(path.join(buddyDir, 'state.json'));
 
     const state = unified || { status: 'not_started', check_count: 0, monitor_type: 'unified' };
 
@@ -42,7 +36,6 @@ module.exports = function (sharedDir) {
     res.json({
       state,
       integrity: integrity || { status: 'unknown' },
-      buddy_state: buddyState || null,
       summary: {
         total_alerts: allAlerts.length,
         by_severity,
@@ -88,14 +81,10 @@ module.exports = function (sharedDir) {
     res.json(reports);
   });
 
-  // GET /api/openclaw/remediation - Remediation log (unified)
+  // GET /api/openclaw/remediation - Remediation log
   router.get('/openclaw/remediation', async (req, res) => {
     const limit = parseInt(req.query.limit || '50', 10);
-    // Try unified remediation log first, fall back to old location
-    let content = await tailFile(path.join(monitorDir, 'remediation.jsonl'), limit);
-    if (!content || !content.trim()) {
-      content = await tailFile(path.join(buddyDir, 'remediation.jsonl'), limit);
-    }
+    const content = await tailFile(path.join(monitorDir, 'remediation.jsonl'), limit);
     const entries = (content || '').split('\n')
       .filter(l => l.trim())
       .map(l => { try { return JSON.parse(l); } catch { return null; } })
@@ -104,30 +93,15 @@ module.exports = function (sharedDir) {
     res.json(entries);
   });
 
-  // GET /api/openclaw/pending-actions - Unified pending actions
+  // GET /api/openclaw/pending-actions - Pending actions
   router.get('/openclaw/pending-actions', async (req, res) => {
     const actions = [];
-
-    // Read from unified monitoring pending_actions
-    const unifiedPendingDir = path.join(monitorDir, 'pending_actions');
-    const uFiles = await listJsonFiles(unifiedPendingDir);
-    for (const f of uFiles) {
-      const action = await readJson(path.join(unifiedPendingDir, f));
+    const pendingDir = path.join(monitorDir, 'pending_actions');
+    const files = await listJsonFiles(pendingDir);
+    for (const f of files) {
+      const action = await readJson(path.join(pendingDir, f));
       if (action) actions.push(action);
     }
-
-    // Also read from old locations for backward compatibility
-    const oldFiles1 = await listJsonFiles(path.join(buddyDir, 'pending_actions'));
-    for (const f of oldFiles1) {
-      const action = await readJson(path.join(buddyDir, 'pending_actions', f));
-      if (action) actions.push(action);
-    }
-    const oldFiles2 = await listJsonFiles(oldPendingDir);
-    for (const f of oldFiles2) {
-      const action = await readJson(path.join(oldPendingDir, f));
-      if (action && !actions.find(a => a.id === action.id)) actions.push(action);
-    }
-
     actions.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
     res.json(actions);
   });
@@ -135,19 +109,8 @@ module.exports = function (sharedDir) {
   // POST /api/openclaw/pending-actions/:id/approve - Approve a pending action
   router.post('/openclaw/pending-actions/:id/approve', async (req, res) => {
     const actionId = req.params.id;
-    // Search across all pending action directories
-    const dirs = [
-      path.join(monitorDir, 'pending_actions'),
-      path.join(buddyDir, 'pending_actions'),
-      oldPendingDir
-    ];
-    let actionFile = null;
-    let action = null;
-    for (const dir of dirs) {
-      const f = path.join(dir, `${actionId}.json`);
-      action = await readJson(f);
-      if (action) { actionFile = f; break; }
-    }
+    const actionFile = path.join(monitorDir, 'pending_actions', `${actionId}.json`);
+    const action = await readJson(actionFile);
     if (!action) {
       return res.status(404).json({ error: 'Action not found' });
     }
@@ -164,18 +127,8 @@ module.exports = function (sharedDir) {
   // POST /api/openclaw/pending-actions/:id/reject - Reject a pending action
   router.post('/openclaw/pending-actions/:id/reject', async (req, res) => {
     const actionId = req.params.id;
-    const dirs = [
-      path.join(monitorDir, 'pending_actions'),
-      path.join(buddyDir, 'pending_actions'),
-      oldPendingDir
-    ];
-    let actionFile = null;
-    let action = null;
-    for (const dir of dirs) {
-      const f = path.join(dir, `${actionId}.json`);
-      action = await readJson(f);
-      if (action) { actionFile = f; break; }
-    }
+    const actionFile = path.join(monitorDir, 'pending_actions', `${actionId}.json`);
+    const action = await readJson(actionFile);
     if (!action) {
       return res.status(404).json({ error: 'Action not found' });
     }

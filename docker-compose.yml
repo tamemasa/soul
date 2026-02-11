@@ -61,6 +61,7 @@ services:
       - NODE_NAME=triceratops
       - HOME=/home/soul
       - CLAUDE_MODEL=opus
+      - OWNER_DISCORD_ID=${OWNER_DISCORD_ID}
     volumes:
       - shared:/shared
       - ./brain/nodes/triceratops/CLAUDE.md:/brain/CLAUDE.md:ro

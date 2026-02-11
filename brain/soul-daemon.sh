@@ -11,10 +11,8 @@ source "${BRAIN_DIR}/lib/discussion.sh"
 source "${BRAIN_DIR}/lib/evaluation.sh"
 source "${BRAIN_DIR}/lib/consensus.sh"
 source "${BRAIN_DIR}/lib/worker-manager.sh"
-source "${BRAIN_DIR}/lib/buddy-monitor.sh"
 source "${BRAIN_DIR}/lib/rebuild-manager.sh"
 source "${BRAIN_DIR}/lib/proactive-suggestions.sh"
-source "${BRAIN_DIR}/lib/panda-openclaw-monitor.sh"
 source "${BRAIN_DIR}/lib/unified-openclaw-monitor.sh"
 
 log() {
@@ -78,7 +76,6 @@ ensure_dirs() {
   mkdir -p "${SHARED_DIR}/evaluations"
   mkdir -p "${SHARED_DIR}/logs"
   mkdir -p "${SHARED_DIR}/nodes/${NODE_NAME}"
-  mkdir -p "${SHARED_DIR}/buddy"
   mkdir -p "${SHARED_DIR}/rebuild_requests"
   set_activity "idle"
 }
@@ -116,18 +113,11 @@ main_loop() {
     # 8. Pick up OpenClaw suggestions (triceratops only)
     check_openclaw_suggestions || log "WARN: check_openclaw_suggestions error"
 
-    # 9. Monitor OpenClaw buddy health (triceratops only, self-throttled to 15min)
-    check_openclaw_health || log "WARN: check_openclaw_health error"
-
-    # 10. Proactive suggestion engine (triceratops only, self-throttled to 60s)
+    # 9. Proactive suggestion engine (triceratops only, self-throttled to 60s)
     check_proactive_suggestions || log "WARN: check_proactive_suggestions error"
 
-    # 11. Panda's OpenClaw policy compliance monitor (panda only, self-throttled to 5min)
-    check_panda_openclaw_monitor || log "WARN: check_panda_openclaw_monitor error"
-
-    # 12. Unified OpenClaw monitor (panda only, self-throttled to 5min)
-    # Consolidates policy, security, and integrity checks. Runs in parallel with
-    # old monitors during validation period (UNIFIED_PARALLEL_MODE=true).
+    # 10. Unified OpenClaw monitor (panda only, self-throttled to 5min)
+    # Consolidates policy, security, and integrity checks into a single monitor.
     check_unified_openclaw_monitor || log "WARN: check_unified_openclaw_monitor error"
     process_unified_approved_actions || log "WARN: process_unified_approved_actions error"
 
