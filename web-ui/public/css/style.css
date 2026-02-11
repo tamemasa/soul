@@ -22,6 +22,9 @@
   --text-dim: #4B5972;
   --border: #1E293B;
   --border-subtle: #162031;
+  --error: #EF4444;
+  --warning: #F59E0B;
+  --success: #34D399;
   --font-mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --radius: 8px;
@@ -1138,3 +1141,19 @@ body {
   .param-row { flex-wrap: wrap; }
   .param-label { width: 100%; }
 }
+
+/* ─── Buddy Monitor ─── */
+.btn {
+  padding: 6px 16px;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity var(--transition);
+}
+.btn:hover { opacity: 0.85; }
+.btn-approve { background: var(--success); color: #0B0F1A; }
+.btn-reject { background: var(--bg-elevated); color: var(--text-secondary); border: 1px solid var(--border); }
+.text-danger { color: var(--error); }
+.text-warn { color: var(--warning); }

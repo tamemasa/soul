@@ -1,11 +1,13 @@
 export async function renderOpenClaw(app) {
   app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
-  const [statusData, alerts, pendingActions, remediation] = await Promise.all([
+  const [statusData, alerts, pendingActions, remediation, pandaStatus, pandaAlerts] = await Promise.all([
     fetch('/api/openclaw/status').then(r => r.json()),
     fetch('/api/openclaw/alerts?limit=20').then(r => r.json()),
     fetch('/api/openclaw/pending-actions').then(r => r.json()),
-    fetch('/api/openclaw/remediation?limit=20').then(r => r.json())
+    fetch('/api/openclaw/remediation?limit=20').then(r => r.json()),
+    fetch('/api/openclaw/panda-status').then(r => r.json()),
+    fetch('/api/openclaw/panda-alerts?limit=20').then(r => r.json())
   ]);
 
   const state = statusData.state;
@@ -91,6 +93,34 @@ export async function renderOpenClaw(app) {
         </div>
       `).join('')}
     ` : ''}
+
+    <div class="section-label" style="margin-top:24px;">Panda Policy Monitor</div>
+    <div class="card" style="margin-bottom:12px;">
+      <div class="card-header">
+        <span class="card-title">Policy Compliance</span>
+        <span class="badge badge-status badge-${pandaStatus.status === 'healthy' ? 'approved' : (pandaStatus.status === 'not_started' ? 'discussing' : 'rejected')}">${pandaStatus.status || 'not started'}</span>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px;">
+        <div class="text-sm"><span class="text-dim">Last Check</span> ${formatTime(pandaStatus.last_check_at)}</div>
+        <div class="text-sm"><span class="text-dim">Check Count</span> ${pandaStatus.check_count || 0}</div>
+        <div class="text-sm"><span class="text-dim">Interval</span> ${pandaStatus.interval_seconds ? (pandaStatus.interval_seconds / 60) + 'min' : '5min'}</div>
+        <div class="text-sm"><span class="text-dim">Messages Tracked</span> ${pandaStatus.last_message_count || 0}</div>
+      </div>
+    </div>
+
+    ${pandaAlerts.length > 0 ? `
+      <div class="section-label">Panda Alerts</div>
+      ${pandaAlerts.map(a => `
+        <div class="card" style="border-left:3px solid ${severityColor(a.severity)}; margin-bottom:6px;">
+          <div class="card-header">
+            <span class="text-sm" style="color:${severityColor(a.severity)}; font-weight:600;">${(a.severity || 'info').toUpperCase()}</span>
+            <span class="badge badge-status">${a.type}</span>
+          </div>
+          <div class="text-sm" style="margin:4px 0;">${escapeHtml(a.description)}</div>
+          <div class="text-sm text-dim">${formatTime(a.timestamp)}</div>
+        </div>
+      `).join('')}
+    ` : '<div class="empty-state" style="margin-bottom:12px;">No panda alerts</div>'}
   `;
 
 }

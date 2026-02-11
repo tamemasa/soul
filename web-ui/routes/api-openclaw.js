@@ -6,6 +6,7 @@ const { writeJsonAtomic } = require('../lib/shared-writer');
 module.exports = function (sharedDir) {
   const router = Router();
   const monitorDir = path.join(sharedDir, 'openclaw', 'monitor');
+  const pandaMonitorDir = path.join(sharedDir, 'monitoring');
 
   // GET /api/openclaw/status - Monitor status overview
   router.get('/openclaw/status', async (req, res) => {
@@ -98,6 +99,37 @@ module.exports = function (sharedDir) {
     }
     notifications.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
     res.json(notifications);
+  });
+
+  // GET /api/openclaw/panda-status - Panda's policy compliance monitor status
+  router.get('/openclaw/panda-status', async (req, res) => {
+    const latest = await readJson(path.join(pandaMonitorDir, 'latest.json'));
+    res.json(latest || { status: 'not_started', check_count: 0 });
+  });
+
+  // GET /api/openclaw/panda-alerts - Panda's policy compliance alerts
+  router.get('/openclaw/panda-alerts', async (req, res) => {
+    const limit = parseInt(req.query.limit || '50', 10);
+    const content = await tailFile(path.join(pandaMonitorDir, 'alerts.jsonl'), limit);
+    const alerts = content.split('\n')
+      .filter(l => l.trim())
+      .map(l => { try { return JSON.parse(l); } catch { return null; } })
+      .filter(Boolean)
+      .reverse();
+    res.json(alerts);
+  });
+
+  // GET /api/openclaw/panda-reports - Panda's recent compliance reports
+  router.get('/openclaw/panda-reports', async (req, res) => {
+    const reportsDir = path.join(pandaMonitorDir, 'reports');
+    const files = await listJsonFiles(reportsDir);
+    const reports = [];
+    const sorted = files.sort().reverse().slice(0, 20);
+    for (const f of sorted) {
+      const report = await readJson(path.join(reportsDir, f));
+      if (report) reports.push(report);
+    }
+    res.json(reports);
   });
 
   return router;

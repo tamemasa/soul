@@ -5,6 +5,7 @@ import { renderTimelineList, renderDiscussionDetail } from './views/discussions.
 import { renderParams } from './views/params.js';
 import { renderEvaluationList, renderEvaluationDetail } from './views/evaluations.js';
 import { renderLogs } from './views/logs.js';
+import { renderOpenClaw } from './views/openclaw.js';
 
 const app = document.getElementById('app');
 
@@ -57,6 +58,9 @@ async function route() {
         break;
       case '/logs':
         await renderLogs(app);
+        break;
+      case '/openclaw':
+        await renderOpenClaw(app);
         break;
       default:
         await renderDashboard(app);

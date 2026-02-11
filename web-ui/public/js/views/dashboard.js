@@ -3,9 +3,10 @@ import { nodeBadge } from '../components/node-badge.js';
 export async function renderDashboard(app) {
   app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
-  const [status, discussions] = await Promise.all([
+  const [status, discussions, pandaStatus] = await Promise.all([
     fetch('/api/status').then(r => r.json()),
-    fetch('/api/discussions').then(r => r.json())
+    fetch('/api/discussions').then(r => r.json()),
+    fetch('/api/openclaw/panda-status').then(r => r.json()).catch(() => ({ status: 'unknown', check_count: 0 }))
   ]);
 
   const recentActivity = discussions.slice(0, 5);
@@ -52,6 +53,16 @@ export async function renderDashboard(app) {
       <div class="stat-box">
         <div class="stat-value">${status.counts.workers}</div>
         <div class="stat-label">Workers</div>
+      </div>
+    </div>
+
+    <div class="card clickable" onclick="location.hash='#/openclaw'" style="margin-bottom:16px;">
+      <div class="card-header">
+        <span class="card-title">Buddy Monitor</span>
+        <span class="badge badge-status badge-${pandaStatus.status === 'healthy' ? 'approved' : (pandaStatus.status === 'not_started' || pandaStatus.status === 'unknown' ? 'discussing' : 'rejected')}">${pandaStatus.status || 'unknown'}</span>
+      </div>
+      <div class="text-sm text-dim">
+        Panda policy checks: ${pandaStatus.check_count || 0} &middot; Last: ${formatTime(pandaStatus.last_check_at)}
       </div>
     </div>
 
