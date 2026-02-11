@@ -234,9 +234,7 @@ soul/
 ### Prerequisites
 
 - Docker & Docker Compose
-- Claude Code の認証 (以下いずれか):
-  - **Claude Max plan** (推奨): ホストで `claude login` 済みであること
-  - **Anthropic API Key**: `.env` に `ANTHROPIC_API_KEY` を設定
+- Claude Code の認証: ホストで `claude login` 済みであること (Claude Max plan)
 - 対応プラットフォーム: Raspberry Pi (ARM64), Linux (x86_64)
 
 ### Quick Start
@@ -246,16 +244,10 @@ soul/
 git clone https://github.com/tamemasa/soul.git
 cd soul
 
-# 2. 認証設定
-#    Max plan の場合: ホストで claude login 済みなら設定不要
-#    API Key の場合:
-cp .env.example .env
-# .env を編集し ANTHROPIC_API_KEY を設定
-
-# 3. 起動
+# 2. 起動
 docker compose up -d
 
-# 4. Web UIにアクセス
+# 3. Web UIにアクセス
 # http://<host-ip>:3000
 ```
 
