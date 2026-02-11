@@ -17,7 +17,7 @@ const NAV_ITEMS = [
   { path: '/params', icon: 'params', label: 'Parameters' },
   { path: '/evaluations', icon: 'evaluation', label: 'Evaluations' },
   { path: '/logs', icon: 'logs', label: 'Logs' },
-  { path: '/openclaw', icon: 'buddy', label: 'Buddy' }
+  { path: '/openclaw', icon: 'buddy', label: 'Monitor' }
 ];
 
 export function renderNav(currentPath) {

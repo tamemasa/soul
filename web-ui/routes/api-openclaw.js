@@ -5,37 +5,98 @@ const { writeJsonAtomic } = require('../lib/shared-writer');
 
 module.exports = function (sharedDir) {
   const router = Router();
-  const monitorDir = path.join(sharedDir, 'openclaw', 'monitor');
-  const pandaMonitorDir = path.join(sharedDir, 'monitoring');
+  // Legacy directories (kept for backward compatibility during parallel operation)
+  const buddyDir = path.join(sharedDir, 'buddy');
+  const oldPendingDir = path.join(sharedDir, 'openclaw', 'monitor', 'pending_actions');
+  // Unified monitoring directory
+  const monitorDir = path.join(sharedDir, 'monitoring');
 
-  // GET /api/openclaw/status - Monitor status overview
+  // ===== Unified API Endpoints =====
+
+  // GET /api/openclaw/status - Unified monitor status (reads from /shared/monitoring/latest.json)
   router.get('/openclaw/status', async (req, res) => {
-    const state = await readJson(path.join(monitorDir, 'state.json'));
-    const summary = await readJson(path.join(monitorDir, 'summary.json'));
+    const unified = await readJson(path.join(monitorDir, 'latest.json'));
+    const integrity = await readJson(path.join(monitorDir, 'integrity.json'));
+    // Also read buddy state for backward compat during parallel period
+    const buddyState = await readJson(path.join(buddyDir, 'state.json'));
+
+    const state = unified || { status: 'not_started', check_count: 0, monitor_type: 'unified' };
+
+    // Build alert summary from alerts.jsonl
+    const alertContent = await tailFile(path.join(monitorDir, 'alerts.jsonl'), 200);
+    const allAlerts = alertContent.split('\n')
+      .filter(l => l.trim())
+      .map(l => { try { return JSON.parse(l); } catch { return null; } })
+      .filter(Boolean);
+
+    const by_severity = { high: 0, medium: 0, low: 0 };
+    const by_category = { policy: 0, security: 0, integrity: 0 };
+    for (const a of allAlerts) {
+      const sev = (a.severity || 'low').toLowerCase();
+      if (sev in by_severity) by_severity[sev]++;
+      else by_severity.low++;
+      const cat = a.category || 'policy';
+      if (cat in by_category) by_category[cat]++;
+    }
 
     res.json({
-      state: state || { status: 'not_started', check_count: 0 },
-      summary: summary || { total_alerts: 0, by_severity: { high: 0, medium: 0, low: 0 }, unacknowledged: 0 }
+      state,
+      integrity: integrity || { status: 'unknown' },
+      buddy_state: buddyState || null,
+      summary: {
+        total_alerts: allAlerts.length,
+        by_severity,
+        by_category
+      }
     });
   });
 
-  // GET /api/openclaw/alerts - Recent alerts
+  // GET /api/openclaw/alerts - Unified alerts (all categories)
   router.get('/openclaw/alerts', async (req, res) => {
     const limit = parseInt(req.query.limit || '50', 10);
-    const content = await tailFile(path.join(monitorDir, 'alerts.jsonl'), limit);
-    const alerts = content.split('\n')
+    const category = req.query.category || null; // filter: policy, security, integrity
+    const content = await tailFile(path.join(monitorDir, 'alerts.jsonl'), limit * 2);
+    let alerts = content.split('\n')
       .filter(l => l.trim())
       .map(l => { try { return JSON.parse(l); } catch { return null; } })
       .filter(Boolean)
       .reverse();
-    res.json(alerts);
+
+    if (category) {
+      alerts = alerts.filter(a => a.category === category);
+    }
+
+    res.json(alerts.slice(0, limit));
   });
 
-  // GET /api/openclaw/remediation - Remediation log
+  // GET /api/openclaw/integrity - Personality integrity state
+  router.get('/openclaw/integrity', async (req, res) => {
+    const integrity = await readJson(path.join(monitorDir, 'integrity.json'));
+    res.json(integrity || { status: 'unknown', checked_at: null });
+  });
+
+  // GET /api/openclaw/reports - Recent monitoring reports
+  router.get('/openclaw/reports', async (req, res) => {
+    const reportsDir = path.join(monitorDir, 'reports');
+    const files = await listJsonFiles(reportsDir);
+    const reports = [];
+    const sorted = files.sort().reverse().slice(0, 20);
+    for (const f of sorted) {
+      const report = await readJson(path.join(reportsDir, f));
+      if (report) reports.push(report);
+    }
+    res.json(reports);
+  });
+
+  // GET /api/openclaw/remediation - Remediation log (unified)
   router.get('/openclaw/remediation', async (req, res) => {
     const limit = parseInt(req.query.limit || '50', 10);
-    const content = await tailFile(path.join(monitorDir, 'remediation.jsonl'), limit);
-    const entries = content.split('\n')
+    // Try unified remediation log first, fall back to old location
+    let content = await tailFile(path.join(monitorDir, 'remediation.jsonl'), limit);
+    if (!content || !content.trim()) {
+      content = await tailFile(path.join(buddyDir, 'remediation.jsonl'), limit);
+    }
+    const entries = (content || '').split('\n')
       .filter(l => l.trim())
       .map(l => { try { return JSON.parse(l); } catch { return null; } })
       .filter(Boolean)
@@ -43,15 +104,30 @@ module.exports = function (sharedDir) {
     res.json(entries);
   });
 
-  // GET /api/openclaw/pending-actions - Pending remediation actions
+  // GET /api/openclaw/pending-actions - Unified pending actions
   router.get('/openclaw/pending-actions', async (req, res) => {
-    const actionsDir = path.join(monitorDir, 'pending_actions');
-    const files = await listJsonFiles(actionsDir);
     const actions = [];
-    for (const f of files) {
-      const action = await readJson(path.join(actionsDir, f));
+
+    // Read from unified monitoring pending_actions
+    const unifiedPendingDir = path.join(monitorDir, 'pending_actions');
+    const uFiles = await listJsonFiles(unifiedPendingDir);
+    for (const f of uFiles) {
+      const action = await readJson(path.join(unifiedPendingDir, f));
       if (action) actions.push(action);
     }
+
+    // Also read from old locations for backward compatibility
+    const oldFiles1 = await listJsonFiles(path.join(buddyDir, 'pending_actions'));
+    for (const f of oldFiles1) {
+      const action = await readJson(path.join(buddyDir, 'pending_actions', f));
+      if (action) actions.push(action);
+    }
+    const oldFiles2 = await listJsonFiles(oldPendingDir);
+    for (const f of oldFiles2) {
+      const action = await readJson(path.join(oldPendingDir, f));
+      if (action && !actions.find(a => a.id === action.id)) actions.push(action);
+    }
+
     actions.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
     res.json(actions);
   });
@@ -59,8 +135,19 @@ module.exports = function (sharedDir) {
   // POST /api/openclaw/pending-actions/:id/approve - Approve a pending action
   router.post('/openclaw/pending-actions/:id/approve', async (req, res) => {
     const actionId = req.params.id;
-    const actionFile = path.join(monitorDir, 'pending_actions', `${actionId}.json`);
-    const action = await readJson(actionFile);
+    // Search across all pending action directories
+    const dirs = [
+      path.join(monitorDir, 'pending_actions'),
+      path.join(buddyDir, 'pending_actions'),
+      oldPendingDir
+    ];
+    let actionFile = null;
+    let action = null;
+    for (const dir of dirs) {
+      const f = path.join(dir, `${actionId}.json`);
+      action = await readJson(f);
+      if (action) { actionFile = f; break; }
+    }
     if (!action) {
       return res.status(404).json({ error: 'Action not found' });
     }
@@ -77,8 +164,18 @@ module.exports = function (sharedDir) {
   // POST /api/openclaw/pending-actions/:id/reject - Reject a pending action
   router.post('/openclaw/pending-actions/:id/reject', async (req, res) => {
     const actionId = req.params.id;
-    const actionFile = path.join(monitorDir, 'pending_actions', `${actionId}.json`);
-    const action = await readJson(actionFile);
+    const dirs = [
+      path.join(monitorDir, 'pending_actions'),
+      path.join(buddyDir, 'pending_actions'),
+      oldPendingDir
+    ];
+    let actionFile = null;
+    let action = null;
+    for (const dir of dirs) {
+      const f = path.join(dir, `${actionId}.json`);
+      action = await readJson(f);
+      if (action) { actionFile = f; break; }
+    }
     if (!action) {
       return res.status(404).json({ error: 'Action not found' });
     }
@@ -90,7 +187,7 @@ module.exports = function (sharedDir) {
 
   // GET /api/openclaw/notifications - Unread notifications
   router.get('/openclaw/notifications', async (req, res) => {
-    const notifDir = path.join(monitorDir, 'notifications');
+    const notifDir = path.join(buddyDir, 'notifications');
     const files = await listJsonFiles(notifDir);
     const notifications = [];
     for (const f of files) {
@@ -101,16 +198,18 @@ module.exports = function (sharedDir) {
     res.json(notifications);
   });
 
-  // GET /api/openclaw/panda-status - Panda's policy compliance monitor status
+  // ===== Legacy Endpoints (kept during parallel operation period) =====
+
+  // GET /api/openclaw/panda-status - Legacy: redirects to unified status
   router.get('/openclaw/panda-status', async (req, res) => {
-    const latest = await readJson(path.join(pandaMonitorDir, 'latest.json'));
+    const latest = await readJson(path.join(monitorDir, 'latest.json'));
     res.json(latest || { status: 'not_started', check_count: 0 });
   });
 
-  // GET /api/openclaw/panda-alerts - Panda's policy compliance alerts
+  // GET /api/openclaw/panda-alerts - Legacy: redirects to unified alerts
   router.get('/openclaw/panda-alerts', async (req, res) => {
     const limit = parseInt(req.query.limit || '50', 10);
-    const content = await tailFile(path.join(pandaMonitorDir, 'alerts.jsonl'), limit);
+    const content = await tailFile(path.join(monitorDir, 'alerts.jsonl'), limit);
     const alerts = content.split('\n')
       .filter(l => l.trim())
       .map(l => { try { return JSON.parse(l); } catch { return null; } })
@@ -119,9 +218,9 @@ module.exports = function (sharedDir) {
     res.json(alerts);
   });
 
-  // GET /api/openclaw/panda-reports - Panda's recent compliance reports
+  // GET /api/openclaw/panda-reports - Legacy: redirects to reports
   router.get('/openclaw/panda-reports', async (req, res) => {
-    const reportsDir = path.join(pandaMonitorDir, 'reports');
+    const reportsDir = path.join(monitorDir, 'reports');
     const files = await listJsonFiles(reportsDir);
     const reports = [];
     const sorted = files.sort().reverse().slice(0, 20);

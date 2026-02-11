@@ -15,6 +15,7 @@ source "${BRAIN_DIR}/lib/buddy-monitor.sh"
 source "${BRAIN_DIR}/lib/rebuild-manager.sh"
 source "${BRAIN_DIR}/lib/proactive-suggestions.sh"
 source "${BRAIN_DIR}/lib/panda-openclaw-monitor.sh"
+source "${BRAIN_DIR}/lib/unified-openclaw-monitor.sh"
 
 log() {
   local timestamp
@@ -123,6 +124,12 @@ main_loop() {
 
     # 11. Panda's OpenClaw policy compliance monitor (panda only, self-throttled to 5min)
     check_panda_openclaw_monitor || log "WARN: check_panda_openclaw_monitor error"
+
+    # 12. Unified OpenClaw monitor (panda only, self-throttled to 5min)
+    # Consolidates policy, security, and integrity checks. Runs in parallel with
+    # old monitors during validation period (UNIFIED_PARALLEL_MODE=true).
+    check_unified_openclaw_monitor || log "WARN: check_unified_openclaw_monitor error"
+    process_unified_approved_actions || log "WARN: process_unified_approved_actions error"
 
     sleep "${POLL_INTERVAL}"
   done
