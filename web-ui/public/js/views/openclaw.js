@@ -18,7 +18,6 @@ export async function renderOpenClaw(app) {
   const summary = statusData.summary || {};
   const bySeverity = summary.by_severity || {};
   const byCategory = summary.by_category || {};
-  const buddyState = statusData.buddy_state;
   const pendingCount = pendingActions.filter(a => a.status === 'pending').length;
 
   // Filter alerts by category
@@ -30,10 +29,17 @@ export async function renderOpenClaw(app) {
     <div class="page-header">
       <h1 class="page-title">OpenClaw Monitor</h1>
       <span class="badge badge-status badge-${statusBadge(state.status)}">${state.status || 'unknown'}</span>
-      ${state.parallel_mode ? '<span class="badge badge-status badge-discussing" style="margin-left:6px;">Parallel Mode</span>' : ''}
     </div>
 
-    <!-- Category Status Indicators -->
+    <!-- Monitor Summary -->
+    <div class="text-sm text-dim" style="margin-top:8px; display:flex; gap:12px; flex-wrap:wrap;">
+      <span>Last: ${formatTime(state.last_check_at)}</span>
+      <span>Interval: ${state.interval_seconds ? (state.interval_seconds / 60) + 'min' : '5min'}</span>
+      <span>Checks: ${state.check_count || 0}</span>
+      <span>Operator: Panda</span>
+    </div>
+
+    <!-- Check Results -->
     <div class="stats-row" style="margin-top:16px;">
       <div class="stat-box" style="border-top:3px solid var(--primary, #3b82f6);">
         <div class="stat-value">${byCategory.policy || 0}</div>
@@ -43,17 +49,19 @@ export async function renderOpenClaw(app) {
         <div class="stat-value">${byCategory.security || 0}</div>
         <div class="stat-label">Security</div>
       </div>
-      <div class="stat-box" style="border-top:3px solid var(--warning, #f59e0b);">
+      <div class="stat-box" style="border-top:3px solid ${integrity.status === 'ok' ? 'var(--success, #22c55e)' : (integrity.status === 'tampered' ? 'var(--error, #ef4444)' : 'var(--warning, #f59e0b)')};">
         <div class="stat-value">${integrityDisplay(integrity)}</div>
         <div class="stat-label">Integrity</div>
+        ${integrity.status !== 'unknown' ? `<div class="text-sm text-dim" style="font-size:10px; margin-top:2px;">${formatTime(integrity.checked_at)}</div>` : ''}
       </div>
       <div class="stat-box">
-        <div class="stat-value">${state.check_count || 0}</div>
-        <div class="stat-label">Checks</div>
+        <div class="stat-value">${summary.total_alerts || 0}</div>
+        <div class="stat-label">Alerts</div>
       </div>
     </div>
 
-    <!-- Severity Summary -->
+    <!-- Alert Severity -->
+    ${(summary.total_alerts || 0) > 0 ? `
     <div class="stats-row" style="margin-top:8px;">
       <div class="stat-box">
         <div class="stat-value ${bySeverity.high > 0 ? 'text-danger' : ''}">${bySeverity.high || 0}</div>
@@ -66,51 +74,6 @@ export async function renderOpenClaw(app) {
       <div class="stat-box">
         <div class="stat-value">${bySeverity.low || 0}</div>
         <div class="stat-label">Low</div>
-      </div>
-      <div class="stat-box">
-        <div class="stat-value">${summary.total_alerts || 0}</div>
-        <div class="stat-label">Total</div>
-      </div>
-    </div>
-
-    <!-- Monitor State -->
-    <div class="card" style="margin-top:12px; margin-bottom:12px;">
-      <div class="card-header">
-        <span class="card-title">Monitor State</span>
-        <span class="badge badge-status">${state.monitor_type || 'unified'}</span>
-      </div>
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px;">
-        <div class="text-sm"><span class="text-dim">Last Check</span> ${formatTime(state.last_check_at)}</div>
-        <div class="text-sm"><span class="text-dim">Interval</span> ${state.interval_seconds ? (state.interval_seconds / 60) + 'min' : '5min'}</div>
-        <div class="text-sm"><span class="text-dim">Messages</span> ${state.last_message_count || 0}</div>
-        <div class="text-sm"><span class="text-dim">Operator</span> Panda</div>
-      </div>
-    </div>
-
-    <!-- Personality Integrity Card -->
-    <div class="card" style="margin-bottom:12px; border-left:3px solid ${integrity.status === 'ok' ? 'var(--success, #22c55e)' : (integrity.status === 'tampered' ? 'var(--error, #ef4444)' : 'var(--text-dim)')};">
-      <div class="card-header">
-        <span class="card-title">Personality Integrity</span>
-        <span class="badge badge-status badge-${integrity.status === 'ok' ? 'approved' : (integrity.status === 'tampered' ? 'rejected' : 'discussing')}">${integrity.status || 'unknown'}</span>
-      </div>
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px;">
-        <div class="text-sm"><span class="text-dim">SOUL.md</span> ${integrity.soul_md_hash ? integrity.soul_md_hash.substring(0, 8) + '...' : '-'}</div>
-        <div class="text-sm"><span class="text-dim">AGENTS.md</span> ${integrity.agents_md_hash ? integrity.agents_md_hash.substring(0, 8) + '...' : '-'}</div>
-        <div class="text-sm"><span class="text-dim">Last Verified</span> ${formatTime(integrity.checked_at)}</div>
-        ${integrity.last_issue ? `<div class="text-sm text-danger">${escapeHtml(integrity.last_issue)}</div>` : ''}
-      </div>
-    </div>
-
-    ${buddyState ? `
-    <!-- Legacy Buddy State (parallel mode) -->
-    <div class="card" style="margin-bottom:12px; opacity:0.7;">
-      <div class="card-header">
-        <span class="card-title">Buddy Monitor (Legacy)</span>
-        <span class="badge badge-status badge-${statusBadge(buddyState.status)}">${buddyState.status || 'unknown'}</span>
-      </div>
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px;">
-        <div class="text-sm"><span class="text-dim">Last Check</span> ${formatTime(buddyState.last_check_at)}</div>
-        <div class="text-sm"><span class="text-dim">Check Count</span> ${buddyState.check_count || 0}</div>
       </div>
     </div>
     ` : ''}
