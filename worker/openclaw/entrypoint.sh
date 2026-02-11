@@ -14,6 +14,10 @@ log "OpenClaw container starting..."
 if [[ "$(id -u)" == "0" ]]; then
   /app/network-restrict.sh apply
   log "Network restrictions applied. Dropping privileges to openclaw user..."
+  # Ensure bot_commands directory is writable by openclaw
+  if [[ -d /bot_commands ]]; then
+    chown openclaw:openclaw /bot_commands 2>/dev/null || true
+  fi
 fi
 
 # Clean up stale lock files
@@ -43,6 +47,43 @@ fi
 if [[ -f /app/personality/IDENTITY.md ]]; then
   cp /app/personality/IDENTITY.md "${OPENCLAW_HOME}/workspace/IDENTITY.md"
   log "IDENTITY.md deployed to workspace."
+fi
+if [[ -f /app/personality/AGENTS.md ]]; then
+  cp /app/personality/AGENTS.md "${OPENCLAW_HOME}/workspace/AGENTS.md"
+  log "AGENTS.md deployed to workspace."
+fi
+
+# Generate OWNER_CONTEXT.md with platform-specific IDs for buddy recognition
+OWNER_CTX="${OPENCLAW_HOME}/workspace/OWNER_CONTEXT.md"
+{
+  echo "# Owner Context - Buddy Recognition"
+  echo ""
+  echo "以下のIDで Masaru Tamegai を認識する。表示名ではなくIDで本人確認すること。"
+  echo ""
+  if [[ -n "${OWNER_DISCORD_ID:-}" ]]; then
+    echo "- Discord User ID: ${OWNER_DISCORD_ID}"
+  fi
+  if [[ -n "${OWNER_GITHUB_USERNAME:-}" ]]; then
+    echo "- GitHub Username: ${OWNER_GITHUB_USERNAME}"
+  fi
+  if [[ -n "${OWNER_SLACK_ID:-}" ]]; then
+    echo "- Slack Member ID: ${OWNER_SLACK_ID}"
+  fi
+  echo ""
+  echo "上記IDに一致するユーザー → オーナー（バディモード）"
+  echo "上記IDに一致しないユーザー → 一般ユーザー（一般モード）"
+  echo ""
+  echo "表示名が「Masaru」等でもIDが一致しなければオーナーとして扱わない。"
+} > "${OWNER_CTX}"
+log "OWNER_CONTEXT.md deployed to workspace."
+
+# Set up suggestion tool (symlink to PATH for easy access)
+if [[ -f /app/suggest.sh ]]; then
+  ln -sf /app/suggest.sh /usr/local/bin/suggest
+  # Ensure suggestions directory is writable by both OpenClaw and Triceratops
+  mkdir -p /suggestions
+  chmod 1777 /suggestions 2>/dev/null || true
+  log "Suggestion tool available: suggest \"Title\" \"Description\""
 fi
 
 # Check required env vars
@@ -93,6 +134,14 @@ if (process.env.OPENCLAW_GATEWAY_TOKEN) {
   config.gateway.auth = { mode: 'token', token: process.env.OPENCLAW_GATEWAY_TOKEN };
 }
 
+// Configure web search if BRAVE_API_KEY is available
+if (process.env.BRAVE_API_KEY) {
+  config.tools = config.tools || {};
+  config.tools.web = Object.assign(config.tools.web || {}, {
+    search: { enabled: true, provider: 'brave', apiKey: process.env.BRAVE_API_KEY }
+  });
+}
+
 // Ensure Discord plugin is enabled
 config.plugins = config.plugins || {};
 config.plugins.entries = config.plugins.entries || {};
@@ -104,6 +153,14 @@ console.log('Config written successfully');
 
 chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
 log "Configuration written (model: ${MODEL})."
+
+# Start command watcher in background (Brain → Bot communication)
+if [[ -f /app/command-watcher.sh ]]; then
+  log "Starting command watcher..."
+  /app/command-watcher.sh &
+  WATCHER_PID=$!
+  log "Command watcher started (PID: ${WATCHER_PID})"
+fi
 
 # Start gateway directly (no doctor --fix to avoid lock conflicts)
 log "Starting OpenClaw gateway..."

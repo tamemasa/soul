@@ -42,6 +42,18 @@ DISCORD_BOT_TOKEN=your_bot_token_here
 ANTHROPIC_API_KEY=your_anthropic_key_here
 ```
 
+## Step 4b: Enable Web Search (Optional)
+
+To enable the `web_search` tool (real-time information retrieval):
+
+1. Get a free Brave Search API key at https://brave.com/search/api/
+   - Free plan: 2,000 queries/month
+2. Add to `/soul/worker/openclaw/.env`:
+   ```env
+   BRAVE_API_KEY=your_brave_api_key_here
+   ```
+3. Rebuild the container (Step 5)
+
 ## Step 5: Build and Start
 
 ```bash
