@@ -23,10 +23,10 @@ export async function renderParams(app) {
 
     <div class="grid-3">
       ${nodes.map(node => `
-        <div class="card" id="params-${node.name}">
+        <div class="card node-card-${node.name}" id="params-${node.name}">
           <div class="card-header">
             <span class="badge badge-node badge-${node.name}">${node.name}</span>
-            <button class="btn btn-sm btn-secondary" onclick="saveParams('${node.name}')">保存</button>
+            <button class="btn btn-sm btn-primary" onclick="saveParams('${node.name}')">Save</button>
           </div>
           <div class="mt-4">
             ${Object.entries(node.params || {}).map(([key, val]) => `
@@ -45,22 +45,22 @@ export async function renderParams(app) {
       `).join('')}
     </div>
 
-    <h2 style="font-size:16px; margin: 20px 0 12px;">パラメータ比較</h2>
+    <div class="section-label" style="margin-top:24px;">Comparison</div>
     <div class="card">
-      <table style="width:100%; font-size:13px; border-collapse:collapse;">
+      <table class="data-table">
         <thead>
           <tr>
-            <th style="text-align:left; padding:8px; border-bottom:1px solid var(--border);">パラメータ</th>
-            ${nodes.map(n => `<th style="text-align:center; padding:8px; border-bottom:1px solid var(--border); color:${NODE_COLORS[n.name]}">${n.name}</th>`).join('')}
+            <th>Parameter</th>
+            ${nodes.map(n => `<th style="text-align:center; color:${NODE_COLORS[n.name]}">${n.name}</th>`).join('')}
           </tr>
         </thead>
         <tbody>
           ${Object.keys(PARAM_LABELS).map(key => `
             <tr>
-              <td style="padding:8px; border-bottom:1px solid var(--border);">${PARAM_LABELS[key]}</td>
+              <td style="font-family:var(--font-sans); color:var(--text-secondary);">${PARAM_LABELS[key]}</td>
               ${nodes.map(n => {
                 const val = n.params?.[key] ?? '-';
-                return `<td style="text-align:center; padding:8px; border-bottom:1px solid var(--border); font-family:var(--font-mono);">${val}</td>`;
+                return `<td style="text-align:center;">${val}</td>`;
               }).join('')}
             </tr>
           `).join('')}

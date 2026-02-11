@@ -1,9 +1,10 @@
 const ALL_NODES = ['panda', 'gorilla', 'triceratops', 'scheduler'];
-const NODE_COLORS = {
+
+const NODE_CSS_VARS = {
   panda: 'var(--node-panda)',
   gorilla: 'var(--node-gorilla)',
   triceratops: 'var(--node-triceratops)',
-  scheduler: 'var(--status-pending)'
+  scheduler: 'var(--text-secondary)'
 };
 
 export async function renderLogs(app) {
@@ -12,7 +13,7 @@ export async function renderLogs(app) {
 
   app.innerHTML = `
     <div class="page-header">
-      <h1 class="page-title">ログビューア</h1>
+      <h1 class="page-title">Log Viewer</h1>
       <select class="form-select" id="log-date" style="width:auto;">
         ${dates.map(d => `<option value="${d}" ${d === today ? 'selected' : ''}>${d}</option>`).join('')}
         ${dates.length === 0 ? `<option value="${today}">${today}</option>` : ''}
@@ -22,22 +23,22 @@ export async function renderLogs(app) {
     <div class="tabs" id="log-tabs">
       ${ALL_NODES.map((n, i) => `
         <button class="tab ${i === 0 ? 'active' : ''}" data-node="${n}"
-          style="${i === 0 ? `border-bottom: 2px solid ${NODE_COLORS[n]}` : ''}">${n}</button>
+          style="${i === 0 ? `border-bottom: 2px solid ${NODE_CSS_VARS[n]}` : ''}">${n}</button>
       `).join('')}
     </div>
 
     <div class="flex items-center gap-8 mb-4">
-      <span class="text-sm text-secondary">表示行数:</span>
+      <span class="text-sm text-secondary">Lines:</span>
       <select class="form-select" id="log-lines" style="width:auto;">
         <option value="30">30</option>
         <option value="50" selected>50</option>
         <option value="100">100</option>
         <option value="200">200</option>
       </select>
-      <button class="btn btn-sm btn-secondary" id="log-refresh">更新</button>
+      <button class="btn btn-sm btn-secondary" id="log-refresh">Refresh</button>
     </div>
 
-    <div class="log-content" id="log-content">ログを読み込み中...</div>
+    <div class="log-content" id="log-content">Loading logs...</div>
   `;
 
   let currentNode = ALL_NODES[0];
@@ -48,10 +49,10 @@ export async function renderLogs(app) {
     const el = document.getElementById('log-content');
     try {
       const data = await fetch(`/api/logs/${date}/${currentNode}?lines=${lines}`).then(r => r.json());
-      el.textContent = data.content || '(ログなし)';
+      el.textContent = data.content || '(No logs)';
       el.scrollTop = el.scrollHeight;
     } catch {
-      el.textContent = '(ログを取得できません)';
+      el.textContent = '(Failed to load logs)';
     }
   }
 
@@ -65,7 +66,7 @@ export async function renderLogs(app) {
       t.style.borderBottom = '';
     });
     btn.classList.add('active');
-    btn.style.borderBottom = `2px solid ${NODE_COLORS[currentNode]}`;
+    btn.style.borderBottom = `2px solid ${NODE_CSS_VARS[currentNode]}`;
     loadLog();
   });
 

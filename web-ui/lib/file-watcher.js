@@ -1,10 +1,13 @@
 const path = require('path');
 
 function classifyEvent(relativePath) {
+  // Exclude progress files from triggering SSE events (high-frequency writes)
+  if (relativePath.endsWith('_progress.jsonl')) return null;
   if (relativePath.startsWith('inbox/')) return 'inbox:changed';
   if (relativePath.startsWith('discussions/')) return 'discussion:updated';
   if (relativePath.startsWith('decisions/')) return 'decision:updated';
   if (relativePath.startsWith('evaluations/')) return 'evaluation:updated';
+  if (relativePath.startsWith('nodes/') && relativePath.endsWith('activity.json')) return 'activity:changed';
   if (relativePath.startsWith('nodes/') && relativePath.endsWith('params.json')) return 'params:changed';
   if (relativePath.startsWith('logs/')) return 'log:appended';
   return null;

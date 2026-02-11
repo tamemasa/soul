@@ -1,30 +1,35 @@
 import { nodeBadge } from '../components/node-badge.js';
 
 export async function renderDashboard(app) {
-  app.innerHTML = '<div class="loading">読み込み中...</div>';
+  app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
-  const [status, discussions, decisions] = await Promise.all([
+  const [status, discussions] = await Promise.all([
     fetch('/api/status').then(r => r.json()),
-    fetch('/api/discussions').then(r => r.json()),
-    fetch('/api/decisions').then(r => r.json())
+    fetch('/api/discussions').then(r => r.json())
   ]);
 
-  const recentActivity = [...discussions.slice(0, 5)];
+  const recentActivity = discussions.slice(0, 5);
 
   app.innerHTML = `
     <div class="page-header">
-      <h1 class="page-title">ダッシュボード</h1>
+      <h1 class="page-title">Dashboard</h1>
     </div>
 
     <div class="grid-3">
       ${status.nodes.map(n => `
-        <div class="card">
+        <div class="card node-card-${n.name}">
           <div class="card-header">
             ${nodeBadge(n.name)}
+            <div class="node-activity-indicator" id="activity-${n.name}">
+              ${renderActivity(n.activity)}
+            </div>
           </div>
           ${n.params ? `
-            <div class="text-sm text-secondary mt-2">
-              リスク: ${n.params.risk_tolerance} / 安全: ${n.params.safety_weight} / 革新: ${n.params.innovation_weight}
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:12px;">
+              <div class="text-sm"><span class="text-dim">RISK</span> <span style="font-family:var(--font-mono)">${n.params.risk_tolerance}</span></div>
+              <div class="text-sm"><span class="text-dim">SAFE</span> <span style="font-family:var(--font-mono)">${n.params.safety_weight}</span></div>
+              <div class="text-sm"><span class="text-dim">INNOV</span> <span style="font-family:var(--font-mono)">${n.params.innovation_weight}</span></div>
+              <div class="text-sm"><span class="text-dim">FLEX</span> <span style="font-family:var(--font-mono)">${n.params.consensus_flexibility}</span></div>
             </div>
           ` : ''}
         </div>
@@ -34,15 +39,15 @@ export async function renderDashboard(app) {
     <div class="stats-row">
       <div class="stat-box">
         <div class="stat-value">${status.counts.pending_tasks}</div>
-        <div class="stat-label">未処理タスク</div>
+        <div class="stat-label">Pending</div>
       </div>
       <div class="stat-box">
         <div class="stat-value">${status.counts.active_discussions}</div>
-        <div class="stat-label">進行中の議論</div>
+        <div class="stat-label">Discussing</div>
       </div>
       <div class="stat-box">
         <div class="stat-value">${status.counts.total_decisions}</div>
-        <div class="stat-label">合意済み決定</div>
+        <div class="stat-label">Decisions</div>
       </div>
       <div class="stat-box">
         <div class="stat-value">${status.counts.workers}</div>
@@ -50,24 +55,34 @@ export async function renderDashboard(app) {
       </div>
     </div>
 
-    <h2 style="font-size:16px; margin-bottom:12px;">最近の議論</h2>
+    <div class="section-label">Recent Activity</div>
     ${recentActivity.length > 0 ? recentActivity.map(d => `
-      <div class="card clickable" onclick="location.hash='#/discussions/${d.task_id}'">
+      <div class="card clickable" onclick="location.hash='#/timeline/${d.task_id}'">
         <div class="card-header">
           <span class="card-title">${escapeHtml(d.title)}</span>
           <span class="badge badge-status badge-${d.status}">${d.status}</span>
         </div>
-        <div class="text-sm text-secondary">
-          ラウンド ${d.current_round} &middot; ${formatTime(d.started_at)}
+        <div class="text-sm text-dim" style="font-family:var(--font-mono)">
+          Round ${d.current_round} &middot; ${formatTime(d.started_at)}
         </div>
       </div>
-    `).join('') : '<div class="empty-state">まだ議論はありません</div>'}
+    `).join('') : '<div class="empty-state">No activity yet</div>'}
   `;
+}
+
+function renderActivity(activity) {
+  if (window.__renderActivityInline) {
+    return window.__renderActivityInline(activity);
+  }
+  if (!activity || activity.status === 'idle' || activity.status === 'offline') {
+    return '<span class="activity-idle">Idle</span>';
+  }
+  return `<span class="activity-active">${activity.status}</span>`;
 }
 
 function formatTime(ts) {
   if (!ts) return '';
-  try { return new Date(ts).toLocaleString('ja-JP'); } catch { return ts; }
+  try { return new Date(ts).toLocaleString('ja-JP', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return ts; }
 }
 
 function escapeHtml(str) {

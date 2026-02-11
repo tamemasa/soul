@@ -11,7 +11,8 @@ module.exports = function (sharedDir) {
 
     const nodeList = await Promise.all(nodes.map(async (name) => {
       const params = await readJson(path.join(sharedDir, 'nodes', name, 'params.json'));
-      return { name, color: colors[name], params };
+      const activity = await readJson(path.join(sharedDir, 'nodes', name, 'activity.json'));
+      return { name, color: colors[name], params, activity };
     }));
 
     // Count pending tasks
@@ -42,6 +43,16 @@ module.exports = function (sharedDir) {
         workers: workerDirs.length
       }
     });
+  });
+
+  // Lightweight activity-only endpoint for real-time polling
+  router.get('/activity', async (req, res) => {
+    const nodes = ['panda', 'gorilla', 'triceratops'];
+    const activities = {};
+    for (const name of nodes) {
+      activities[name] = await readJson(path.join(sharedDir, 'nodes', name, 'activity.json')) || { status: 'offline' };
+    }
+    res.json(activities);
   });
 
   return router;
