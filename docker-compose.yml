@@ -16,7 +16,7 @@ services:
       - shared:/shared
       - ./brain/nodes/panda/CLAUDE.md:/brain/CLAUDE.md:ro
       - ./brain/nodes/panda/.mcp.json:/brain/.mcp.json:ro
-      - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+      - /home/masaru/.claude:/home/soul/.claude
       - ${PWD}:/soul
       - /var/run/docker.sock:/var/run/docker.sock
       - bot-commands:/shared/bot_commands
@@ -41,7 +41,7 @@ services:
       - shared:/shared
       - ./brain/nodes/gorilla/CLAUDE.md:/brain/CLAUDE.md:ro
       - ./brain/nodes/gorilla/.mcp.json:/brain/.mcp.json:ro
-      - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+      - /home/masaru/.claude:/home/soul/.claude
       - ${PWD}:/soul
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
@@ -66,7 +66,7 @@ services:
       - shared:/shared
       - ./brain/nodes/triceratops/CLAUDE.md:/brain/CLAUDE.md:ro
       - ./brain/nodes/triceratops/.mcp.json:/brain/.mcp.json:ro
-      - /home/masaru/.claude/.credentials.json:/home/soul/.claude/.credentials.json:ro
+      - /home/masaru/.claude:/home/soul/.claude
       - ${PWD}:/soul
       - /var/run/docker.sock:/var/run/docker.sock
       - openclaw-home:/openclaw:ro
@@ -113,6 +113,8 @@ services:
       - openclaw-home:/home/openclaw/.openclaw
       - openclaw-suggestions:/suggestions
       - bot-commands:/bot_commands
+    ports:
+      - "${OPENCLAW_WEBHOOK_PORT:-8080}:8080"
     networks:
       - openclaw-net
     restart: unless-stopped

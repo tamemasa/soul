@@ -66,6 +66,9 @@ OWNER_CTX="${OPENCLAW_HOME}/workspace/OWNER_CONTEXT.md"
   if [[ -n "${OWNER_GITHUB_USERNAME:-}" ]]; then
     echo "- GitHub Username: ${OWNER_GITHUB_USERNAME}"
   fi
+  if [[ -n "${OWNER_LINE_ID:-}" ]]; then
+    echo "- LINE User ID: ${OWNER_LINE_ID}"
+  fi
   if [[ -n "${OWNER_SLACK_ID:-}" ]]; then
     echo "- Slack Member ID: ${OWNER_SLACK_ID}"
   fi
@@ -87,9 +90,9 @@ if [[ -f /app/suggest.sh ]]; then
   log "Suggestion tools available: suggest, write-approval"
 fi
 
-# Check required env vars
-if [[ -z "${DISCORD_BOT_TOKEN:-}" ]]; then
-  echo "ERROR: DISCORD_BOT_TOKEN is not set."
+# Check required env vars — at least one channel must be configured
+if [[ -z "${DISCORD_BOT_TOKEN:-}" && -z "${LINE_CHANNEL_ACCESS_TOKEN:-}" ]]; then
+  echo "ERROR: Neither DISCORD_BOT_TOKEN nor LINE_CHANNEL_ACCESS_TOKEN is set. At least one channel is required."
   exit 1
 fi
 
@@ -115,23 +118,41 @@ config.agents = config.agents || {};
 config.agents.defaults = config.agents.defaults || {};
 config.agents.defaults.model = { primary: process.env.OPENCLAW_MODEL || 'anthropic/claude-sonnet-4-20250514' };
 
-// Merge Discord channel config
+// Merge Discord channel config (only if token is set)
 config.channels = config.channels || {};
-config.channels.discord = Object.assign(config.channels.discord || {}, {
-  enabled: true,
-  token: process.env.DISCORD_BOT_TOKEN,
-  allowBots: true,
-  guilds: { '*': { requireMention: false } },
-  dm: { enabled: true, policy: 'pairing' },
-  textChunkLimit: 2000,
-  historyLimit: 20,
-  dmHistoryLimit: 10,
-  retry: { attempts: 3, minDelayMs: 500, maxDelayMs: 30000, jitter: 0.1 },
-  actions: { reactions: true, messages: true, threads: true, moderation: false, roles: false, presence: false }
-});
+if (process.env.DISCORD_BOT_TOKEN) {
+  config.channels.discord = Object.assign(config.channels.discord || {}, {
+    enabled: true,
+    token: process.env.DISCORD_BOT_TOKEN,
+    allowBots: true,
+    guilds: { '*': { requireMention: false } },
+    dm: { enabled: true, policy: 'pairing' },
+    textChunkLimit: 2000,
+    historyLimit: 20,
+    dmHistoryLimit: 10,
+    retry: { attempts: 3, minDelayMs: 500, maxDelayMs: 30000, jitter: 0.1 },
+    actions: { reactions: true, messages: true, threads: true, moderation: false, roles: false, presence: false }
+  });
+}
 
-// Merge gateway config
-config.gateway = Object.assign(config.gateway || {}, { bind: 'loopback', mode: 'local' });
+// Merge LINE channel config (only if token is set)
+if (process.env.LINE_CHANNEL_ACCESS_TOKEN) {
+  config.channels.line = Object.assign(config.channels.line || {}, {
+    enabled: true,
+    channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
+    channelSecret: process.env.LINE_CHANNEL_SECRET || '',
+    dm: { enabled: true, policy: 'pairing' },
+    groups: { '*': { requireMention: true } },
+  });
+  // Enable LINE plugin
+  config.plugins = config.plugins || {};
+  config.plugins.entries = config.plugins.entries || {};
+  config.plugins.entries.line = { enabled: true };
+}
+
+// Merge gateway config — use 0.0.0.0 when LINE is enabled (webhook receiver needs external access)
+const gatewayBind = process.env.LINE_CHANNEL_ACCESS_TOKEN ? '0.0.0.0' : 'loopback';
+config.gateway = Object.assign(config.gateway || {}, { bind: gatewayBind, mode: 'local' });
 if (process.env.OPENCLAW_GATEWAY_TOKEN) {
   config.gateway.auth = { mode: 'token', token: process.env.OPENCLAW_GATEWAY_TOKEN };
 }
@@ -144,10 +165,12 @@ if (process.env.BRAVE_API_KEY) {
   });
 }
 
-// Ensure Discord plugin is enabled
-config.plugins = config.plugins || {};
-config.plugins.entries = config.plugins.entries || {};
-config.plugins.entries.discord = { enabled: true };
+// Ensure Discord plugin is enabled (only if token is set)
+if (process.env.DISCORD_BOT_TOKEN) {
+  config.plugins = config.plugins || {};
+  config.plugins.entries = config.plugins.entries || {};
+  config.plugins.entries.discord = { enabled: true };
+}
 
 fs.writeFileSync('${CONFIG_FILE}', JSON.stringify(config, null, 2));
 console.log('Config written successfully');

@@ -302,7 +302,7 @@ _unified_get_recent_messages() {
   local session_files
   session_files=$(echo "${sessions_json}" | jq -r '
     to_entries[] |
-    select(.value.channel == "discord" and .value.sessionFile != null) |
+    select((.value.channel == "discord" or .value.channel == "line") and .value.sessionFile != null) |
     .value.sessionFile
   ' 2>/dev/null)
 
