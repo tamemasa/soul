@@ -49,10 +49,28 @@ invoke_claude() {
 $(cat "${context_file}")"
   fi
 
-  claude -p "${full_prompt}" ${CLAUDE_MODEL:+--model "${CLAUDE_MODEL}"} --permission-mode bypassPermissions --output-format text 2>>"${SHARED_DIR}/logs/$(date -u +%Y-%m-%d)/${NODE_NAME}_claude.log" || {
-    log "ERROR: Claude invocation failed"
-    echo '{"error": "claude invocation failed"}'
-  }
+  local log_file="${SHARED_DIR}/logs/$(date -u +%Y-%m-%d)/${NODE_NAME}_claude.log"
+  local result
+  local exit_code
+
+  # First attempt
+  result=$(claude -p "${full_prompt}" ${CLAUDE_MODEL:+--model "${CLAUDE_MODEL}"} --permission-mode bypassPermissions --output-format text 2>>"${log_file}")
+  exit_code=$?
+
+  if [[ ${exit_code} -ne 0 ]]; then
+    log "WARN: Claude invocation failed (exit=${exit_code}), retrying in 5s..."
+    sleep 5
+    # Retry once
+    result=$(claude -p "${full_prompt}" ${CLAUDE_MODEL:+--model "${CLAUDE_MODEL}"} --permission-mode bypassPermissions --output-format text 2>>"${log_file}")
+    exit_code=$?
+    if [[ ${exit_code} -ne 0 ]]; then
+      log "ERROR: Claude invocation failed after retry (exit=${exit_code})"
+      echo '{"error": "claude invocation failed"}'
+      return 1
+    fi
+  fi
+
+  echo "${result}"
 }
 
 set_activity() {
