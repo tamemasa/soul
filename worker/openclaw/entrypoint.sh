@@ -141,7 +141,7 @@ if (process.env.LINE_CHANNEL_ACCESS_TOKEN) {
     enabled: true,
     channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
     channelSecret: process.env.LINE_CHANNEL_SECRET || '',
-    dm: { enabled: true, policy: 'pairing' },
+    dm: { enabled: true, policy: 'open' },
     groups: { '*': { requireMention: true } },
   });
   // Enable LINE plugin
@@ -150,8 +150,8 @@ if (process.env.LINE_CHANNEL_ACCESS_TOKEN) {
   config.plugins.entries.line = { enabled: true };
 }
 
-// Merge gateway config — use 0.0.0.0 when LINE is enabled (webhook receiver needs external access)
-const gatewayBind = process.env.LINE_CHANNEL_ACCESS_TOKEN ? '0.0.0.0' : 'loopback';
+// Merge gateway config — use 'lan' when LINE is enabled (webhook receiver needs external access)
+const gatewayBind = process.env.LINE_CHANNEL_ACCESS_TOKEN ? 'lan' : 'loopback';
 config.gateway = Object.assign(config.gateway || {}, { bind: gatewayBind, mode: 'local' });
 if (process.env.OPENCLAW_GATEWAY_TOKEN) {
   config.gateway.auth = { mode: 'token', token: process.env.OPENCLAW_GATEWAY_TOKEN };
@@ -177,6 +177,11 @@ console.log('Config written successfully');
 " 2>&1
 
 chmod 600 "${CONFIG_FILE}" 2>/dev/null || true
+# Ensure openclaw user can read the config after privilege drop
+chown openclaw:openclaw "${CONFIG_FILE}" 2>/dev/null || true
+chown -R openclaw:openclaw "${OPENCLAW_HOME}" 2>/dev/null || true
+# Ensure /tmp is writable for jiti cache
+chmod 1777 /tmp 2>/dev/null || true
 log "Configuration written (model: ${MODEL})."
 
 # Start command watcher in background (Brain → Bot communication)
@@ -186,6 +191,12 @@ if [[ -f /app/command-watcher.sh ]]; then
   WATCHER_PID=$!
   log "Command watcher started (PID: ${WATCHER_PID})"
 fi
+
+# Fix ownership before starting gateway (recovers from root-owned files
+# created by 'docker exec' commands which run as root by default).
+# NOTE: Always use 'docker exec -u openclaw' for openclaw CLI commands.
+chown -R openclaw:openclaw "${OPENCLAW_HOME}" 2>/dev/null || true
+chown -R openclaw:openclaw /tmp/openclaw /tmp/jiti 2>/dev/null || true
 
 # Start gateway directly (no doctor --fix to avoid lock conflicts)
 log "Starting OpenClaw gateway..."

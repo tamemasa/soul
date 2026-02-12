@@ -114,7 +114,7 @@ services:
       - openclaw-suggestions:/suggestions
       - bot-commands:/bot_commands
     ports:
-      - "${OPENCLAW_WEBHOOK_PORT:-8080}:8080"
+      - "${OPENCLAW_WEBHOOK_PORT:-8080}:18789"
     networks:
       - openclaw-net
     restart: unless-stopped
