@@ -191,6 +191,20 @@ web-ui/
 - Git is available — commit changes with descriptive messages when appropriate
 - After modifying web-ui or brain code, the container may need rebuilding
 
+### Container修正フロー（必須）
+
+ソースや設定ファイルを修正する場合は、以下の順序を必ず守ること:
+
+1. **まずコンテナ内で直接修正して動作確認する**
+   - `docker exec` でコンテナに入り、ファイルを直接編集・テスト
+   - 動作に問題がないことを確認する
+2. **動作確認後、ビルドファイルを修正する**
+   - Dockerfile、entrypoint.sh、ソースコード等のイメージビルドに使われるファイルを更新
+3. **コンテナをリビルドして実機に反映する**
+   - `docker compose up -d --build <container>` で反映
+
+**いきなりビルドファイルを修正してリビルドしない。必ずコンテナ内で先に動作確認すること。**
+
 ### Docker Operations
 
 ```bash
