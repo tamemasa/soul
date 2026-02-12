@@ -139,10 +139,9 @@ if (process.env.DISCORD_BOT_TOKEN) {
 if (process.env.LINE_CHANNEL_ACCESS_TOKEN) {
   config.channels.line = Object.assign(config.channels.line || {}, {
     enabled: true,
-    channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-    channelSecret: process.env.LINE_CHANNEL_SECRET || '',
     dm: { enabled: true, policy: 'open' },
-    groups: { '*': { requireMention: true } },
+    groupPolicy: 'open',
+    groups: { '*': { requireMention: false } },
   });
   // Enable LINE plugin
   config.plugins = config.plugins || {};
@@ -183,6 +182,10 @@ chown -R openclaw:openclaw "${OPENCLAW_HOME}" 2>/dev/null || true
 # Ensure /tmp is writable for jiti cache
 chmod 1777 /tmp 2>/dev/null || true
 log "Configuration written (model: ${MODEL})."
+
+# NOTE: LINE tokens are NOT written to config (breaks outbound delivery).
+# OpenClaw reads LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET from env vars
+# automatically when the line channel is enabled but no tokens are in config (token:env mode).
 
 # Start command watcher in background (Brain → Bot communication)
 if [[ -f /app/command-watcher.sh ]]; then
