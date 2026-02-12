@@ -179,6 +179,33 @@ Proposed approach: ${approach}"
     done
   fi
 
+  # Load execution history (previous rounds that were approved and executed)
+  local execution_history=""
+  local history_file="${SHARED_DIR}/decisions/${task_id}_history.json"
+  if [[ -f "${history_file}" ]]; then
+    local history_count
+    history_count=$(jq 'length' "${history_file}" 2>/dev/null || echo 0)
+    if [[ ${history_count} -gt 0 ]]; then
+      execution_history="## Previous Execution Results:
+The following decisions were already approved and executed. Do NOT re-propose work that has already been completed.
+"
+      local h
+      for ((h=0; h<history_count; h++)); do
+        local exec_round exec_approach exec_result exec_completed executor
+        exec_round=$(jq -r ".[$h].decision.final_round // \"?\"" "${history_file}")
+        exec_approach=$(jq -r ".[$h].decision.final_approach // \"\"" "${history_file}")
+        exec_result=$(jq -r ".[$h].result.result // \"\"" "${history_file}")
+        exec_completed=$(jq -r ".[$h].decision.completed_at // \"\"" "${history_file}")
+        executor=$(jq -r ".[$h].decision.executor // \"\"" "${history_file}")
+        execution_history="${execution_history}
+### Execution #$((h+1)) (Round ${exec_round}, executed by ${executor}, completed at ${exec_completed}):
+**Approach taken:** ${exec_approach}
+**Result:** ${exec_result}
+"
+      done
+    fi
+  fi
+
   # Load user comments if any
   local user_comments=""
   local comments_file="${discussion_dir}/comments.json"
@@ -224,6 +251,7 @@ ${attachment_context}
 
 ## Round ${round} of ${MAX_ROUNDS}
 ${context}
+${execution_history}
 ${user_comments}
 
 ## Instructions
