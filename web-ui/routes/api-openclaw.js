@@ -9,6 +9,22 @@ module.exports = function (sharedDir) {
 
   // ===== Unified API Endpoints =====
 
+  // POST /api/openclaw/trigger-check - 手動チェックトリガー
+  router.post('/openclaw/trigger-check', async (req, res) => {
+    const forceFile = path.join(monitorDir, 'force_check.json');
+    const existing = await readJson(forceFile);
+    if (existing) {
+      return res.status(429).json({ error: 'Check already pending', triggered_at: existing.triggered_at });
+    }
+    const data = {
+      triggered_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      triggered_by: 'dashboard',
+      type: 'manual_full_check'
+    };
+    await writeJsonAtomic(forceFile, data);
+    res.json({ status: 'triggered', ...data });
+  });
+
   // GET /api/openclaw/status - Monitor status (reads from /shared/monitoring/latest.json)
   router.get('/openclaw/status', async (req, res) => {
     const unified = await readJson(path.join(monitorDir, 'latest.json'));

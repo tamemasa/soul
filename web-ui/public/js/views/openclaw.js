@@ -32,11 +32,13 @@ export async function renderOpenClaw(app) {
     </div>
 
     <!-- Monitor Summary -->
-    <div class="text-sm text-dim" style="margin-top:8px; display:flex; gap:12px; flex-wrap:wrap;">
+    <div class="text-sm text-dim" style="margin-top:8px; display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
       <span>Last: ${formatTime(state.last_check_at)}</span>
-      <span>Interval: ${state.interval_seconds ? (state.interval_seconds / 60) + 'min' : '5min'}</span>
+      <span>ポリシー: 5min / フル: 10min</span>
       <span>Checks: ${state.check_count || 0}</span>
       <span>Operator: Panda</span>
+      <button id="btn-force-check" class="btn" style="padding:2px 10px; font-size:11px; margin-left:auto;"
+              onclick="window.__triggerManualCheck()">手動チェック実行</button>
     </div>
 
     <!-- Check Results -->
@@ -136,6 +138,32 @@ export async function renderOpenClaw(app) {
     ` : ''}
   `;
 }
+
+// 手動チェックトリガーハンドラー (60秒クールダウン)
+let __forceCheckCooldown = false;
+window.__triggerManualCheck = async function() {
+  if (__forceCheckCooldown) return;
+  const btn = document.getElementById('btn-force-check');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = '実行中...';
+  __forceCheckCooldown = true;
+  try {
+    const res = await fetch('/api/openclaw/trigger-check', { method: 'POST' });
+    if (res.ok) {
+      btn.textContent = 'トリガー済み';
+    } else {
+      const data = await res.json();
+      btn.textContent = data.error || 'エラー';
+    }
+  } catch (e) {
+    btn.textContent = 'エラー';
+  }
+  setTimeout(() => {
+    __forceCheckCooldown = false;
+    if (btn) { btn.disabled = false; btn.textContent = '手動チェック実行'; }
+  }, 60000);
+};
 
 // Alert filter handler
 window.__filterAlerts = function(category) {

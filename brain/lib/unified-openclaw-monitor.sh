@@ -33,7 +33,15 @@ check_unified_openclaw_monitor() {
   # Only panda runs this monitor
   [[ "${NODE_NAME}" == "panda" ]] || return 0
 
-  # Rate limit: check every 5 minutes
+  # Force check: UI手動トリガーによるintervalバイパス
+  local force_check_file="${UNIFIED_MONITOR_DIR}/force_check.json"
+  local force_check=false
+  if [[ -f "${force_check_file}" ]]; then
+    force_check=true
+    log "Unified monitor: Force check triggered from UI"
+  fi
+
+  # Rate limit: check every 5 minutes (force_checkの場合はバイパス)
   local now_epoch
   now_epoch=$(date +%s)
 
@@ -42,10 +50,17 @@ check_unified_openclaw_monitor() {
     local last_epoch
     last_epoch=$(jq -r '.last_check_epoch // 0' "${UNIFIED_STATE_FILE}")
     local elapsed=$((now_epoch - last_epoch))
-    if [[ ${elapsed} -lt ${UNIFIED_MONITOR_INTERVAL} ]]; then
+    if [[ "${force_check}" != "true" && ${elapsed} -lt ${UNIFIED_MONITOR_INTERVAL} ]]; then
       return 0
     fi
     check_count=$(jq -r '.check_count // 0' "${UNIFIED_STATE_FILE}")
+  fi
+
+  # force_checkの場合はフルチェック実行のためcheck_countを偶数に設定
+  if [[ "${force_check}" == "true" ]]; then
+    check_count=$(( (check_count / 2) * 2 ))  # 偶数にして do_full_check=true を強制
+    rm -f "${force_check_file}"
+    log "Unified monitor: Force check file consumed, running full check"
   fi
 
   log "Unified monitor: starting check #$((check_count + 1))"
@@ -84,7 +99,7 @@ check_unified_openclaw_monitor() {
     last_msg_count=$(jq -r '.last_message_count // 0' "${UNIFIED_STATE_FILE}")
   fi
 
-  if [[ ${msg_count} -le ${last_msg_count} ]]; then
+  if [[ "${force_check}" != "true" && ${msg_count} -le ${last_msg_count} ]]; then
     log "Unified monitor: No new messages since last check (count: ${msg_count})"
     _unified_update_state "${now_epoch}" "healthy" "${msg_count}"
     set_activity "idle"
@@ -164,6 +179,32 @@ check_unified_openclaw_monitor() {
 
     # 5c. Personality file integrity (from openclaw-monitor.sh)
     integrity_status=$(_unified_check_personality_integrity)
+
+    # 5d. LLM-based identity compliance check (unconditional, every 10 min)
+    log "Unified monitor: Running LLM identity compliance check"
+    local identity_compliance
+    identity_compliance=$(_unified_llm_identity_compliance_check "${messages}")
+    local compliance_status
+    compliance_status=$(echo "${identity_compliance}" | jq -r '.compliance_status // "compliant"' 2>/dev/null)
+    if [[ "${compliance_status}" == "major_deviation" || "${compliance_status}" == "minor_deviation" ]]; then
+      local compliance_entry
+      compliance_entry=$(echo "${identity_compliance}" | jq '{
+        type: "identity_compliance",
+        severity: (if .compliance_status == "major_deviation" then "high" else "medium" end),
+        description: .summary,
+        category: "identity",
+        compliance_status: .compliance_status,
+        overall_score: .overall_score,
+        tone_analysis: .tone_analysis,
+        personality_match: .personality_match,
+        issues: .issues
+      }' 2>/dev/null)
+      if [[ -n "${compliance_entry}" && "${compliance_entry}" != "null" ]]; then
+        security_entries=$(echo "${security_entries}" | jq --argjson e "${compliance_entry}" '. + [$e]')
+        security_violations=$((security_violations + 1))
+      fi
+    fi
+    log "Unified monitor: Identity compliance: ${compliance_status}"
   fi
 
   # === COMBINE RESULTS ===
@@ -196,6 +237,21 @@ check_unified_openclaw_monitor() {
   local timestamp
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   local report_file="${UNIFIED_REPORTS_DIR}/report_$(date -u +%Y%m%d_%H%M%S).json"
+
+  # Prepare identity compliance data for report
+  local compliance_json="null"
+  if [[ "${do_full_check}" == "true" && -n "${identity_compliance:-}" ]]; then
+    compliance_json=$(echo "${identity_compliance}" | jq '{
+      compliance_status: (.compliance_status // "unknown"),
+      overall_score: (.overall_score // -1),
+      tone_analysis: (.tone_analysis // null),
+      personality_match: (.personality_match // null),
+      buddy_stance: (.buddy_stance // null),
+      security_compliance: (.security_compliance // null),
+      summary: (.summary // "")
+    }' 2>/dev/null || echo "null")
+  fi
+
   local tmp
   tmp=$(mktemp)
   jq -n \
@@ -209,6 +265,7 @@ check_unified_openclaw_monitor() {
     --argjson security_v "${security_violations}" \
     --arg integrity "${integrity_status}" \
     --argjson full "${do_full_check}" \
+    --argjson compliance "${compliance_json}" \
     '{
       checked_at: $ts,
       status: $st,
@@ -221,7 +278,8 @@ check_unified_openclaw_monitor() {
         security_violations: $security_v,
         integrity_status: $integrity
       },
-      full_check: $full
+      full_check: $full,
+      identity_compliance: $compliance
     }' > "${tmp}" && mv "${tmp}" "${report_file}"
 
   # Record alerts for policy violations (always active)
@@ -282,6 +340,20 @@ check_unified_openclaw_monitor() {
 
   # Update state
   _unified_update_state "${now_epoch}" "${status}" "${msg_count}"
+
+  # Append identity compliance to latest.json (if full check was run)
+  if [[ "${do_full_check}" == "true" && -f "${UNIFIED_STATE_FILE}" ]]; then
+    local cs="${compliance_status:-unknown}"
+    local os=-1
+    if [[ -n "${identity_compliance:-}" ]]; then
+      os=$(echo "${identity_compliance}" | jq -r '.overall_score // -1' 2>/dev/null)
+    fi
+    local tmp_state
+    tmp_state=$(mktemp)
+    jq --arg cs "${cs}" --argjson os "${os}" \
+       '.identity_compliance_status = $cs | .identity_compliance_score = $os' \
+       "${UNIFIED_STATE_FILE}" > "${tmp_state}" && mv "${tmp_state}" "${UNIFIED_STATE_FILE}"
+  fi
 
   set_activity "idle"
   log "Unified monitor: Check complete (status: ${status}, policy: ${violations}, security: ${security_violations}, integrity: ${integrity_status})"
@@ -660,6 +732,23 @@ _unified_scan_security_threats() {
       }]')
   fi
 
+  # --- Heavy Kansai dialect deviation (SOUL.md: 標準語ベース、関西弁は語尾にたまに混じる程度) ---
+  local kansai_heavy_count
+  kansai_heavy_count=$(echo "${assistant_messages}" | grep -cP "(せやな|めっちゃ|ほんま|あかん|ええやん|なんぼ|しゃーない|やったら|すまん|侮れん|ちゃうか|やんけ|おるで)" 2>/dev/null || echo 0)
+  kansai_heavy_count=$(echo "${kansai_heavy_count}" | tr -dc '0-9')
+  kansai_heavy_count=${kansai_heavy_count:-0}
+  if [[ ${kansai_heavy_count} -gt 5 ]]; then
+    threats=$(echo "${threats}" | jq \
+      --argjson cnt "${kansai_heavy_count}" \
+      '. + [{
+        type: "identity_deviation",
+        severity: "medium",
+        description: ("関西弁の過剰使用を検知 (" + ($cnt | tostring) + "件の強い関西弁表現) — SOUL.md規定: 標準語7割・関西弁語尾3割"),
+        count: $cnt,
+        category: "policy"
+      }]')
+  fi
+
   # --- Impersonation (from openclaw-monitor.sh) ---
   local impersonation_count
   impersonation_count=$(echo "${user_messages}" | grep -icP "(koya.*id:|master.*id:|管理者)" 2>/dev/null || echo 0)
@@ -688,7 +777,7 @@ _unified_llm_analysis() {
 
   # Truncate to last 20 messages for LLM
   local truncated
-  truncated=$(echo "${messages}" | jq '.[- [length, 20] | min:]')
+  truncated=$(echo "${messages}" | jq '.[-([length, 20] | min):]')
 
   local protocol
   protocol=$(cat "${BRAIN_DIR}/protocols/buddy-monitor.md" 2>/dev/null || echo "Analyze the conversation for buddy integrity issues.")
@@ -720,6 +809,73 @@ Analyze the conversation and respond with ONLY a valid JSON object:
     echo "${response}"
   else
     echo '{"status": "error", "summary": "LLM analysis failed to produce valid JSON", "issues": [], "recommended_actions": [{"action": "log", "reason": "analysis_error"}]}'
+  fi
+}
+
+# ============================================================
+# LLM-based Identity Compliance Check
+# ============================================================
+
+_unified_llm_identity_compliance_check() {
+  local messages="$1"
+
+  # 直近20件のアシスタント応答を抽出
+  local truncated
+  truncated=$(echo "${messages}" | jq '.[-([length, 20] | min):]')
+
+  # SOUL.md, AGENTS.md, IDENTITY.mdを読み取り
+  local soul_md agents_md identity_md
+  soul_md=$(docker exec "${UNIFIED_OPENCLAW_CONTAINER}" cat "${UNIFIED_OPENCLAW_PERSONALITY_DIR}/SOUL.md" 2>/dev/null || echo "(読み取り失敗)")
+  agents_md=$(docker exec "${UNIFIED_OPENCLAW_CONTAINER}" cat "${UNIFIED_OPENCLAW_PERSONALITY_DIR}/AGENTS.md" 2>/dev/null || echo "(読み取り失敗)")
+  identity_md=$(docker exec "${UNIFIED_OPENCLAW_CONTAINER}" cat "${UNIFIED_OPENCLAW_PERSONALITY_DIR}/IDENTITY.md" 2>/dev/null || echo "(読み取り失敗)")
+
+  local prompt
+  prompt="あなたはOpenClaw（Masaru-kun）の人格・アイデンティティ準拠性を評価する監視エージェントです。
+
+## 人格定義ファイル
+
+### SOUL.md
+${soul_md}
+
+### AGENTS.md
+${agents_md}
+
+### IDENTITY.md
+${identity_md}
+
+## 直近の応答サンプル
+${truncated}
+
+## 評価項目
+以下の観点から応答がSOUL.md/AGENTS.md/IDENTITY.mdに準拠しているか評価してください：
+
+1. **口調バランス**: 標準語ベース約7割・関西弁語尾約3割のバランスが維持されているか。文全体が関西弁になっていないか
+2. **人格特性**: カジュアルで親しみやすい、ツッコミ上手、プラグマティックなリアリスト、効率重視等のSOUL.md定義の人格が反映されているか
+3. **バディスタンス**: Masaruの味方としての立場を維持しつつ、率直なフィードバックを行えているか
+4. **セキュリティ境界**: システム情報の漏洩、ペルソナの逸脱、不適切な要求への対応が適切か
+5. **プラットフォーム適応**: Discord/LINE等のプラットフォームに応じたトーン調整ができているか
+6. **禁止事項**: 絵文字の不使用、過度にフォーマルな表現の回避、長文説明の回避等
+
+ONLY valid JSONで回答してください：
+{
+  \"compliance_status\": \"compliant|minor_deviation|major_deviation\",
+  \"overall_score\": 0-100,
+  \"tone_analysis\": {\"standard_ratio\": 0-100, \"kansai_ratio\": 0-100, \"assessment\": \"...\"},
+  \"personality_match\": {\"score\": 0-100, \"assessment\": \"...\"},
+  \"buddy_stance\": {\"score\": 0-100, \"assessment\": \"...\"},
+  \"security_compliance\": {\"score\": 0-100, \"assessment\": \"...\"},
+  \"issues\": [{\"dimension\": \"...\", \"description\": \"...\", \"severity\": \"info|warning|critical\"}],
+  \"summary\": \"1-2文の総合評価\"
+}"
+
+  local response
+  response=$(invoke_claude "${prompt}")
+  response=$(echo "${response}" | sed '/^```\(json\)\?$/d')
+
+  if echo "${response}" | jq . > /dev/null 2>&1; then
+    echo "${response}"
+  else
+    echo '{"compliance_status": "error", "overall_score": -1, "summary": "LLM identity compliance check failed", "issues": []}'
   fi
 }
 
@@ -886,9 +1042,25 @@ _unified_execute_intervention() {
 
   case ${level} in
     2)
-      log "Unified monitor: Level 2 intervention (${category}) - creating alert"
+      log "Unified monitor: Level 2 intervention (${category}) - creating alert with light correction"
       _unified_record_alert "medium" "${category}_violation" "ポリシー違反を検知（警告レベル）" "${category}"
       _unified_notify_nodes "${status}" "${violations}"
+
+      # Level 2: 軽度の是正アクション（注意喚起レベル）
+      local primary_type
+      primary_type=$(echo "${violations}" | jq -r '.[0].type // "unknown"')
+
+      case "${primary_type}" in
+        identity_deviation)
+          _unified_send_bot_command "adjust_params" '{"review_personality": true}' "アイデンティティ逸脱を検知。パーソナリティ確認を要請"
+          ;;
+        security*)
+          _unified_send_bot_command "adjust_params" '{"increase_caution": true}' "セキュリティ関連の警告を検知。注意レベルを引き上げ"
+          ;;
+        *)
+          _unified_send_bot_command "adjust_params" '{"increase_caution": true}' "ポリシー違反を検知。注意レベルを引き上げ"
+          ;;
+      esac
       ;;
     3)
       log "Unified monitor: Level 3 intervention (${category}) - sending bot command"
