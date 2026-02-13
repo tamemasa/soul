@@ -1307,3 +1307,27 @@ body {
 .btn-reject { background: var(--bg-elevated); color: var(--text-secondary); border: 1px solid var(--border); }
 .text-danger { color: var(--error); }
 .text-warn { color: var(--warning); }
+
+/* ─── Host Metrics Charts ─── */
+.metrics-chart-container {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  position: relative;
+  height: 260px;
+}
+.metrics-chart-container canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+.metrics-chart-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+@media (max-width: 768px) {
+  .metrics-chart-container { height: 220px; padding: 12px; }
+}
