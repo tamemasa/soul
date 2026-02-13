@@ -1254,27 +1254,8 @@ check_personality_manual_trigger() {
     return 0
   fi
 
-  # Check cooldown (6 hours since last trigger)
-  local trigger_file="${PI_DIR}/trigger.json"
-  if [[ -f "${trigger_file}" ]]; then
-    local last_triggered
-    last_triggered=$(jq -r '.triggered_at // ""' "${trigger_file}" 2>/dev/null)
-    if [[ -n "${last_triggered}" ]]; then
-      local last_epoch now_epoch
-      last_epoch=$(date -d "${last_triggered}" +%s 2>/dev/null || echo 0)
-      now_epoch=$(date +%s)
-      if (( now_epoch - last_epoch < 21600 )); then
-        log "Personality improvement: Manual trigger ignored (within 6h cooldown)"
-        local tmp
-        tmp=$(mktemp)
-        jq '.status = "ignored" | .reason = "cooldown"' "${manual_trigger}" > "${tmp}" && mv "${tmp}" "${manual_trigger}"
-        _pi_send_line_message "パーソナリティ改善は6時間以内に実行済みです。次回実行可能時間まで少々お待ちください。"
-        return 0
-      fi
-    fi
-  fi
-
   # Create the main trigger
+  local trigger_file="${PI_DIR}/trigger.json"
   local tmp
   tmp=$(mktemp)
   jq -n \
