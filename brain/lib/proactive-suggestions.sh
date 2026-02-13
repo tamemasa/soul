@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# proactive-suggestions.sh - Proactive Suggestion Engine (Phase 1)
+# proactive-suggestions.sh - Proactive Suggestion Engine
 #
-# Monitors time-based triggers and generates suggestions automatically.
-# Phase 1: Time-based triggers only, dry-run mode (log output, no delivery).
+# Monitors time-based and random-window triggers, generates suggestions,
+# discovers trending content, and delivers to multiple destinations.
 #
 # Only triceratops runs this engine (as executor node).
 
@@ -11,6 +11,7 @@ PROACTIVE_CONFIG="${PROACTIVE_DIR}/config.json"
 PROACTIVE_STATE="${PROACTIVE_DIR}/state/engine.json"
 PROACTIVE_DRYRUN_DIR="${PROACTIVE_DIR}/dryrun"
 PROACTIVE_SUGGESTIONS_DIR="${PROACTIVE_DIR}/suggestions"
+PROACTIVE_BROADCAST_DIR="${PROACTIVE_DIR}/broadcasts"
 
 # Check interval: every 60 seconds (self-throttled within daemon's 10s loop)
 PROACTIVE_CHECK_INTERVAL=60
@@ -21,7 +22,7 @@ JST_OFFSET=32400
 # ---- Initialization ----
 
 _init_proactive_engine() {
-  mkdir -p "${PROACTIVE_DIR}"/{dryrun,feedback,state,triggers,suggestions}
+  mkdir -p "${PROACTIVE_DIR}"/{dryrun,feedback,state,triggers,suggestions,broadcasts}
 
   if [[ ! -f "${PROACTIVE_CONFIG}" ]]; then
     log "Proactive engine: No config found, creating default"
@@ -71,6 +72,7 @@ CFGEOF
   "mode": "dryrun",
   "last_check_at": null,
   "last_trigger_checks": {},
+  "random_window_schedule": {},
   "daily_counts": {
     "date": null,
     "info": 0,
@@ -78,10 +80,29 @@ CFGEOF
     "alert": 0,
     "total": 0
   },
+  "last_broadcast": null,
   "started_at": "${now_ts}",
   "total_suggestions_generated": 0
 }
 EOF
+  fi
+
+  # Load credentials from secrets file
+  _load_credentials
+}
+
+# Load API credentials from secrets.env
+_load_credentials() {
+  local secrets_file
+  secrets_file=$(jq -r '.credentials_file // ""' "${PROACTIVE_CONFIG}" 2>/dev/null)
+  if [[ -z "${secrets_file}" ]]; then
+    secrets_file="${PROACTIVE_DIR}/secrets.env"
+  fi
+  if [[ -f "${secrets_file}" ]]; then
+    while IFS='=' read -r key value; do
+      [[ -z "${key}" || "${key}" == \#* ]] && continue
+      export "${key}=${value}"
+    done < "${secrets_file}"
   fi
 }
 
@@ -119,6 +140,14 @@ _get_jst_date() {
   date -u -d "@${jst_epoch}" +%Y-%m-%d
 }
 
+# Get current JST total minutes from midnight (0-1439)
+_get_jst_total_minutes() {
+  local h m
+  h=$(_get_jst_hour)
+  m=$(_get_jst_minute)
+  echo $(( h * 60 + m ))
+}
+
 # ---- Rate Limiting ----
 
 # Check and reset daily counters if date changed
@@ -131,9 +160,9 @@ _reset_daily_counts_if_needed() {
   if [[ "${state_date}" != "${today}" ]]; then
     local tmp
     tmp=$(mktemp)
-    jq --arg d "${today}" '.daily_counts = {"date": $d, "info": 0, "suggestion": 0, "alert": 0, "total": 0}' \
+    jq --arg d "${today}" '.daily_counts = {"date": $d, "info": 0, "suggestion": 0, "alert": 0, "total": 0} | .random_window_schedule = {}' \
       "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
-    log "Proactive engine: Daily counters reset for ${today}"
+    log "Proactive engine: Daily counters and random schedules reset for ${today}"
   fi
 }
 
@@ -243,6 +272,132 @@ _should_fire_time_trigger() {
   return 0
 }
 
+# Check if a random_window trigger should fire
+# Generates a random time on first check within window, then fires at that time
+_should_fire_random_window_trigger() {
+  local trigger_name="$1"
+  local trigger_json="$2"
+
+  local enabled
+  enabled=$(echo "${trigger_json}" | jq -r '.enabled // false')
+  if [[ "${enabled}" != "true" ]]; then
+    return 1
+  fi
+
+  # Check if already fired today
+  local today
+  today=$(_get_jst_date)
+  local last_fired
+  last_fired=$(jq -r ".last_trigger_checks.\"${trigger_name}\" // \"\"" "${PROACTIVE_STATE}")
+  if [[ "${last_fired}" == "${today}" ]]; then
+    return 1
+  fi
+
+  local window_start window_end
+  window_start=$(echo "${trigger_json}" | jq -r '.window_start_hour_jst // 12')
+  window_end=$(echo "${trigger_json}" | jq -r '.window_end_hour_jst // 24')
+  local window_start_min=$(( window_start * 60 ))
+  local window_end_min=$(( window_end * 60 ))
+
+  local current_min
+  current_min=$(_get_jst_total_minutes)
+
+  # Not yet in the window
+  if [[ ${current_min} -lt ${window_start_min} ]]; then
+    return 1
+  fi
+
+  # Check if we have a scheduled fire time for today
+  local scheduled_min
+  scheduled_min=$(jq -r ".random_window_schedule.\"${trigger_name}\" // \"\"" "${PROACTIVE_STATE}")
+
+  if [[ -z "${scheduled_min}" || "${scheduled_min}" == "null" ]]; then
+    # Generate random fire time within remaining window
+    local remaining_start=${current_min}
+    if [[ ${remaining_start} -lt ${window_start_min} ]]; then
+      remaining_start=${window_start_min}
+    fi
+    local range=$(( window_end_min - remaining_start ))
+    if [[ ${range} -le 0 ]]; then
+      # Window has passed, skip for today
+      return 1
+    fi
+    scheduled_min=$(( remaining_start + (RANDOM % range) ))
+    # Save scheduled time to state
+    local tmp
+    tmp=$(mktemp)
+    jq --arg name "${trigger_name}" --argjson min "${scheduled_min}" \
+      '.random_window_schedule[$name] = $min' \
+      "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
+    local sched_h=$(( scheduled_min / 60 ))
+    local sched_m=$(( scheduled_min % 60 ))
+    log "Proactive engine: Scheduled ${trigger_name} for today at JST ${sched_h}:$(printf '%02d' ${sched_m})"
+    # Update broadcast state for UI
+    _update_broadcast_state "scheduled" "${scheduled_min}"
+  fi
+
+  # Check if current time has reached the scheduled time (within 2 min tolerance)
+  local diff=$(( current_min - scheduled_min ))
+  if [[ ${diff} -ge 0 && ${diff} -le 2 ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+# Update broadcast state file for UI consumption
+_update_broadcast_state() {
+  local status="$1"
+  local scheduled_min="${2:-}"
+  local now_ts
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local today
+  today=$(_get_jst_date)
+
+  local state_file="${PROACTIVE_DIR}/state/broadcast.json"
+  local broadcast_json
+  if [[ -f "${state_file}" ]]; then
+    broadcast_json=$(cat "${state_file}")
+  else
+    broadcast_json='{}'
+  fi
+
+  local tmp
+  tmp=$(mktemp)
+  if [[ "${status}" == "scheduled" && -n "${scheduled_min}" ]]; then
+    # Count active chats when schedule is set (once per day)
+    local trigger_cfg activity_window active_count
+    trigger_cfg=$(jq '.triggers.trending_news' "${PROACTIVE_CONFIG}" 2>/dev/null)
+    activity_window=$(echo "${trigger_cfg}" | jq -r '.activity_window_hours // 72' 2>/dev/null)
+    local active_chats_json
+    active_chats_json=$(_get_active_chats "${activity_window}" 2>/dev/null)
+    active_count=$(echo "${active_chats_json}" | jq 'length' 2>/dev/null || echo 0)
+
+    local sched_h=$(( scheduled_min / 60 ))
+    local sched_m=$(( scheduled_min % 60 ))
+    local sched_time="${today}T$(printf '%02d' ${sched_h}):$(printf '%02d' ${sched_m}):00+09:00"
+    echo "${broadcast_json}" | jq \
+      --arg s "${status}" --arg t "${sched_time}" --arg u "${now_ts}" --argjson ac "${active_count}" \
+      '. + {status: $s, next_scheduled_at: $t, active_chats: $ac, updated_at: $u}' \
+      > "${tmp}" && mv "${tmp}" "${state_file}"
+  elif [[ "${status}" == "delivering" ]]; then
+    echo "${broadcast_json}" | jq \
+      --arg s "${status}" --arg u "${now_ts}" \
+      '. + {status: $s, updated_at: $u}' \
+      > "${tmp}" && mv "${tmp}" "${state_file}"
+  elif [[ "${status}" == "completed" ]]; then
+    echo "${broadcast_json}" | jq \
+      --arg s "${status}" --arg u "${now_ts}" \
+      '. + {status: $s, last_delivered_at: $u, next_scheduled_at: null, updated_at: $u}' \
+      > "${tmp}" && mv "${tmp}" "${state_file}"
+  else
+    echo "${broadcast_json}" | jq \
+      --arg s "${status}" --arg u "${now_ts}" \
+      '. + {status: $s, updated_at: $u}' \
+      > "${tmp}" && mv "${tmp}" "${state_file}"
+  fi
+}
+
 # Mark a trigger as fired today
 _mark_trigger_fired() {
   local trigger_name="$1"
@@ -253,6 +408,253 @@ _mark_trigger_fired() {
   jq --arg name "${trigger_name}" --arg date "${today}" \
     '.last_trigger_checks[$name] = $date' \
     "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
+}
+
+# ---- Trending Content Discovery ----
+
+# Search for trending content using Brave Search API
+_discover_trending_content() {
+  local trigger_json="$1"
+
+  local interests
+  interests=$(echo "${trigger_json}" | jq -r '.interest_categories // [] | join(", ")')
+  if [[ -z "${interests}" ]]; then
+    interests="AI, テクノロジー, 投資, 暗号資産, ゲーム, プログラミング"
+  fi
+
+  local brave_key="${BRAVE_API_KEY:-}"
+  if [[ -z "${brave_key}" ]]; then
+    log "WARN: Proactive engine: BRAVE_API_KEY not set, using LLM knowledge only"
+    _discover_trending_content_llm_only "${interests}"
+    return
+  fi
+
+  local today
+  today=$(_get_jst_date)
+
+  # Search queries: mix of Japanese and English for broader coverage, including X/Twitter trends
+  local search_results=""
+  local queries=(
+    "最新ニュース AI テクノロジー ${today}"
+    "crypto blockchain news today"
+    "テック ニュース 投資 トレンド"
+    "gaming industry news latest"
+    "programming developer news"
+    "trending topics site:x.com ${today}"
+    "話題 トレンド site:x.com OR site:twitter.com"
+  )
+
+  for query in "${queries[@]}"; do
+    local encoded_query
+    encoded_query=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${query}'))" 2>/dev/null || echo "${query}")
+
+    local response
+    response=$(curl -s --max-time 10 \
+      -H "Accept: application/json" \
+      -H "Accept-Language: ja,en" \
+      -H "X-Subscription-Token: ${brave_key}" \
+      "https://api.search.brave.com/res/v1/web/search?q=${encoded_query}&count=8&freshness=pd" 2>/dev/null)
+
+    if [[ -n "${response}" ]] && echo "${response}" | jq '.web.results' > /dev/null 2>&1; then
+      local results
+      results=$(echo "${response}" | jq '[.web.results[]? | {title: .title, url: .url, description: .description, age: .age}]' 2>/dev/null)
+      if [[ -n "${results}" && "${results}" != "[]" ]]; then
+        if [[ -z "${search_results}" ]]; then
+          search_results="${results}"
+        else
+          search_results=$(echo "${search_results}" "${results}" | jq -s 'add')
+        fi
+      fi
+    fi
+    # Brief delay to avoid rate limiting
+    sleep 1
+  done
+
+  if [[ -z "${search_results}" || "${search_results}" == "[]" ]]; then
+    log "WARN: Proactive engine: Brave Search returned no results, falling back to LLM"
+    _discover_trending_content_llm_only "${interests}"
+    return
+  fi
+
+  # Use LLM to curate and select the best items
+  local prompt="あなたはニュースキュレーターです。以下の検索結果から、Masaru Tamegaiが最も興味を持ちそうな記事を8〜10件選んでください。
+
+## Masaruの興味分野
+${interests}
+
+## 検索結果
+${search_results}
+
+## 選定基準
+- 上記の興味分野に関連するもの
+- 新鮮で話題性のあるもの
+- X（旧Twitter）で話題のトピックも含めること
+- 暴力的・過激な政治発言・個人攻撃・センセーショナルなゴシップは除外
+- 実用的・教育的・インスピレーションを与える内容を優先
+- 重複する話題は最も情報量の多いものを1つだけ選択
+
+以下のJSON配列で回答してください（コードフェンスなし、JSONのみ）：
+[
+  {
+    \"title\": \"記事タイトル\",
+    \"url\": \"記事URL\",
+    \"summary\": \"2〜3文の要約\",
+    \"category\": \"該当カテゴリ（AI/テクノロジー/投資/暗号資産/ゲーム/プログラミング/Xトレンド）\",
+    \"interest_score\": 8
+  }
+]"
+
+  local response
+  response=$(invoke_claude "${prompt}")
+
+  # Strip markdown code fences
+  response=$(echo "${response}" | sed '/^```\(json\)\?$/d')
+
+  # Validate JSON
+  if echo "${response}" | jq '.[0]' > /dev/null 2>&1; then
+    echo "${response}"
+  else
+    local json_part
+    json_part=$(echo "${response}" | sed -n '/^[[:space:]]*\[/,/^[[:space:]]*\]/p')
+    if [[ -n "${json_part}" ]] && echo "${json_part}" | jq '.[0]' > /dev/null 2>&1; then
+      echo "${json_part}"
+    else
+      log "WARN: Proactive engine: Failed to parse curated content, falling back to LLM"
+      _discover_trending_content_llm_only "${interests}"
+    fi
+  fi
+}
+
+# Fallback: generate trending content using LLM knowledge only
+_discover_trending_content_llm_only() {
+  local interests="$1"
+  local today
+  today=$(_get_jst_date)
+
+  local prompt="あなたはニュースキュレーターです。${today}の最新トレンドとして、以下の興味分野から8〜10件のニューストピックを紹介してください。X（旧Twitter）で話題のトピックも含めてください。
+
+## 興味分野
+${interests}
+
+## 条件
+- あなたの知識に基づく最新の話題やトレンドを紹介
+- Xで話題のトピックも含めること
+- 暴力的・過激な政治発言・個人攻撃は除外
+- 実用的・教育的な内容を優先
+- URLは含めず、トピックの紹介に集中
+
+以下のJSON配列で回答してください（コードフェンスなし、JSONのみ）：
+[
+  {
+    \"title\": \"トピックタイトル\",
+    \"url\": null,
+    \"summary\": \"2〜3文の要約\",
+    \"category\": \"該当カテゴリ\",
+    \"interest_score\": 8
+  }
+]"
+
+  local response
+  response=$(invoke_claude "${prompt}")
+  response=$(echo "${response}" | sed '/^```\(json\)\?$/d')
+
+  if echo "${response}" | jq '.[0]' > /dev/null 2>&1; then
+    echo "${response}"
+  else
+    local json_part
+    json_part=$(echo "${response}" | sed -n '/^[[:space:]]*\[/,/^[[:space:]]*\]/p')
+    if [[ -n "${json_part}" ]] && echo "${json_part}" | jq '.[0]' > /dev/null 2>&1; then
+      echo "${json_part}"
+    else
+      log "WARN: Proactive engine: LLM fallback also failed to produce valid JSON"
+      echo '[{"title":"コンテンツ生成エラー","url":null,"summary":"トレンドコンテンツの生成に失敗しました","category":"info","interest_score":0}]'
+    fi
+  fi
+}
+
+# ---- Destination-Specific Content Formatting ----
+
+# Format discovered content for a specific destination
+# Now accepts chat_profile info for per-chat personality customization
+_format_content_for_destination() {
+  local content_json="$1"
+  local dest_json="$2"
+  local chat_profile_json="${3:-}"
+
+  local dest_type
+  dest_type=$(echo "${dest_json}" | jq -r '.type')
+
+  # Extract chat profile attributes (if provided)
+  local profile_name profile_audience profile_tone
+  if [[ -n "${chat_profile_json}" && "${chat_profile_json}" != "null" ]]; then
+    profile_name=$(echo "${chat_profile_json}" | jq -r '.name // ""')
+    profile_audience=$(echo "${chat_profile_json}" | jq -r '.audience // ""')
+    profile_tone=$(echo "${chat_profile_json}" | jq -r '.tone // ""')
+  else
+    profile_name=""
+    profile_audience=""
+    profile_tone=""
+  fi
+
+  local today
+  today=$(_get_jst_date)
+
+  # Base personality: OpenClaw (Masaru) persona
+  local personality_base="あなたは「Masaruくん」というキャラクターとして情報を配信する。以下のパーソナリティルールを厳守すること：
+- 絵文字は使わない（絶対に使用禁止）
+- 標準語ベース（約70%）に関西弁（約30%）を混ぜる
+- 関西弁の語尾（〜やな、〜やで等）は1メッセージに1-2回まで。連続使用禁止
+- 強い関西弁表現（めっちゃ、ほんま、あかん、ええやん、しゃーない）は1メッセージに1回まで
+- 標準語の語尾を基本にする：〜だな、〜だわ、〜なんよな、〜だけど、〜だろ
+- 友達に話しかけるようなカジュアルな口調。敬語は使わない
+- 短めのメッセージを心がける。長い説明は避ける"
+
+  local prompt="${personality_base}
+
+## 配信先
+- チャット名: ${profile_name:-${dest_type}}
+- 対象: ${profile_audience:-一般}
+- トーン指示: ${profile_tone:-カジュアル}
+
+## 配信するニュース・トレンド情報
+${content_json}
+
+## フォーマット指示"
+
+  case "${dest_type}" in
+    discord)
+      prompt="${prompt}
+Discord向けにフォーマットしてください：
+- 各ニュースは **太字タイトル** で始め、リンクがあれば含める
+- 技術的な詳細も含めてOK（対象に合わせて調整）
+- 全体を1つのメッセージにまとめる（2000文字以内）
+- 自然な書き出しから始める（「おつ」「よう」等カジュアルに）
+
+プレーンテキストで回答してください（JSONではなく、そのままDiscordに投稿できる形式）："
+      ;;
+    line)
+      prompt="${prompt}
+LINE向けにフォーマットしてください：
+- 簡潔でカジュアルな文体
+- 対象に合わせて技術用語を調整（家族向けなら分かりやすく言い換え）
+- 全体を1つのメッセージにまとめる（1000文字以内）
+- 自然な書き出しから始める
+- URLは省略可（タイトルと要約で十分）
+
+プレーンテキストで回答してください（JSONではなく、そのままLINEに送信できる形式）："
+      ;;
+    *)
+      prompt="${prompt}
+プレーンテキストでニュースサマリーを作成してください："
+      ;;
+  esac
+
+  local response
+  response=$(invoke_claude "${prompt}")
+
+  # Clean up any potential JSON wrapping
+  response=$(echo "${response}" | sed '/^```/d')
+  echo "${response}"
 }
 
 # ---- Suggestion Generation ----
@@ -338,14 +740,16 @@ _build_suggestion_record() {
   local trigger_json="$3"
   local content_json="$4"
 
-  local category now_ts
+  local category now_ts trigger_type
   category=$(echo "${trigger_json}" | jq -r '.category // "info"')
+  trigger_type=$(echo "${trigger_json}" | jq -r '.type // "time"')
   now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
   jq -n \
     --arg id "${suggestion_id}" \
     --arg cat "${category}" \
     --arg trigger_name "${trigger_name}" \
+    --arg trigger_type "${trigger_type}" \
     --arg detected_at "${now_ts}" \
     --arg created_at "${now_ts}" \
     --argjson content "${content_json}" \
@@ -354,7 +758,7 @@ _build_suggestion_record() {
       category: $cat,
       title: $content.title,
       trigger: {
-        type: "time",
+        type: $trigger_type,
         source: $trigger_name,
         detected_at: $detected_at
       },
@@ -489,6 +893,99 @@ _deliver_discord() {
   fi
 }
 
+# Send message to Discord channel via Bot API
+_deliver_discord_bot() {
+  local channel_id="$1"
+  local message_text="$2"
+
+  local bot_token="${DISCORD_BOT_TOKEN:-}"
+  if [[ -z "${bot_token}" ]]; then
+    log "WARN: Proactive engine: DISCORD_BOT_TOKEN not set, skipping Discord delivery"
+    return 1
+  fi
+
+  # Truncate to Discord's 2000 char limit
+  if [[ ${#message_text} -gt 2000 ]]; then
+    message_text="${message_text:0:1997}..."
+  fi
+
+  local payload
+  payload=$(jq -n --arg content "${message_text}" '{content: $content}')
+
+  local http_code response_body
+  response_body=$(mktemp)
+  http_code=$(curl -s -o "${response_body}" -w "%{http_code}" \
+    -H "Authorization: Bot ${bot_token}" \
+    -H "Content-Type: application/json" \
+    -d "${payload}" \
+    "https://discord.com/api/v10/channels/${channel_id}/messages" 2>/dev/null) || {
+    log "ERROR: Proactive engine: Discord Bot API request failed"
+    rm -f "${response_body}"
+    return 1
+  }
+
+  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
+    log "Proactive engine: Discord message sent to channel ${channel_id} (HTTP ${http_code})"
+    rm -f "${response_body}"
+    return 0
+  else
+    log "ERROR: Proactive engine: Discord Bot API returned HTTP ${http_code}: $(cat "${response_body}")"
+    rm -f "${response_body}"
+    return 1
+  fi
+}
+
+# Send message via LINE Push API
+_deliver_line() {
+  local target_id="$1"
+  local message_text="$2"
+
+  local line_token="${LINE_CHANNEL_ACCESS_TOKEN:-}"
+  if [[ -z "${line_token}" ]]; then
+    log "WARN: Proactive engine: LINE_CHANNEL_ACCESS_TOKEN not set, skipping LINE delivery"
+    return 1
+  fi
+
+  # LINE message limit is 5000 chars
+  if [[ ${#message_text} -gt 5000 ]]; then
+    message_text="${message_text:0:4997}..."
+  fi
+
+  local payload
+  payload=$(jq -n \
+    --arg to "${target_id}" \
+    --arg text "${message_text}" \
+    '{
+      to: $to,
+      messages: [{
+        type: "text",
+        text: $text
+      }]
+    }')
+
+  local http_code response_body
+  response_body=$(mktemp)
+  http_code=$(curl -s -o "${response_body}" -w "%{http_code}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${line_token}" \
+    -d "${payload}" \
+    "https://api.line.me/v2/bot/message/push" 2>/dev/null) || {
+    log "ERROR: Proactive engine: LINE Push API request failed"
+    rm -f "${response_body}"
+    return 1
+  }
+
+  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
+    log "Proactive engine: LINE message sent to ${target_id} (HTTP ${http_code})"
+    rm -f "${response_body}"
+    return 0
+  else
+    log "ERROR: Proactive engine: LINE Push API returned HTTP ${http_code}: $(cat "${response_body}")"
+    rm -f "${response_body}"
+    return 1
+  fi
+}
+
 # Submit suggestion as Soul System task (for 'suggestion' category)
 _deliver_to_inbox() {
   local suggestion_json="$1"
@@ -530,6 +1027,542 @@ _deliver_to_inbox() {
   log "Proactive engine: Submitted suggestion as task ${task_id}: ${title}"
 }
 
+# ---- Active Chat Discovery (72h Filter) ----
+
+# Get active chats from OpenClaw sessions.json filtered by activity window
+# Returns JSON array of {type, target_id, session_key} objects
+_get_active_chats() {
+  local activity_window_hours="${1:-72}"
+
+  local sessions_json
+  sessions_json=$(docker exec soul-openclaw cat /home/openclaw/.openclaw/agents/main/sessions/sessions.json 2>/dev/null)
+  if [[ -z "${sessions_json}" ]]; then
+    log "WARN: Proactive engine: Could not read sessions.json from OpenClaw"
+    echo "[]"
+    return
+  fi
+
+  local now_ms
+  now_ms=$(($(date +%s) * 1000))
+  local window_ms=$(( activity_window_hours * 3600 * 1000 ))
+
+  # Parse sessions and filter by activity window, then extract target info
+  echo "${sessions_json}" | jq --argjson now "${now_ms}" --argjson window "${window_ms}" '
+    to_entries
+    | map(select(
+        .value.updatedAt != null
+        and ($now - .value.updatedAt) < $window
+      ))
+    | map(
+        if (.key | test("^agent:main:discord:channel:"))
+        then {
+          type: "discord",
+          target_id: (.key | split(":") | last),
+          session_key: .key
+        }
+        elif (.key | test("^agent:main:line:group:group:"))
+        then {
+          type: "line",
+          target_id: (.value.deliveryContext.to | split(":") | last),
+          session_key: .key
+        }
+        elif (.key == "agent:main:main" and (.value.deliveryContext.channel == "line"))
+        then {
+          type: "line",
+          target_id: (.value.deliveryContext.to | split(":") | last),
+          session_key: .key
+        }
+        else empty
+        end
+      )
+  ' 2>/dev/null || echo "[]"
+}
+
+# ---- Trending News Broadcast ----
+
+# Get recent conversation topic hints from a session file (last few assistant messages)
+_get_recent_chat_context() {
+  local session_key="$1"
+
+  local session_file
+  session_file=$(docker exec soul-openclaw cat /home/openclaw/.openclaw/agents/main/sessions/sessions.json 2>/dev/null \
+    | jq -r --arg key "${session_key}" '.[$key].sessionFile // ""' 2>/dev/null)
+
+  if [[ -z "${session_file}" || "${session_file}" == "null" ]]; then
+    echo ""
+    return
+  fi
+
+  # Get last 3 assistant text snippets (truncated) for topic hints
+  local context
+  context=$(docker exec soul-openclaw tail -20 "${session_file}" 2>/dev/null \
+    | grep -o '"text":"[^"]*"' 2>/dev/null \
+    | tail -3 \
+    | sed 's/"text":"//;s/"$//' \
+    | cut -c1-100 \
+    | tr '\n' ' ')
+
+  echo "${context}"
+}
+
+# Main broadcast flow for trending_news trigger
+_execute_trending_broadcast() {
+  local trigger_name="$1"
+  local trigger_json="$2"
+
+  log "Proactive engine: Starting trending news broadcast"
+  _update_broadcast_state "delivering"
+  set_activity "broadcasting_news" "\"trigger\":\"${trigger_name}\","
+
+  # Step 1: Discover trending content (single fetch, 8-10 items)
+  log "Proactive engine: Discovering trending content via Brave Search..."
+  local content_json
+  content_json=$(_discover_trending_content "${trigger_json}")
+
+  if [[ -z "${content_json}" || "${content_json}" == "[]" ]]; then
+    log "ERROR: Proactive engine: No trending content discovered"
+    _update_broadcast_state "error"
+    set_activity "idle"
+    return 1
+  fi
+
+  local item_count
+  item_count=$(echo "${content_json}" | jq 'length' 2>/dev/null || echo 0)
+  log "Proactive engine: Discovered ${item_count} trending items"
+
+  # Step 2: Get mode
+  local mode
+  mode=$(jq -r '.mode // "dryrun"' "${PROACTIVE_CONFIG}")
+
+  # Step 3: Build delivery targets (dynamic or static)
+  local is_dynamic activity_window
+  is_dynamic=$(echo "${trigger_json}" | jq -r '.dynamic // false')
+  activity_window=$(echo "${trigger_json}" | jq -r '.activity_window_hours // 72')
+
+  # Get destination style/context templates and chat profiles from config
+  local dest_templates chat_profiles default_profile
+  dest_templates=$(echo "${trigger_json}" | jq -c '.destinations // []')
+  chat_profiles=$(echo "${trigger_json}" | jq -c '.chat_profiles // {}')
+  default_profile=$(echo "${trigger_json}" | jq -c '.default_profile // {"name":"一般","audience":"一般","preferred_topics":["AI","テクノロジー"],"tone":"カジュアル"}')
+
+  # Build actual delivery targets
+  local delivery_targets="[]"
+  if [[ "${is_dynamic}" == "true" ]]; then
+    log "Proactive engine: Dynamic mode - discovering active chats (${activity_window}h window)..."
+    local active_chats
+    active_chats=$(_get_active_chats "${activity_window}")
+    local active_count
+    active_count=$(echo "${active_chats}" | jq 'length' 2>/dev/null || echo 0)
+    log "Proactive engine: Found ${active_count} active chats"
+
+    if [[ ${active_count} -eq 0 ]]; then
+      log "WARN: Proactive engine: No active chats found, skipping broadcast"
+      _update_broadcast_state "completed"
+      set_activity "idle"
+      return 0
+    fi
+
+    # For each active chat, merge with matching destination template and chat profile
+    delivery_targets=$(echo "${active_chats}" | jq -c --argjson templates "${dest_templates}" --argjson profiles "${chat_profiles}" --argjson defprofile "${default_profile}" '
+      [.[] | . as $chat |
+        ($templates | map(select(.type == $chat.type)) | .[0]) as $tmpl |
+        ($profiles[$chat.session_key] // $defprofile) as $profile |
+        if $tmpl then
+          $chat + {style: $tmpl.style, context: $tmpl.context, chat_profile: $profile}
+        else
+          $chat + {style: "default", context: "", chat_profile: $profile}
+        end
+      ]
+    ')
+  else
+    # Static mode: use destinations from config directly
+    delivery_targets="${dest_templates}"
+  fi
+
+  local dest_count
+  dest_count=$(echo "${delivery_targets}" | jq 'length')
+
+  # Step 4: Use single LLM call to assign optimal articles to each chat
+  log "Proactive engine: Assigning articles to chats via LLM..."
+
+  # Build chat description list for LLM
+  local chat_descriptions=""
+  local i=0
+  while [[ ${i} -lt ${dest_count} ]]; do
+    local dest session_key profile_name profile_audience profile_topics profile_tone
+    dest=$(echo "${delivery_targets}" | jq -c ".[${i}]")
+    session_key=$(echo "${dest}" | jq -r '.session_key // ""')
+    profile_name=$(echo "${dest}" | jq -r '.chat_profile.name // "不明"')
+    profile_audience=$(echo "${dest}" | jq -r '.chat_profile.audience // "一般"')
+    profile_topics=$(echo "${dest}" | jq -r '.chat_profile.preferred_topics // [] | join(", ")')
+    profile_tone=$(echo "${dest}" | jq -r '.chat_profile.tone // "カジュアル"')
+
+    # Get recent conversation context if available
+    local recent_context=""
+    if [[ -n "${session_key}" ]]; then
+      recent_context=$(_get_recent_chat_context "${session_key}")
+    fi
+
+    chat_descriptions="${chat_descriptions}
+### チャット${i}: ${profile_name}
+- session_key: ${session_key}
+- 対象: ${profile_audience}
+- 好みのトピック: ${profile_topics}
+- トーン: ${profile_tone}"
+    if [[ -n "${recent_context}" ]]; then
+      chat_descriptions="${chat_descriptions}
+- 最近の会話: ${recent_context}"
+    fi
+
+    i=$((i + 1))
+  done
+
+  # Number articles for reference
+  local numbered_articles
+  numbered_articles=$(echo "${content_json}" | jq '[to_entries[] | {index: .key, title: .value.title, category: .value.category, summary: .value.summary}]')
+
+  local assignment_prompt="あなたはニュース配信の最適化エンジンです。以下の候補記事リストから、各チャットに最適な3〜5件を選んでください。
+チャットの属性（対象、好みのトピック、トーン、最近の会話）を考慮して、そのチャットで最も盛り上がりそうな記事を選んでください。
+
+## 候補記事
+${numbered_articles}
+
+## チャット一覧
+${chat_descriptions}
+
+## ルール
+- 各チャットに3〜5件の記事インデックスを割り当てる
+- チャットごとに異なる記事セットになるよう最適化する
+- 好みのトピックに合わない記事は割り当てない
+- 全チャットで同じ記事セットにしないこと
+
+以下のJSON形式で回答してください（コードフェンスなし、JSONのみ）：
+{
+  \"assignments\": {
+    \"0\": [0, 2, 4],
+    \"1\": [1, 3, 5]
+  }
+}"
+
+  local assignment_response
+  assignment_response=$(invoke_claude "${assignment_prompt}")
+  assignment_response=$(echo "${assignment_response}" | sed '/^```\(json\)\?$/d')
+
+  # Parse assignment JSON
+  local assignments
+  assignments=$(echo "${assignment_response}" | jq '.assignments // {}' 2>/dev/null)
+  if [[ -z "${assignments}" || "${assignments}" == "null" || "${assignments}" == "{}" ]]; then
+    # Try extracting JSON object
+    local json_part
+    json_part=$(echo "${assignment_response}" | sed -n '/^[[:space:]]*{/,/^[[:space:]]*}/p')
+    assignments=$(echo "${json_part}" | jq '.assignments // {}' 2>/dev/null || echo '{}')
+  fi
+
+  local broadcast_id now_ts
+  broadcast_id=$(_generate_suggestion_id)
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  local delivery_results="[]"
+
+  # Step 5: Format and deliver to each chat (with error isolation)
+  i=0
+  while [[ ${i} -lt ${dest_count} ]]; do
+    local dest dest_type target_id session_key chat_profile
+    dest=$(echo "${delivery_targets}" | jq -c ".[${i}]")
+    dest_type=$(echo "${dest}" | jq -r '.type')
+    target_id=$(echo "${dest}" | jq -r '.target_id // ""')
+    session_key=$(echo "${dest}" | jq -r '.session_key // ""')
+    chat_profile=$(echo "${dest}" | jq -c '.chat_profile // null')
+
+    local delivery_status="success"
+    local delivery_error=""
+    local formatted_content=""
+
+    # Error isolation: wrap each chat's processing in a subshell-like pattern
+    if true; then
+      # Get assigned article indices for this chat
+      local assigned_indices
+      assigned_indices=$(echo "${assignments}" | jq -c --arg idx "${i}" '.[$idx] // []' 2>/dev/null)
+      if [[ -z "${assigned_indices}" || "${assigned_indices}" == "null" || "${assigned_indices}" == "[]" ]]; then
+        # Fallback: use all articles if assignment failed
+        log "WARN: Proactive engine: No assignment for chat ${i}, using all articles"
+        assigned_indices=$(echo "${content_json}" | jq '[range(length)]')
+      fi
+
+      # Build per-chat content from assigned indices
+      local chat_content
+      chat_content=$(echo "${content_json}" | jq -c --argjson indices "${assigned_indices}" '[. as $all | $indices[] | $all[.] // empty]')
+
+      log "Proactive engine: Formatting content for ${dest_type} (target: ${target_id}, articles: $(echo "${chat_content}" | jq 'length'))..."
+      formatted_content=$(_format_content_for_destination "${chat_content}" "${dest}" "${chat_profile}")
+
+      if [[ "${mode}" == "dryrun" ]]; then
+        log "Proactive engine [DRYRUN]: Would deliver to ${dest_type}:${target_id}: ${#formatted_content} chars"
+        delivery_status="dryrun"
+      else
+        case "${dest_type}" in
+          discord)
+            local channel_id="${target_id}"
+            if [[ -z "${channel_id}" ]]; then
+              channel_id=$(echo "${dest}" | jq -r '.channel_id // ""')
+            fi
+            if [[ -n "${channel_id}" ]]; then
+              if ! _deliver_discord_bot "${channel_id}" "${formatted_content}"; then
+                delivery_status="failed"
+                delivery_error="Discord delivery failed"
+              fi
+            else
+              delivery_status="failed"
+              delivery_error="No channel_id configured"
+            fi
+            ;;
+          line)
+            if [[ -z "${target_id}" ]]; then
+              target_id=$(echo "${dest}" | jq -r '.target_id // ""')
+            fi
+            if [[ -n "${target_id}" ]]; then
+              if ! _deliver_line "${target_id}" "${formatted_content}"; then
+                delivery_status="failed"
+                delivery_error="LINE delivery failed"
+              fi
+            else
+              delivery_status="failed"
+              delivery_error="No target_id configured"
+            fi
+            ;;
+          *)
+            delivery_status="skipped"
+            delivery_error="Unknown destination type: ${dest_type}"
+            ;;
+        esac
+      fi
+    fi
+
+    # Always record result, even if chat processing had errors
+    delivery_results=$(echo "${delivery_results}" | jq \
+      --arg type "${dest_type}" \
+      --arg tid "${target_id}" \
+      --arg sk "${session_key}" \
+      --arg status "${delivery_status}" \
+      --arg error "${delivery_error}" \
+      --arg chars "${#formatted_content}" \
+      '. + [{destination: $type, target_id: $tid, session_key: $sk, status: $status, error: $error, content_length: ($chars | tonumber)}]')
+
+    i=$((i + 1))
+  done
+
+  # Step 6: Save broadcast record
+  local broadcast_record
+  broadcast_record=$(jq -n \
+    --arg id "${broadcast_id}" \
+    --arg trigger "${trigger_name}" \
+    --arg mode "${mode}" \
+    --arg created "${now_ts}" \
+    --argjson content "${content_json}" \
+    --argjson deliveries "${delivery_results}" \
+    '{
+      id: $id,
+      trigger: $trigger,
+      mode: $mode,
+      content: $content,
+      deliveries: $deliveries,
+      created_at: $created
+    }')
+
+  local broadcast_file="${PROACTIVE_BROADCAST_DIR}/${broadcast_id}.json"
+  local tmp
+  tmp=$(mktemp)
+  echo "${broadcast_record}" > "${tmp}" && mv "${tmp}" "${broadcast_file}"
+
+  # Update broadcast state for UI
+  local state_file="${PROACTIVE_DIR}/state/broadcast.json"
+  tmp=$(mktemp)
+  jq -n \
+    --arg status "completed" \
+    --arg last_id "${broadcast_id}" \
+    --arg delivered_at "${now_ts}" \
+    --argjson deliveries "${delivery_results}" \
+    --argjson active_chats "${dest_count}" \
+    '{
+      status: $status,
+      last_broadcast_id: $last_id,
+      last_delivered_at: $delivered_at,
+      last_deliveries: $deliveries,
+      active_chats: $active_chats,
+      next_scheduled_at: null,
+      updated_at: $delivered_at
+    }' > "${tmp}" && mv "${tmp}" "${state_file}"
+
+  log "Proactive engine: Broadcast ${broadcast_id} completed (${dest_count} destinations)"
+  set_activity "idle"
+  return 0
+}
+
+# ---- Force Trigger ----
+
+# Check for manual force trigger from UI
+_check_force_trigger() {
+  local force_file="${PROACTIVE_DIR}/force_trigger.json"
+  if [[ ! -f "${force_file}" ]]; then
+    return 1
+  fi
+
+  local trigger_type
+  trigger_type=$(jq -r '.trigger // ""' "${force_file}" 2>/dev/null)
+  if [[ -z "${trigger_type}" ]]; then
+    rm -f "${force_file}"
+    return 1
+  fi
+
+  log "Proactive engine: Force trigger detected: ${trigger_type}"
+  rm -f "${force_file}"
+
+  # Return the trigger name to fire
+  echo "${trigger_type}"
+  return 0
+}
+
+# ---- On-Demand Broadcast Request ----
+
+# Check for broadcast request from OpenClaw
+_check_broadcast_request() {
+  local request_file="/openclaw-suggestions/broadcast_request.json"
+  if [[ ! -f "${request_file}" ]]; then
+    return 1
+  fi
+
+  local request_json
+  request_json=$(cat "${request_file}" 2>/dev/null)
+  if [[ -z "${request_json}" ]]; then
+    rm -f "${request_file}"
+    return 1
+  fi
+
+  log "Proactive engine: Broadcast request detected from OpenClaw"
+  rm -f "${request_file}"
+
+  # Return the request JSON
+  echo "${request_json}"
+  return 0
+}
+
+# Execute on-demand broadcast for a specific chat (from OpenClaw request)
+_execute_ondemand_broadcast() {
+  local request_json="$1"
+  local trigger_json="$2"
+
+  local platform chat_type target_id
+  platform=$(echo "${request_json}" | jq -r '.chat.platform // ""')
+  chat_type=$(echo "${request_json}" | jq -r '.chat.chat_type // ""')
+  target_id=$(echo "${request_json}" | jq -r '.chat.target_id // ""')
+
+  if [[ -z "${platform}" || -z "${target_id}" ]]; then
+    log "WARN: Proactive engine: Invalid broadcast request - missing platform or target_id"
+    return 1
+  fi
+
+  log "Proactive engine: On-demand broadcast for ${platform}:${target_id}"
+  _update_broadcast_state "delivering"
+  set_activity "broadcasting_news" "\"trigger\":\"ondemand\",\"platform\":\"${platform}\","
+
+  # Discover content
+  local content_json
+  content_json=$(_discover_trending_content "${trigger_json}")
+  if [[ -z "${content_json}" || "${content_json}" == "[]" ]]; then
+    log "ERROR: Proactive engine: No trending content for on-demand broadcast"
+    _update_broadcast_state "error"
+    set_activity "idle"
+    return 1
+  fi
+
+  local mode
+  mode=$(jq -r '.mode // "dryrun"' "${PROACTIVE_CONFIG}")
+
+  # Get the matching destination template and chat profile
+  local dest_templates
+  dest_templates=$(echo "${trigger_json}" | jq -c '.destinations // []')
+  local dest_template
+  dest_template=$(echo "${dest_templates}" | jq -c --arg t "${platform}" '(map(select(.type == $t)) | .[0]) // {style: "default", context: ""}')
+
+  # Look up chat profile from request session_key or use default
+  local session_key chat_profile
+  session_key=$(echo "${request_json}" | jq -r '.chat.session_key // ""')
+  local chat_profiles default_profile
+  chat_profiles=$(echo "${trigger_json}" | jq -c '.chat_profiles // {}')
+  default_profile=$(echo "${trigger_json}" | jq -c '.default_profile // {"name":"一般","audience":"一般","preferred_topics":["AI","テクノロジー"],"tone":"カジュアル"}')
+  chat_profile=$(echo "${chat_profiles}" | jq -c --arg sk "${session_key}" '.[$sk] // null')
+  if [[ "${chat_profile}" == "null" || -z "${chat_profile}" ]]; then
+    chat_profile="${default_profile}"
+  fi
+
+  # Build single-target delivery
+  local dest
+  dest=$(echo "${dest_template}" | jq -c --arg tid "${target_id}" --arg t "${platform}" '. + {type: $t, target_id: $tid}')
+
+  log "Proactive engine: Formatting content for ${platform}..."
+  local formatted_content
+  formatted_content=$(_format_content_for_destination "${content_json}" "${dest}" "${chat_profile}")
+
+  local delivery_status="success"
+  local delivery_error=""
+  local broadcast_id now_ts
+  broadcast_id=$(_generate_suggestion_id)
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  if [[ "${mode}" == "dryrun" ]]; then
+    log "Proactive engine [DRYRUN]: On-demand would deliver to ${platform}:${target_id}: ${#formatted_content} chars"
+    delivery_status="dryrun"
+  else
+    case "${platform}" in
+      discord)
+        if ! _deliver_discord_bot "${target_id}" "${formatted_content}"; then
+          delivery_status="failed"
+          delivery_error="Discord delivery failed"
+        fi
+        ;;
+      line)
+        if ! _deliver_line "${target_id}" "${formatted_content}"; then
+          delivery_status="failed"
+          delivery_error="LINE delivery failed"
+        fi
+        ;;
+    esac
+  fi
+
+  # Save broadcast record
+  local delivery_results
+  delivery_results=$(jq -n \
+    --arg type "${platform}" --arg tid "${target_id}" \
+    --arg status "${delivery_status}" --arg error "${delivery_error}" \
+    --arg chars "${#formatted_content}" \
+    '[{destination: $type, target_id: $tid, status: $status, error: $error, content_length: ($chars | tonumber)}]')
+
+  local broadcast_record
+  broadcast_record=$(jq -n \
+    --arg id "${broadcast_id}" --arg trigger "ondemand" \
+    --arg mode "${mode}" --arg created "${now_ts}" \
+    --argjson content "${content_json}" --argjson deliveries "${delivery_results}" \
+    '{id: $id, trigger: $trigger, mode: $mode, content: $content, deliveries: $deliveries, created_at: $created}')
+
+  local broadcast_file="${PROACTIVE_BROADCAST_DIR}/${broadcast_id}.json"
+  local tmp
+  tmp=$(mktemp)
+  echo "${broadcast_record}" > "${tmp}" && mv "${tmp}" "${broadcast_file}"
+
+  # Update broadcast state
+  local state_file="${PROACTIVE_DIR}/state/broadcast.json"
+  tmp=$(mktemp)
+  jq -n \
+    --arg status "completed" --arg last_id "${broadcast_id}" \
+    --arg delivered_at "${now_ts}" --argjson deliveries "${delivery_results}" \
+    '{status: $status, last_broadcast_id: $last_id, last_delivered_at: $delivered_at, last_deliveries: $deliveries, next_scheduled_at: null, updated_at: $delivered_at}' \
+    > "${tmp}" && mv "${tmp}" "${state_file}"
+
+  log "Proactive engine: On-demand broadcast ${broadcast_id} completed"
+  set_activity "idle"
+  return 0
+}
+
 # ---- Main Check Function ----
 
 # Check all triggers and generate suggestions as needed
@@ -550,6 +1583,37 @@ check_proactive_suggestions() {
     current_epoch=$(date +%s)
     elapsed=$((current_epoch - last_epoch))
     if [[ ${elapsed} -lt ${PROACTIVE_CHECK_INTERVAL} ]]; then
+      # Even during throttle, check for force trigger
+      local force_trigger
+      force_trigger=$(_check_force_trigger)
+      if [[ -n "${force_trigger}" ]]; then
+        log "Proactive engine: Processing force trigger: ${force_trigger}"
+        local trigger_json
+        trigger_json=$(jq ".triggers.\"${force_trigger}\"" "${PROACTIVE_CONFIG}" 2>/dev/null)
+        if [[ -n "${trigger_json}" && "${trigger_json}" != "null" ]]; then
+          local trigger_type
+          trigger_type=$(echo "${trigger_json}" | jq -r '.type // "unknown"')
+          if [[ "${trigger_type}" == "random_window" ]]; then
+            _execute_trending_broadcast "${force_trigger}" "${trigger_json}"
+          fi
+        fi
+      fi
+      # Also check for on-demand broadcast request during throttle
+      local broadcast_request
+      broadcast_request=$(_check_broadcast_request)
+      if [[ -n "${broadcast_request}" ]]; then
+        local category="info"
+        if _check_rate_limit "${category}"; then
+          local tn
+          tn=$(jq '.triggers.trending_news' "${PROACTIVE_CONFIG}" 2>/dev/null)
+          if [[ -n "${tn}" && "${tn}" != "null" ]]; then
+            _execute_ondemand_broadcast "${broadcast_request}" "${tn}"
+            _increment_daily_count "${category}"
+          fi
+        else
+          log "Proactive engine: On-demand broadcast rate-limited"
+        fi
+      fi
       return 0
     fi
   fi
@@ -572,6 +1636,43 @@ check_proactive_suggestions() {
     log "Proactive engine: Dry-run mode started at ${now_ts}"
   fi
 
+  # Check for force trigger
+  local force_trigger
+  force_trigger=$(_check_force_trigger)
+  if [[ -n "${force_trigger}" ]]; then
+    log "Proactive engine: Processing force trigger: ${force_trigger}"
+    local trigger_json
+    trigger_json=$(jq ".triggers.\"${force_trigger}\"" "${PROACTIVE_CONFIG}" 2>/dev/null)
+    if [[ -n "${trigger_json}" && "${trigger_json}" != "null" ]]; then
+      local trigger_type
+      trigger_type=$(echo "${trigger_json}" | jq -r '.type // "unknown"')
+      if [[ "${trigger_type}" == "random_window" ]]; then
+        _execute_trending_broadcast "${force_trigger}" "${trigger_json}"
+        _increment_daily_count "info"
+        _mark_trigger_fired "${force_trigger}"
+        return 0
+      fi
+    fi
+  fi
+
+  # Check for on-demand broadcast request from OpenClaw
+  local broadcast_request
+  broadcast_request=$(_check_broadcast_request)
+  if [[ -n "${broadcast_request}" ]]; then
+    local category="info"
+    if _check_rate_limit "${category}"; then
+      local trending_trigger
+      trending_trigger=$(jq '.triggers.trending_news' "${PROACTIVE_CONFIG}" 2>/dev/null)
+      if [[ -n "${trending_trigger}" && "${trending_trigger}" != "null" ]]; then
+        _execute_ondemand_broadcast "${broadcast_request}" "${trending_trigger}"
+        _increment_daily_count "${category}"
+        return 0
+      fi
+    else
+      log "Proactive engine: On-demand broadcast rate-limited"
+    fi
+  fi
+
   # Iterate over configured triggers
   local trigger_names
   trigger_names=$(jq -r '.triggers | keys[]' "${PROACTIVE_CONFIG}" 2>/dev/null)
@@ -583,44 +1684,57 @@ check_proactive_suggestions() {
     local trigger_type
     trigger_type=$(echo "${trigger_json}" | jq -r '.type // "unknown"')
 
-    # Phase 1: Only handle time-based triggers
-    if [[ "${trigger_type}" != "time" ]]; then
-      continue
-    fi
+    case "${trigger_type}" in
+      time)
+        if _should_fire_time_trigger "${trigger_name}" "${trigger_json}"; then
+          local category
+          category=$(echo "${trigger_json}" | jq -r '.category // "info"')
 
-    if _should_fire_time_trigger "${trigger_name}" "${trigger_json}"; then
-      local category
-      category=$(echo "${trigger_json}" | jq -r '.category // "info"')
+          if ! _check_rate_limit "${category}"; then
+            log "Proactive engine: Trigger ${trigger_name} rate-limited, skipping"
+            _mark_trigger_fired "${trigger_name}"
+            continue
+          fi
 
-      # Check rate limit
-      if ! _check_rate_limit "${category}"; then
-        log "Proactive engine: Trigger ${trigger_name} rate-limited, skipping"
-        _mark_trigger_fired "${trigger_name}"
+          log "Proactive engine: Trigger fired: ${trigger_name}"
+          set_activity "generating_suggestion" "\"trigger\":\"${trigger_name}\","
+
+          local content_json
+          content_json=$(_generate_suggestion_content "${trigger_name}" "${trigger_json}")
+
+          local suggestion_id
+          suggestion_id=$(_generate_suggestion_id)
+          local suggestion_record
+          suggestion_record=$(_build_suggestion_record "${suggestion_id}" "${trigger_name}" "${trigger_json}" "${content_json}")
+
+          _deliver_suggestion "${suggestion_record}"
+          _increment_daily_count "${category}"
+          _mark_trigger_fired "${trigger_name}"
+
+          set_activity "idle"
+        fi
+        ;;
+      random_window)
+        if _should_fire_random_window_trigger "${trigger_name}" "${trigger_json}"; then
+          local category
+          category=$(echo "${trigger_json}" | jq -r '.category // "info"')
+
+          if ! _check_rate_limit "${category}"; then
+            log "Proactive engine: Trigger ${trigger_name} rate-limited, skipping"
+            _mark_trigger_fired "${trigger_name}"
+            continue
+          fi
+
+          log "Proactive engine: Random window trigger fired: ${trigger_name}"
+          _execute_trending_broadcast "${trigger_name}" "${trigger_json}"
+          _increment_daily_count "${category}"
+          _mark_trigger_fired "${trigger_name}"
+        fi
+        ;;
+      *)
         continue
-      fi
-
-      log "Proactive engine: Trigger fired: ${trigger_name}"
-      set_activity "generating_suggestion" "\"trigger\":\"${trigger_name}\","
-
-      # Generate suggestion content via LLM
-      local content_json
-      content_json=$(_generate_suggestion_content "${trigger_name}" "${trigger_json}")
-
-      # Build full suggestion record
-      local suggestion_id
-      suggestion_id=$(_generate_suggestion_id)
-      local suggestion_record
-      suggestion_record=$(_build_suggestion_record "${suggestion_id}" "${trigger_name}" "${trigger_json}" "${content_json}")
-
-      # Deliver (dryrun or live)
-      _deliver_suggestion "${suggestion_record}"
-
-      # Update counters
-      _increment_daily_count "${category}"
-      _mark_trigger_fired "${trigger_name}"
-
-      set_activity "idle"
-    fi
+        ;;
+    esac
   done
 
   return 0
