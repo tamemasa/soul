@@ -598,6 +598,48 @@ Report your results."
 }
 EOF
 
+  # Wait for pending rebuild requests before marking complete
+  local has_pending_rebuilds=false
+  for rebuild_file in "${SHARED_DIR}/rebuild_requests"/*.json; do
+    [[ -f "${rebuild_file}" ]] || continue
+    local rb_task rb_status
+    rb_task=$(jq -r '.task_id' "${rebuild_file}" 2>/dev/null)
+    rb_status=$(jq -r '.status' "${rebuild_file}" 2>/dev/null)
+    if [[ "${rb_task}" == "${task_id}" && ( "${rb_status}" == "pending" || "${rb_status}" == "pending_approval" || "${rb_status}" == "approved" || "${rb_status}" == "executing" ) ]]; then
+      has_pending_rebuilds=true
+      log "Task ${task_id} has pending rebuild: $(jq -r '.id' "${rebuild_file}") (status: ${rb_status})"
+      break
+    fi
+  done
+
+  if [[ "${has_pending_rebuilds}" == "true" ]]; then
+    log "Waiting for rebuild requests to complete before marking task ${task_id} as done..."
+    local rebuild_wait=0
+    local rebuild_timeout=600  # 10 minutes max
+    while [[ ${rebuild_wait} -lt ${rebuild_timeout} ]]; do
+      local still_pending=false
+      for rebuild_file in "${SHARED_DIR}/rebuild_requests"/*.json; do
+        [[ -f "${rebuild_file}" ]] || continue
+        local rb_task rb_status
+        rb_task=$(jq -r '.task_id' "${rebuild_file}" 2>/dev/null)
+        rb_status=$(jq -r '.status' "${rebuild_file}" 2>/dev/null)
+        if [[ "${rb_task}" == "${task_id}" && ( "${rb_status}" == "pending" || "${rb_status}" == "pending_approval" || "${rb_status}" == "approved" || "${rb_status}" == "executing" ) ]]; then
+          still_pending=true
+          break
+        fi
+      done
+      [[ "${still_pending}" == "true" ]] || break
+      sleep 10
+      rebuild_wait=$((rebuild_wait + 10))
+    done
+
+    if [[ ${rebuild_wait} -ge ${rebuild_timeout} ]]; then
+      log "WARN: Rebuild requests for task ${task_id} did not complete within ${rebuild_timeout}s"
+    else
+      log "All rebuild requests for task ${task_id} completed"
+    fi
+  fi
+
   # Mark decision as completed
   tmp=$(mktemp)
   jq '.status = "completed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \

@@ -95,7 +95,7 @@ check_rebuild_approvals() {
 
     local status
     status=$(jq -r '.status' "${req_file}" 2>/dev/null)
-    [[ "${status}" == "pending_approval" ]] || continue
+    [[ "${status}" == "pending_approval" || "${status}" == "pending" ]] || continue
 
     local req_id service task_id requested_by
     req_id=$(jq -r '.id' "${req_file}")
@@ -242,17 +242,38 @@ execute_rebuild() {
   set_activity "rebuilding" "\"service\":\"${service}\",\"rebuild_id\":\"${req_id}\","
   log "Executing rebuild of ${service} (request: ${req_id})"
 
-  # Determine the host-side compose project directory.
-  # Inside a container, /soul maps to a host path (e.g. /home/masaru/soul).
-  # docker-compose.yml uses ${PWD} for bind mounts, which must resolve to the
-  # host path. We read the original project dir from container labels.
+  # Determine the host-side compose project directory from the target container's
+  # label. This is the host PWD used when docker compose originally created it.
   local host_project_dir
-  host_project_dir=$(docker inspect soul-brain-panda --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null)
+  host_project_dir=$(docker inspect "soul-${service}" --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null)
   if [[ -z "${host_project_dir}" ]]; then
-    host_project_dir=$(docker inspect soul-brain-gorilla --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null)
+    host_project_dir=$(docker inspect soul-brain-triceratops --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null)
   fi
   if [[ -z "${host_project_dir}" ]]; then
     host_project_dir="/soul"
+  fi
+
+  # Locate docker-compose.yml: try /soul first (works if mount matches),
+  # then fall back to copying from a container that has it mounted correctly.
+  local compose_file="/soul/docker-compose.yml"
+  if [[ ! -f "${compose_file}" ]]; then
+    log "Rebuild: docker-compose.yml not at /soul, copying from container"
+    local tmp_compose
+    tmp_compose=$(mktemp /tmp/docker-compose.XXXXXX.yml)
+    docker cp "soul-${service}:/soul/docker-compose.yml" "${tmp_compose}" 2>/dev/null || \
+    docker cp "soul-brain-triceratops:/soul/docker-compose.yml" "${tmp_compose}" 2>/dev/null || \
+    docker cp "soul-brain-gorilla:/soul/docker-compose.yml" "${tmp_compose}" 2>/dev/null
+    if [[ -s "${tmp_compose}" ]]; then
+      compose_file="${tmp_compose}"
+    else
+      rm -f "${tmp_compose}"
+      log "ERROR: Could not locate docker-compose.yml"
+      tmp=$(mktemp)
+      jq '.status = "failed" | .error = "docker-compose.yml not found" | .failed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+        "${req_file}" > "${tmp}" && mv "${tmp}" "${req_file}"
+      set_activity "idle"
+      return 1
+    fi
   fi
 
   # Execute the rebuild.
@@ -260,8 +281,23 @@ execute_rebuild() {
   # resolves to the correct host directory for bind mounts.
   local rebuild_output
   local rebuild_exit_code
-  rebuild_output=$(PWD="${host_project_dir}" docker compose -f /soul/docker-compose.yml up -d --build "${service}" 2>&1)
+  rebuild_output=$(PWD="${host_project_dir}" docker compose \
+    --project-directory "${host_project_dir}" \
+    -f "${compose_file}" \
+    up -d --build "${service}" 2>&1)
   rebuild_exit_code=$?
+
+  # Clean up temp compose file if used
+  [[ "${compose_file}" == /tmp/* ]] && rm -f "${compose_file}"
+
+  # If compose build fails (e.g. missing build context), fall back to docker restart.
+  # This works when files were already injected via docker cp.
+  if [[ ${rebuild_exit_code} -ne 0 ]] && echo "${rebuild_output}" | grep -q "unable to prepare context"; then
+    log "Rebuild: compose build failed, falling back to docker restart for soul-${service}"
+    rebuild_output=$(docker restart "soul-${service}" 2>&1)
+    rebuild_exit_code=$?
+    sleep 3
+  fi
 
   # Wait a moment for the container to start
   sleep 5
