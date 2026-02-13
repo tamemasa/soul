@@ -391,17 +391,53 @@ Triceratopsが運用する自発的情報配信機能（`proactive-suggestions.s
 
 ### パーソナリティ改善システム
 
-Triceratopsが運用するOpenClawの人格改善機能。LINEから「パーソナリティ改善実施」と送信することで手動トリガーできる。
+Triceratopsが運用するOpenClawの人格改善機能（`personality-improvement.sh`）。3つの入力経路でSOUL.md/AGENTS.mdを更新できる。
+
+#### 入力経路
+
+| 経路 | トリガー | 認証 | フロー |
+|------|---------|------|--------|
+| **Self Q&A** | 「性格診断」「パーソナリティ改善」等 | バディモード必須（オーナーID照合） | 質問生成→回答収集→分析→更新 |
+| **外部 Q&A** | 「パーソナリティ改善実施」 | 許可リスト照合（バディモード不要） | 第三者向け質問生成→回答収集→分析→更新 |
+| **Self フリーテキスト** | 「性格メモ 〇〇」「パーソナリティメモ 〇〇」 | バディモード必須 | フリーテキスト直接分析→更新 |
+| **外部フリーテキスト** | 「Masaru情報 〇〇」「まさる情報 〇〇」 | 許可リスト照合（バディモード不要） | フリーテキスト直接分析→更新 |
+
+#### Q&Aフロー
 
 ```
-1. 手動トリガー → trigger.json 作成
+1. 手動トリガー（self/external） → trigger.json 作成 (status: pending)
 2. Triceratops が SOUL.md/AGENTS.md を分析し、5つの質問を生成
-3. LINE経由でMasaruに質問を送信
-4. 回答を収集・処理し、人格ファイルを更新
-5. OpenClawコンテナを再ビルドして反映
+3. LINE経由で対象ユーザーに質問を送信 (status: questions_sent)
+4. 回答を収集（OpenClaw経由/セッション履歴フォールバック）
+5. Claude で分析し、人格ファイルを更新 (status: answers_received → completed)
+6. OpenClawコンテナを再ビルドして反映 → git commit/push
 ```
 
-セキュリティ境界（不可侵領域）は更新対象外として保護される。
+#### フリーテキストフロー
+
+```
+1. キーワード検出 → personality_[external_]freeform_trigger.json 作成
+2. check_personality_freeform_trigger() が検出・認証
+3. trigger.json を answers_received 状態で直接作成（Q&Aステップをスキップ）
+4. _pi_process_answers() がフリーテキスト専用プロンプトで Claude 分析
+5. セキュリティ検証 → 変更適用 → OpenClaw再ビルド → git commit/push
+```
+
+#### 外部ユーザーによる改善
+
+Masaruを知る第三者（許可済みユーザー）が「外から見たMasaru」の情報を提供してパーソナリティを改善できる。
+
+- 許可ユーザーは環境変数 `PI_EXTERNAL_AUTHORIZED_IDS`（カンマ区切り）で管理
+- 外部改善固有ルール: 既存定義との矛盾時は既存を優先、第三者視点表現を使用、内面の上書き禁止
+- ロールバックは外部ユーザーからは不可（Masaruのみ）
+
+#### セキュリティ
+
+- **不可侵領域**: セキュリティ境界、バディミッション、言語バランス、攻撃検知パターン等は更新対象外
+- **二重検証**: `_pi_validate_security()`（変更前の禁止パターンチェック）+ `_pi_verify_post_change()`（変更後のハッシュ比較）
+- **フリーテキスト固有**: セキュリティ情報・個人情報の除外、曖昧テキストの過解釈禁止
+- **同時実行防止**: trigger.jsonのstatus確認で多重実行をブロック
+- **ロールバック**: 「パーソナリティ戻して」でMasaruが直前の変更を元に戻せる
 
 ## Directory Structure
 
