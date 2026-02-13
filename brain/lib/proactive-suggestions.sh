@@ -449,7 +449,7 @@ ${chat_contexts}
 - チャットごとに最低2件の固有クエリを含めること（合計7〜12件）
 - カテゴリに一切制限なし。会話の文脈から自由にトピックを選ぶ
 - 各クエリは検索エンジンで使える具体的なキーワード（2〜5語程度）にする
-- 日本語クエリと英語クエリを混ぜる
+- 全て日本語でクエリを生成すること（英語クエリは使わない）
 - 抽象的すぎるクエリ（例：「テクノロジー」だけ）は避ける
 - **異なるチャットで同じテーマが話されていない限り、クエリが重複しないようにする**
 - テクノロジー・ゲームなどの特定ジャンルに偏らず、各チャットの会話内容を忠実に反映すること
@@ -587,7 +587,7 @@ _fetch_google_trends() {
     search_resp=$(curl -s --max-time 8 \
       -H "Accept: application/json" \
       -H "X-Subscription-Token: ${brave_key}" \
-      "https://api.search.brave.com/res/v1/web/search?q=${encoded_kw}&count=1&freshness=pd" 2>/dev/null)
+      "https://api.search.brave.com/res/v1/web/search?q=${encoded_kw}&count=1&freshness=pd&country=JP&search_lang=ja" 2>/dev/null)
 
     if [[ -n "${search_resp}" ]]; then
       local first_result
@@ -693,9 +693,9 @@ _discover_trending_content() {
   # Generic fallback queries (no category dependency)
   local fallback_queries=()
   fallback_queries+=("最新ニュース 話題 ${today}")
-  fallback_queries+=("trending topics ${today}")
+  fallback_queries+=("今日の注目ニュース 日本 ${today}")
   fallback_queries+=("いま話題のニュース ${today}")
-  fallback_queries+=("trending topics site:x.com ${today}")
+  fallback_queries+=("トレンド 話題 SNS ${today}")
 
   local queries=()
   if [[ -n "${dynamic_queries}" ]] && echo "${dynamic_queries}" | jq '.[0]' > /dev/null 2>&1; then
@@ -729,7 +729,7 @@ _discover_trending_content() {
       -H "Accept: application/json" \
       -H "Accept-Language: ja,en" \
       -H "X-Subscription-Token: ${brave_key}" \
-      "https://api.search.brave.com/res/v1/web/search?q=${encoded_query}&count=10&freshness=pd" 2>/dev/null)
+      "https://api.search.brave.com/res/v1/web/search?q=${encoded_query}&count=10&freshness=pd&country=JP&search_lang=ja" 2>/dev/null)
 
     if [[ -n "${response}" ]] && echo "${response}" | jq '.web.results' > /dev/null 2>&1; then
       local results
@@ -767,6 +767,7 @@ ${search_results}
 - 重複する話題は最も情報量の多いものを1つだけ選択
 - **多様なジャンルの記事を幅広く選定すること（テクノロジーばかりにならないよう注意）**
 - 異なるカテゴリ（例：経済、健康、文化、スポーツ、科学、政治、エンタメ等）から満遍なく選ぶこと
+- **日本国内のニュース・日本語の記事を優先すること。海外の記事は日本に直接関係するものに限定する**
 
 以下のJSON配列で回答してください（コードフェンスなし、JSONのみ）：
 [
@@ -2086,7 +2087,7 @@ ${chat_context}"
   if [[ ${dq_count} -lt 3 ]]; then
     local today_fallback
     today_fallback=$(_get_jst_date)
-    local fallback_items='["最新ニュース 話題 '"${today_fallback}"'","trending topics '"${today_fallback}"'","いま話題のニュース '"${today_fallback}"'"]'
+    local fallback_items='["最新ニュース 話題 '"${today_fallback}"'","今日の注目ニュース 日本 '"${today_fallback}"'","いま話題のニュース '"${today_fallback}"'"]'
     if [[ -n "${dynamic_queries}" && "${dynamic_queries}" != "[]" ]]; then
       dynamic_queries=$(echo "${dynamic_queries}" | jq --argjson fb "${fallback_items}" '. + $fb' 2>/dev/null)
     else
