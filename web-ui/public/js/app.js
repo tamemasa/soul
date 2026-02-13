@@ -4,6 +4,7 @@ import { renderTaskForm } from './views/task-form.js';
 import { renderTimelineList, renderDiscussionDetail } from './views/discussions.js';
 import { renderParams } from './views/params.js';
 import { renderEvaluationList, renderEvaluationDetail } from './views/evaluations.js';
+import { renderPersonalityList, renderPersonalityDetail } from './views/personality.js';
 import { renderLogs } from './views/logs.js';
 import { renderOpenClaw } from './views/openclaw.js';
 
@@ -54,6 +55,13 @@ async function route() {
           await renderEvaluationDetail(app, parts[1]);
         } else {
           await renderEvaluationList(app);
+        }
+        break;
+      case '/personality':
+        if (parts[1]) {
+          await renderPersonalityDetail(app, parts[1]);
+        } else {
+          await renderPersonalityList(app);
         }
         break;
       case '/logs':
@@ -117,7 +125,8 @@ function connectSSE() {
         (hash.startsWith('/discussions') && isDiscussionEvent) ||
         (hash.startsWith('/decisions') && data.type === 'decision:updated') ||
         (hash.startsWith('/params') && data.type === 'params:changed') ||
-        (hash.startsWith('/evaluations') && data.type === 'evaluation:updated');
+        (hash.startsWith('/evaluations') && data.type === 'evaluation:updated') ||
+        (hash.startsWith('/personality') && data.type === 'personality:updated');
       if (shouldRefresh) {
         debouncedRoute();
       }

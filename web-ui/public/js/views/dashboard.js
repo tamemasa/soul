@@ -7,11 +7,12 @@ let memDiskChart = null;
 export async function renderDashboard(app) {
   app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
-  const [status, discussions, monitorStatus, broadcastStatus, metrics] = await Promise.all([
+  const [status, discussions, monitorStatus, broadcastStatus, personalityData, metrics] = await Promise.all([
     fetch('/api/status').then(r => r.json()),
     fetch('/api/discussions').then(r => r.json()),
     fetch('/api/openclaw/status').then(r => r.json()).catch(() => ({ state: { status: 'unknown', check_count: 0 }, summary: {} })),
     fetch('/api/broadcast/status').then(r => r.json()).catch(() => ({ broadcast: { status: 'not_started' }, engine: {}, trigger: null })),
+    fetch('/api/personality/history').then(r => r.json()).catch(() => ({ trigger: null, cycles: [] })),
     fetch('/api/metrics').then(r => r.json()).catch(() => [])
   ]);
 
@@ -79,6 +80,8 @@ export async function renderDashboard(app) {
       </div>
     </div>
 
+    ${renderPersonalityCard(personalityData)}
+
     ${renderBroadcastSection(broadcastStatus)}
 
     ${renderMetricsSection(metrics)}
@@ -99,6 +102,36 @@ export async function renderDashboard(app) {
 
   attachBroadcastTrigger();
   renderMetricsCharts(metrics);
+}
+
+function renderPersonalityCard(pd) {
+  const trigger = pd.trigger;
+  const cycles = pd.cycles || [];
+  const latest = cycles[0];
+
+  const statusLabel = trigger ? trigger.status : 'unknown';
+  const statusBadge = statusLabel === 'completed' ? 'approved'
+    : statusLabel === 'error' ? 'rejected'
+    : 'discussing';
+
+  return `
+    <div class="card clickable" onclick="location.hash='#/personality'" style="margin-bottom:16px;">
+      <div class="card-header">
+        <span class="card-title">Personality Improvement</span>
+        <span class="badge badge-status badge-${statusBadge}">${statusLabel}</span>
+        <span class="badge">${cycles.length} cycles</span>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:12px;">
+        <div class="text-sm"><span class="text-dim">Last</span> ${trigger ? formatTime(trigger.updated_at) : '--'}</div>
+        <div class="text-sm"><span class="text-dim">By</span> ${trigger ? trigger.triggered_by || '--' : '--'}</div>
+      </div>
+      ${latest ? `<div class="text-sm text-secondary" style="margin-top:8px;">${escapeHtml(truncateSummary(latest.summary, 100))}</div>` : ''}
+    </div>`;
+}
+
+function truncateSummary(str, max) {
+  if (!str || str.length <= max) return str || '';
+  return str.substring(0, max) + '...';
 }
 
 function renderBroadcastSection(bs) {

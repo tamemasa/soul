@@ -7,6 +7,7 @@ function classifyEvent(relativePath) {
   if (relativePath.startsWith('discussions/')) return 'discussion:updated';
   if (relativePath.startsWith('decisions/')) return 'decision:updated';
   if (relativePath.startsWith('evaluations/')) return 'evaluation:updated';
+  if (relativePath.startsWith('personality_improvement/')) return 'personality:updated';
   if (relativePath.startsWith('nodes/') && relativePath.endsWith('activity.json')) return 'activity:changed';
   if (relativePath.startsWith('nodes/') && relativePath.endsWith('params.json')) return 'params:changed';
   if (relativePath.startsWith('logs/')) return 'log:appended';

@@ -18,6 +18,7 @@ app.use('/api', require('./routes/api-discussions')(SHARED_DIR));
 app.use('/api', require('./routes/api-decisions')(SHARED_DIR));
 app.use('/api', require('./routes/api-params')(SHARED_DIR));
 app.use('/api', require('./routes/api-evaluations')(SHARED_DIR));
+app.use('/api', require('./routes/api-personality')(SHARED_DIR));
 app.use('/api', require('./routes/api-logs')(SHARED_DIR));
 app.use('/api', require('./routes/api-openclaw')(SHARED_DIR));
 app.use('/api', require('./routes/api-broadcast')(SHARED_DIR));

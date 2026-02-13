@@ -1331,3 +1331,32 @@ body {
 @media (max-width: 768px) {
   .metrics-chart-container { height: 220px; padding: 12px; }
 }
+
+/* Personality diff blocks */
+.diff-block {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.6;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.diff-old {
+  background: rgba(239, 68, 68, 0.1);
+  border-left: 3px solid var(--error);
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-new {
+  background: rgba(52, 211, 153, 0.1);
+  border-left: 3px solid var(--success);
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-arrow {
+  text-align: center;
+  color: var(--text-dim);
+  padding: 2px 0;
+  font-size: 0.9rem;
+}
