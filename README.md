@@ -41,9 +41,12 @@
 │                        │                                    │
 │  ┌─────────────────────▼────────────────────────────────┐   │
 │  │                 Worker Nodes                          │   │
-│  │  ┌──────────┐                                        │   │
-│  │  │ OpenClaw │  (Masaru-kun Discord bot)               │   │
-│  │  └──────────┘                                        │   │
+│  │  ┌───────────────┐    ┌──────────┐                   │   │
+│  │  │ webhook-proxy │───▶│ OpenClaw │                   │   │
+│  │  │   (:8080)     │    │ (:18789) │                   │   │
+│  │  │ バッファ付き   │    │ Discord/ │                   │   │
+│  │  │ リバースプロキシ│    │ LINE bot │                   │   │
+│  │  └───────────────┘    └──────────┘                   │   │
 │  └──────────────────────────────────────────────────────┘   │
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐   │
@@ -88,6 +91,7 @@ OpenClawはSoul Systemの最初のWorkerノードとして稼働するDiscord bo
 Soul Systemのミッション（家族の幸福化・資産拡大）に沿い、情報提供・提言・日常会話を通じてオーナーをサポートする。
 
 OpenClawは独自のDockerコンテナ（`soul-openclaw`）で稼働し、専用ネットワーク（`br-openclaw`）に隔離されている。
+外部からのWebhook（LINE等）は `webhook-proxy` コンテナが受信し、OpenClawへ転送する。OpenClawリビルド中のメッセージロストを防ぐため、転送失敗時はリクエストをバッファし、復旧後に自動リプレイする。
 Brainノードとの通信は共有ボリューム（`bot-commands`、`openclaw-suggestions`）を介したファイルベースで行われる。
 
 ### アーキテクチャ
@@ -100,8 +104,13 @@ graph TB
         Shared[("/shared volume")]
     end
 
+    subgraph Webhook Proxy
+        Proxy["webhook-proxy<br/>(:8080)"]
+        Buffer[("webhook_buffer<br/>volume")]
+    end
+
     subgraph OpenClaw Container
-        Gateway["OpenClaw Gateway"]
+        Gateway["OpenClaw Gateway<br/>(:18789)"]
         Watcher["Command Watcher"]
         Suggest["suggest.sh"]
         Approval["write-approval.sh"]
@@ -109,8 +118,13 @@ graph TB
     end
 
     Discord["Discord<br/>(Server / DM)"]
+    LINE["LINE<br/>(Webhook)"]
 
     Discord <-->|メッセージ送受信| Gateway
+    LINE -->|Webhook| Proxy
+    Proxy -->|転送| Gateway
+    Proxy -->|失敗時バッファ| Buffer
+    Buffer -->|5秒毎リプレイ| Proxy
     Gateway --- Personality
     Brain -->|制御コマンド| BotCmd[("bot-commands<br/>volume")]
     BotCmd -->|pause/resume/adjust| Watcher
@@ -130,6 +144,7 @@ graph TB
 | **Suggestion Tool** | `suggest.sh` | botからSoul Systemへの提言を送信（1時間に1回制限） |
 | **Write Approval** | `write-approval.sh` | オーナーによる提言の承認/却下を記録 |
 | **Network Restrictor** | `network-restrict.sh` | コンテナ内iptablesでLAN・プライベートネットワークへのアクセスを遮断 |
+| **Webhook Proxy** | `webhook-proxy/proxy.js` | LINE Webhook等の前段プロキシ。OpenClaw停止時はリクエストをバッファし復旧後にリプレイ |
 | **Personality Files** | `personality/` | Masaru-kunの人格・話し方・行動ルールを定義（SOUL.md, IDENTITY.md, AGENTS.md） |
 
 ### 監視の仕組み
@@ -234,6 +249,9 @@ soul/
 │   ├── entrypoint.sh           # Workerエントリーポイント
 │   ├── templates/
 │   │   └── openclaw/           # OpenClaw用テンプレート
+│   ├── webhook-proxy/          # Webhook バッファリングプロキシ
+│   │   ├── Dockerfile          # node:22-slim ベース
+│   │   └── proxy.js            # リバースプロキシ + バッファ/リプレイ
 │   └── openclaw/               # OpenClaw Discord bot
 │       ├── Dockerfile          # OpenClawコンテナイメージ
 │       ├── .env                # 環境変数 (トークン等)

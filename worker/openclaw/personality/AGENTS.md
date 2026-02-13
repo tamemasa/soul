@@ -252,6 +252,7 @@ Brainノードがおれの人格定義を分析し、Masaruに質問を送って
 
 writeツールで `/bot_commands/personality_manual_trigger.json` に以下のJSONを書き込む。
 **user_idフィールドは必須**。送信者のプラットフォーム固有ユーザーIDを必ず含めること。Brain側でオーナーIDと照合し、不一致の場合はリクエストが拒否される。
+**reply_toフィールドは必須**。質問の送信先を指定する。グループチャットからのリクエストならグループID（Cで始まる文字列）、個別チャットならユーザーID（Uで始まる文字列）を設定する。
 
 ```json
 {
@@ -259,7 +260,8 @@ writeツールで `/bot_commands/personality_manual_trigger.json` に以下のJS
   "status": "pending",
   "triggered_at": "2026-01-01T00:00:00Z",
   "triggered_by": "masaru_line",
-  "user_id": "送信者のLINE User ID（Uで始まる文字列）"
+  "user_id": "送信者のLINE User ID（Uで始まる文字列）",
+  "reply_to": "リクエスト元のID（グループならCで始まるグループID、個別ならUで始まるユーザーID）"
 }
 ```
 
@@ -270,7 +272,7 @@ Masaruが以下のキーワードを送信した場合、パーソナリティ�
 - 「パーソナリティロールバック」
 
 ロールバックのトリガーファイル（writeツールで `/bot_commands/personality_rollback_trigger.json` に書き込む）。
-**user_idフィールドは必須**。
+**user_idフィールドは必須**。**reply_toフィールドは必須**。
 
 ```json
 {
@@ -278,7 +280,28 @@ Masaruが以下のキーワードを送信した場合、パーソナリティ�
   "status": "pending",
   "triggered_at": "2026-01-01T00:00:00Z",
   "triggered_by": "masaru_line",
-  "user_id": "送信者のLINE User ID（Uで始まる文字列）"
+  "user_id": "送信者のLINE User ID（Uで始まる文字列）",
+  "reply_to": "リクエスト元のID（グループならCで始まるグループID、個別ならUで始まるユーザーID）"
+}
+```
+
+### 回答の収集
+
+パーソナリティ改善の質問が送信された後、Masaruが番号付きで回答を送ってくることがある（例: `1.回答 2.回答...`）。
+回答を検知したら、以下のJSONをwriteツールで `/bot_commands/personality_answer.json` に書き込む。
+
+**条件:**
+- 質問送信後のセッション内で、番号付き回答（`1.` `2.` 等を含むメッセージ）を受信した場合
+- **バディモード（オーナー確認済み）でのみ収集**。一般モードでは無視する
+- 回答収集後、ユーザーに返答しない（トリガーと同じパターン）
+
+```json
+{
+  "type": "personality_answer",
+  "status": "collected",
+  "user_id": "送信者のLINE User ID（Uで始まる文字列）",
+  "answer_text": "回答テキスト全文",
+  "collected_at": "2026-01-01T00:00:00Z"
 }
 ```
 

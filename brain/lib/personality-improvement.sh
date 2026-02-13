@@ -38,6 +38,10 @@ check_personality_improvement() {
   local status
   status=$(jq -r '.status // ""' "${trigger_file}" 2>/dev/null)
 
+  # Load reply_to destination from trigger (persists across polling cycles)
+  export PI_REPLY_TO
+  PI_REPLY_TO=$(jq -r '.reply_to // ""' "${trigger_file}" 2>/dev/null)
+
   case "${status}" in
     pending)
       _pi_generate_questions
@@ -208,100 +212,26 @@ JSONのみ出力してください。余計な説明は不要です。"
 }
 
 # ============================================================
-# Step 2: Check for answers from Masaru
+# Helper: Save answer text to answer file and advance trigger
 # ============================================================
 
-_pi_check_for_answers() {
-  # First check if an answer file was already prepared
-  for answer_file in "${PI_DIR}"/answers_*.json; do
-    [[ -f "${answer_file}" ]] || continue
-
-    local answer_status
-    answer_status=$(jq -r '.status // ""' "${answer_file}" 2>/dev/null)
-    [[ "${answer_status}" == "collected" ]] || continue
-
-    log "Personality improvement: Answers found in ${answer_file}"
-    _pi_update_trigger "answers_received" "" "" "$(basename "${answer_file}")"
-    return 0
-  done
-
-  # Try to extract answers from OpenClaw session history
+_pi_save_answer_file() {
+  local answer_text="$1"
   local trigger_file="${PI_DIR}/trigger.json"
-  local sent_at
-  sent_at=$(jq -r '.questions_sent_at // ""' "${trigger_file}" 2>/dev/null)
-  [[ -n "${sent_at}" ]] || return 0
-
-  local sent_epoch now_epoch
-  sent_epoch=$(date -d "${sent_at}" +%s 2>/dev/null || echo 0)
-  now_epoch=$(date +%s)
-
-  # Check timeout (48 hours)
-  if (( now_epoch - sent_epoch > 172800 )); then
-    log "Personality improvement: Answer timeout (48h). Resetting trigger."
-    _pi_update_trigger "completed" "Timeout - no answers received within 48h"
-    return 0
-  fi
-
-  # Only check every 5 minutes to avoid excessive docker exec calls
-  local last_answer_check_file="${PI_DIR}/.last_answer_check"
-  if [[ -f "${last_answer_check_file}" ]]; then
-    local last_check
-    last_check=$(cat "${last_answer_check_file}" 2>/dev/null || echo 0)
-    if (( now_epoch - last_check < 300 )); then
-      return 0
-    fi
-  fi
-  echo "${now_epoch}" > "${last_answer_check_file}"
-
-  # Find the LINE DM session file
-  local session_file
-  session_file=$(docker exec soul-openclaw cat /home/openclaw/.openclaw/agents/main/sessions/sessions.json 2>/dev/null | \
-    jq -r 'to_entries[] | select(.key == "agent:main:main") | .value.sessionFile // empty' 2>/dev/null)
-
-  [[ -n "${session_file}" ]] || return 0
-
-  # Get user messages from the LINE DM session after the questions were sent
-  local user_messages
-  user_messages=$(docker exec soul-openclaw cat "${session_file}" 2>/dev/null | \
-    jq -c "select(.type == \"message\" and .message.role == \"user\" and .timestamp > \"${sent_at}\") | {timestamp: .timestamp, text: (.message.content | if type == \"array\" then (map(select(.type == \"text\") | .text) | join(\" \")) elif type == \"string\" then . else \"\" end)}" 2>/dev/null)
-
-  [[ -n "${user_messages}" ]] || return 0
-
-  # Look for messages containing numbered answers (1. xxx, 2. xxx, etc.)
-  local answer_text=""
-  while IFS= read -r msg; do
-    local text
-    text=$(echo "${msg}" | jq -r '.text // ""' 2>/dev/null)
-    # Check if message contains numbered answers
-    if echo "${text}" | grep -qE "^[1-5][.．、)）]|[1-5][.．、)）]" 2>/dev/null; then
-      answer_text="${answer_text}${text}
-"
-    fi
-  done <<< "${user_messages}"
-
-  [[ -n "${answer_text}" ]] || return 0
-
-  # Check that we have at least 1 numbered answer
-  local answer_count
-  answer_count=$(echo "${answer_text}" | grep -cE "^[1-5][.．、)）]|[[:space:]][1-5][.．、)）]" 2>/dev/null || echo 0)
-
-  if [[ ${answer_count} -lt 1 ]]; then
-    return 0
-  fi
-
-  log "Personality improvement: Found ${answer_count} answer(s) from Masaru"
-
-  # Get the pending file reference
   local pending_ref
   pending_ref=$(jq -r '.pending_file // ""' "${trigger_file}" 2>/dev/null)
 
-  # Get original questions for context
   local questions=""
   if [[ -n "${pending_ref}" && -f "${PI_DIR}/${pending_ref}" ]]; then
     questions=$(jq -r '.questions' "${PI_DIR}/${pending_ref}" 2>/dev/null)
   fi
 
-  # Use Claude to parse the raw answers into structured format
+  # Count answers
+  local answer_count
+  answer_count=$(echo "${answer_text}" | grep -cE "^[1-5][.．、)）]|[[:space:]][1-5][.．、)）]" 2>/dev/null || echo 0)
+  log "Personality improvement: Found ${answer_count} answer(s) from Masaru"
+
+  # Use Claude to parse raw answers into structured format
   local parse_prompt="以下はパーソナリティ改善の質問に対するMasaruの回答です。各質問と回答を構造化してください。
 
 ## 質問:
@@ -324,10 +254,9 @@ ${answer_text}
   parsed=$(invoke_claude "${parse_prompt}")
   if [[ $? -ne 0 || -z "${parsed}" ]]; then
     log "WARN: Personality improvement: Failed to parse answers, using raw text"
-    parsed="{\"answers\": [{\"question_id\": 0, \"answer\": \"$(echo "${answer_text}" | jq -Rs '.')\"}]}"
+    parsed="{\"answers\": [{\"question_id\": 0, \"answer\": $(echo "${answer_text}" | jq -Rs '.')}]}"
   fi
 
-  # Extract JSON
   local json_parsed
   json_parsed=$(echo "${parsed}" | sed -n '/```json/,/```/{/```/d;p}')
   if [[ -z "${json_parsed}" ]] || ! echo "${json_parsed}" | jq empty 2>/dev/null; then
@@ -337,7 +266,6 @@ ${answer_text}
     json_parsed="${parsed}"
   fi
 
-  # Save answer file
   local answer_timestamp
   answer_timestamp=$(date -u +%Y%m%d_%H%M%S)
   local answer_file="${PI_DIR}/answers_${answer_timestamp}.json"
@@ -365,8 +293,125 @@ ${answer_text}
     log "ERROR: Personality improvement: Failed to save answer file"
   fi
 
-  # Clean up check timestamp file
-  rm -f "${last_answer_check_file}"
+  rm -f "${PI_DIR}/.last_answer_check"
+}
+
+# ============================================================
+# Step 2: Check for answers from Masaru
+# ============================================================
+
+_pi_check_for_answers() {
+  local trigger_file="${PI_DIR}/trigger.json"
+  local sent_at
+  sent_at=$(jq -r '.questions_sent_at // ""' "${trigger_file}" 2>/dev/null)
+  [[ -n "${sent_at}" ]] || return 0
+
+  local sent_epoch now_epoch
+  sent_epoch=$(date -d "${sent_at}" +%s 2>/dev/null || echo 0)
+  now_epoch=$(date +%s)
+
+  # Check timeout (48 hours)
+  if (( now_epoch - sent_epoch > 172800 )); then
+    log "Personality improvement: Answer timeout (48h). Resetting trigger."
+    _pi_update_trigger "completed" "Timeout - no answers received within 48h"
+    return 0
+  fi
+
+  # --- Primary: Check for answer file from OpenClaw (with user_id verification) ---
+  local bot_cmd_answer="${SHARED_DIR}/bot_commands/personality_answer.json"
+  if [[ -f "${bot_cmd_answer}" ]]; then
+    local ans_status
+    ans_status=$(jq -r '.status // ""' "${bot_cmd_answer}" 2>/dev/null)
+    if [[ "${ans_status}" == "collected" ]]; then
+      # Verify owner identity
+      local ans_user_id
+      ans_user_id=$(jq -r '.user_id // ""' "${bot_cmd_answer}" 2>/dev/null)
+      if [[ -z "${ans_user_id}" || "${ans_user_id}" != "${PI_OWNER_LINE_ID}" ]]; then
+        log "SECURITY: Personality improvement: Answer REJECTED - user_id mismatch (got: ${ans_user_id:-empty})"
+        local tmp
+        tmp=$(mktemp)
+        jq '.status = "rejected" | .reason = "unauthorized"' "${bot_cmd_answer}" > "${tmp}" && mv "${tmp}" "${bot_cmd_answer}"
+        chmod 666 "${bot_cmd_answer}" 2>/dev/null || true
+        return 0
+      fi
+
+      log "Personality improvement: Answer file found from OpenClaw (owner verified)"
+      local answer_text
+      answer_text=$(jq -r '.answer_text // ""' "${bot_cmd_answer}" 2>/dev/null)
+
+      # Mark as processed
+      local tmp
+      tmp=$(mktemp)
+      jq '.status = "processed"' "${bot_cmd_answer}" > "${tmp}" && mv "${tmp}" "${bot_cmd_answer}"
+      chmod 666 "${bot_cmd_answer}" 2>/dev/null || true
+
+      # Save and proceed to answer processing
+      _pi_save_answer_file "${answer_text}"
+      return 0
+    fi
+  fi
+
+  # Also check if an answer file was already saved in PI_DIR
+  for answer_file in "${PI_DIR}"/answers_*.json; do
+    [[ -f "${answer_file}" ]] || continue
+    local answer_status
+    answer_status=$(jq -r '.status // ""' "${answer_file}" 2>/dev/null)
+    [[ "${answer_status}" == "collected" ]] || continue
+    log "Personality improvement: Answers found in ${answer_file}"
+    _pi_update_trigger "answers_received" "" "" "$(basename "${answer_file}")"
+    return 0
+  done
+
+  # --- Fallback (DM only): Extract answers from OpenClaw session history ---
+  local reply_to
+  reply_to=$(jq -r '.reply_to // ""' "${trigger_file}" 2>/dev/null)
+  # Session scraping only for DM (owner is the only sender)
+  if [[ -n "${reply_to}" && "${reply_to}" != "${PI_OWNER_LINE_ID}" ]]; then
+    # Group chat: rely on OpenClaw answer file only (no session scraping)
+    return 0
+  fi
+
+  # Only check every 5 minutes to avoid excessive docker exec calls
+  local last_answer_check_file="${PI_DIR}/.last_answer_check"
+  if [[ -f "${last_answer_check_file}" ]]; then
+    local last_check
+    last_check=$(cat "${last_answer_check_file}" 2>/dev/null || echo 0)
+    if (( now_epoch - last_check < 300 )); then
+      return 0
+    fi
+  fi
+  echo "${now_epoch}" > "${last_answer_check_file}"
+
+  # DM session: find session file
+  local session_file
+  session_file=$(docker exec soul-openclaw cat /home/openclaw/.openclaw/agents/main/sessions/sessions.json 2>/dev/null | \
+    jq -r 'to_entries[] | select(.key == "agent:main:main") | .value.sessionFile // empty' 2>/dev/null)
+
+  [[ -n "${session_file}" ]] || return 0
+
+  # Get user messages from DM session after the questions were sent
+  local user_messages
+  user_messages=$(docker exec soul-openclaw cat "${session_file}" 2>/dev/null | \
+    jq -c "select(.type == \"message\" and .message.role == \"user\" and .timestamp > \"${sent_at}\") | {timestamp: .timestamp, text: (.message.content | if type == \"array\" then (map(select(.type == \"text\") | .text) | join(\" \")) elif type == \"string\" then . else \"\" end)}" 2>/dev/null)
+
+  [[ -n "${user_messages}" ]] || return 0
+
+  # Look for messages containing numbered answers (DM = all from owner)
+  local answer_text=""
+  while IFS= read -r msg; do
+    local text
+    text=$(echo "${msg}" | jq -r '.text // ""' 2>/dev/null)
+    # Check if message contains numbered answers
+    if echo "${text}" | grep -qE "^[1-5][.．、)）]|[1-5][.．、)）]" 2>/dev/null; then
+      answer_text="${answer_text}${text}
+"
+    fi
+  done <<< "${user_messages}"
+
+  [[ -n "${answer_text}" ]] || return 0
+
+  # Save and process via shared helper
+  _pi_save_answer_file "${answer_text}"
 }
 
 # ============================================================
@@ -582,9 +627,6 @@ JSONのみ出力してください。"
 
     # Update integrity.json again after rebuild (container has new hashes)
     _pi_update_integrity
-
-    # Notify Masaru via LINE
-    _pi_notify_masaru "${json_result}"
 
     # Mark answer file as processed
     local tmp
@@ -909,90 +951,6 @@ _pi_write_update_marker() {
 }
 
 # ============================================================
-# Notify Masaru via LINE
-# ============================================================
-
-_pi_notify_masaru() {
-  local json_result="$1"
-  local line_token="${LINE_CHANNEL_ACCESS_TOKEN:-}"
-  local owner_line_id="Ua78c97ab5f7b6090fc17656bc12f5c99"
-
-  if [[ -z "${line_token}" ]]; then
-    log "WARN: Personality improvement: LINE_CHANNEL_ACCESS_TOKEN not set, skipping notification"
-    return 0
-  fi
-
-  # Build notification message
-  local summary
-  summary=$(echo "${json_result}" | jq -r '.summary // "パーソナリティが更新されました"')
-
-  local changes_detail=""
-  local i=0
-  while true; do
-    local change
-    change=$(echo "${json_result}" | jq -r ".changes[${i}]" 2>/dev/null)
-    [[ "${change}" == "null" || -z "${change}" ]] && break
-
-    local type desc file
-    type=$(echo "${change}" | jq -r '.type // ""')
-    desc=$(echo "${change}" | jq -r '.description // ""')
-    file=$(echo "${change}" | jq -r '.file // ""')
-
-    local type_label
-    case "${type}" in
-      add) type_label="【追加】" ;;
-      modify) type_label="【修正】" ;;
-      delete) type_label="【削除】" ;;
-      *) type_label="【変更】" ;;
-    esac
-
-    changes_detail="${changes_detail}
-${type_label} ${desc} (${file})"
-    ((i++))
-  done
-
-  local message="パーソナリティ更新完了
-
-${summary}
-
-変更内容:${changes_detail}
-
-※「パーソナリティ戻して」と送ると直前の変更を元に戻せます"
-
-  # Send via LINE Push API
-  local payload
-  payload=$(jq -n \
-    --arg to "${owner_line_id}" \
-    --arg text "${message}" \
-    '{
-      to: $to,
-      messages: [{
-        type: "text",
-        text: $text
-      }]
-    }')
-
-  local http_code response_body
-  response_body=$(mktemp)
-  http_code=$(curl -s -o "${response_body}" -w "%{http_code}" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${line_token}" \
-    -d "${payload}" \
-    "https://api.line.me/v2/bot/message/push" 2>/dev/null) || {
-    log "ERROR: Personality improvement: LINE notification failed"
-    rm -f "${response_body}"
-    return 1
-  }
-
-  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
-    log "Personality improvement: LINE notification sent to Masaru"
-  else
-    log "ERROR: Personality improvement: LINE API returned HTTP ${http_code}: $(cat "${response_body}")"
-  fi
-  rm -f "${response_body}"
-}
-
-# ============================================================
 # Rollback last personality change
 # ============================================================
 
@@ -1132,22 +1090,24 @@ if old:
 }
 
 # ============================================================
-# Helper: send LINE message to Masaru
+# Helper: send LINE message (to reply_to destination or owner DM)
 # ============================================================
 
 _pi_send_line_message() {
   local message="$1"
   local line_token="${LINE_CHANNEL_ACCESS_TOKEN:-}"
-  local owner_line_id="Ua78c97ab5f7b6090fc17656bc12f5c99"
 
   if [[ -z "${line_token}" ]]; then
     log "WARN: Personality improvement: LINE_CHANNEL_ACCESS_TOKEN not set"
     return 1
   fi
 
+  # Determine destination: use reply_to from trigger, fallback to owner DM
+  local destination="${PI_REPLY_TO:-${PI_OWNER_LINE_ID}}"
+
   local payload
   payload=$(jq -n \
-    --arg to "${owner_line_id}" \
+    --arg to "${destination}" \
     --arg text "${message}" \
     '{
       to: $to,
@@ -1232,6 +1192,7 @@ check_personality_manual_trigger() {
       local tmp
       tmp=$(mktemp)
       jq '.status = "moved_to_pi"' "${bot_cmd_trigger}" > "${tmp}" && mv "${tmp}" "${bot_cmd_trigger}"
+      chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
     fi
   fi
 
@@ -1251,8 +1212,16 @@ check_personality_manual_trigger() {
     local tmp
     tmp=$(mktemp)
     jq '.status = "rejected" | .reason = "unauthorized"' "${manual_trigger}" > "${tmp}" && mv "${tmp}" "${manual_trigger}"
+    chmod 666 "${manual_trigger}" 2>/dev/null || true
     return 0
   fi
+
+  # Read reply_to destination (group ID or user ID)
+  local reply_to
+  reply_to=$(jq -r '.reply_to // ""' "${manual_trigger}" 2>/dev/null)
+  # Fallback to owner DM if not specified
+  [[ -n "${reply_to}" ]] || reply_to="${PI_OWNER_LINE_ID}"
+  export PI_REPLY_TO="${reply_to}"
 
   # Create the main trigger
   local trigger_file="${PI_DIR}/trigger.json"
@@ -1261,17 +1230,20 @@ check_personality_manual_trigger() {
   jq -n \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg src "manual" \
+    --arg reply_to "${reply_to}" \
     '{
       type: "personality_improvement",
       status: "pending",
       triggered_at: $ts,
-      triggered_by: $src
+      triggered_by: $src,
+      reply_to: $reply_to
     }' > "${tmp}" && mv "${tmp}" "${trigger_file}"
 
   # Mark manual trigger as processed
   local mt_tmp
   mt_tmp=$(mktemp)
   jq '.status = "processed"' "${manual_trigger}" > "${mt_tmp}" && mv "${mt_tmp}" "${manual_trigger}"
+  chmod 666 "${manual_trigger}" 2>/dev/null || true
 
   log "Personality improvement: Manual trigger accepted"
 }
@@ -1296,6 +1268,7 @@ check_personality_rollback_trigger() {
       local tmp
       tmp=$(mktemp)
       jq '.status = "moved_to_pi"' "${bot_cmd_rollback}" > "${tmp}" && mv "${tmp}" "${bot_cmd_rollback}"
+      chmod 666 "${bot_cmd_rollback}" 2>/dev/null || true
     fi
   fi
 
@@ -1315,8 +1288,15 @@ check_personality_rollback_trigger() {
     local tmp
     tmp=$(mktemp)
     jq '.status = "rejected" | .reason = "unauthorized"' "${rollback_trigger}" > "${tmp}" && mv "${tmp}" "${rollback_trigger}"
+    chmod 666 "${rollback_trigger}" 2>/dev/null || true
     return 0
   fi
+
+  # Load reply_to destination from rollback trigger
+  local reply_to
+  reply_to=$(jq -r '.reply_to // ""' "${rollback_trigger}" 2>/dev/null)
+  [[ -n "${reply_to}" ]] || reply_to="${PI_OWNER_LINE_ID}"
+  export PI_REPLY_TO="${reply_to}"
 
   # Process rollback
   _pi_rollback_last_change
@@ -1325,4 +1305,5 @@ check_personality_rollback_trigger() {
   local tmp
   tmp=$(mktemp)
   jq '.status = "processed" | .processed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' "${rollback_trigger}" > "${tmp}" && mv "${tmp}" "${rollback_trigger}"
+  chmod 666 "${rollback_trigger}" 2>/dev/null || true
 }

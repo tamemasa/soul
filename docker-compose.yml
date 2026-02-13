@@ -121,8 +121,6 @@ services:
       - openclaw-home:/home/openclaw/.openclaw
       - openclaw-suggestions:/suggestions
       - bot-commands:/bot_commands
-    ports:
-      - "${OPENCLAW_WEBHOOK_PORT:-8080}:18789"
     networks:
       - openclaw-net
     restart: unless-stopped
@@ -132,6 +130,18 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:size=64m
+
+  webhook-proxy:
+    build:
+      context: ./worker/webhook-proxy
+    container_name: soul-webhook-proxy
+    volumes:
+      - webhook-buffer:/webhook_buffer
+    ports:
+      - "${OPENCLAW_WEBHOOK_PORT:-8080}:8080"
+    networks:
+      - openclaw-net
+    restart: unless-stopped
 
 networks:
   soul-net:
@@ -154,3 +164,4 @@ volumes:
   openclaw-home:
   openclaw-suggestions:
   bot-commands:
+  webhook-buffer:
