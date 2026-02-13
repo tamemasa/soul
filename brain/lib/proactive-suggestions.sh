@@ -423,18 +423,20 @@ _generate_dynamic_queries() {
     return
   fi
 
-  local prompt="あなたは検索クエリ生成エンジンです。以下のチャット会話のコンテキストから、今日検索すべきニュース・トレンドのトピックを5〜8件生成してください。
+  local prompt="あなたは検索クエリ生成エンジンです。以下の複数チャットの会話コンテキストを分析し、**各チャットに固有の**検索クエリを生成してください。
 
 ## チャットの会話コンテキスト
 ${chat_contexts}
 
 ## ルール
-- 会話で実際に話題になっている具体的なテーマから検索クエリを生成する
+- **各チャットの会話内容をそれぞれ独立に分析し、そのチャット固有のトピックからクエリを生成する**
+- チャットごとに最低2件の固有クエリを含めること（合計7〜12件）
 - カテゴリに一切制限なし。会話の文脈から自由にトピックを選ぶ
 - 各クエリは検索エンジンで使える具体的なキーワード（2〜5語程度）にする
 - 日本語クエリと英語クエリを混ぜる
 - 抽象的すぎるクエリ（例：「テクノロジー」だけ）は避ける
-- テクノロジー・ゲームなどの特定ジャンルに偏らず、会話内容を忠実に反映すること
+- **異なるチャットで同じテーマが話されていない限り、クエリが重複しないようにする**
+- テクノロジー・ゲームなどの特定ジャンルに偏らず、各チャットの会話内容を忠実に反映すること
 
 ## 出力形式（厳守）
 思考過程や説明文は一切出力しないこと。以下のJSON配列のみ出力すること。
@@ -452,23 +454,11 @@ ${chat_contexts}
     return
   fi
 
-  # Extract JSON array from response
-  local clean_response
-  clean_response=$(echo "${response}" | sed -n '/^```\(json\)\?$/,/^```$/p' | sed '/^```\(json\)\?$/d;/^```$/d')
-  if [[ -z "${clean_response}" ]]; then
-    clean_response=$(echo "${response}" | sed '/^```\(json\)\?$/d;/^```$/d')
-  fi
-
+  # Extract JSON array from response using common parser
   local queries_json
-  queries_json=$(echo "${clean_response}" | jq -c '.' 2>/dev/null)
-  if [[ -z "${queries_json}" ]] || ! echo "${queries_json}" | jq '.[0]' > /dev/null 2>&1; then
-    # Try extracting array portion
-    local json_part
-    json_part=$(echo "${clean_response}" | sed -n '/[[:space:]]*\[/,/[[:space:]]*\]/p')
-    queries_json=$(echo "${json_part}" | jq -c '.' 2>/dev/null)
-  fi
+  queries_json=$(_extract_json_array "${response}")
 
-  if [[ -n "${queries_json}" ]] && echo "${queries_json}" | jq '.[0]' > /dev/null 2>&1; then
+  if [[ -n "${queries_json}" ]]; then
     local count
     count=$(echo "${queries_json}" | jq 'length')
     log "Proactive engine: Generated ${count} dynamic search queries from chat context"
@@ -496,7 +486,6 @@ _collect_all_chat_contexts() {
   fi
 
   local all_contexts=""
-  local all_topics=""
   local i=0
   while [[ ${i} -lt ${active_count} ]]; do
     local chat session_key
@@ -611,6 +600,59 @@ _fetch_google_trends() {
     '{keyword: $kw, description: $desc}'
 }
 
+# ---- JSON Array Extraction (common utility) ----
+
+# Extract a JSON array from LLM response text with 3-stage fallback:
+#   1. Direct jq parse
+#   2. sed: extract [ ... ] block
+#   3. tr + grep -oP: inline JSON array extraction
+# Usage: result=$(_extract_json_array "$response")
+_extract_json_array() {
+  local input="$1"
+
+  if [[ -z "${input}" ]]; then
+    echo ""
+    return
+  fi
+
+  # Strip markdown code fences first
+  local clean
+  clean=$(echo "${input}" | sed '/^```\(json\)\?$/d')
+
+  # Stage 1: Direct jq parse
+  local parsed
+  parsed=$(echo "${clean}" | jq -c '.' 2>/dev/null)
+  if [[ -n "${parsed}" ]] && echo "${parsed}" | jq '.[0]' > /dev/null 2>&1; then
+    echo "${parsed}"
+    return
+  fi
+
+  # Stage 2: sed extract [ ... ] block
+  local json_part
+  json_part=$(echo "${clean}" | sed -n '/^[[:space:]]*\[/,/^[[:space:]]*\]/p')
+  if [[ -n "${json_part}" ]]; then
+    parsed=$(echo "${json_part}" | jq -c '.' 2>/dev/null)
+    if [[ -n "${parsed}" ]] && echo "${parsed}" | jq '.[0]' > /dev/null 2>&1; then
+      echo "${parsed}"
+      return
+    fi
+  fi
+
+  # Stage 3: tr + grep -oP for inline JSON array
+  local inline
+  inline=$(echo "${clean}" | tr '\n' ' ' | grep -oP '\[[^\[]*?\]' | head -1)
+  if [[ -n "${inline}" ]]; then
+    parsed=$(echo "${inline}" | jq -c '.' 2>/dev/null)
+    if [[ -n "${parsed}" ]] && echo "${parsed}" | jq '.[0]' > /dev/null 2>&1; then
+      echo "${parsed}"
+      return
+    fi
+  fi
+
+  # All stages failed
+  echo ""
+}
+
 # ---- Trending Content Discovery ----
 
 # Search for trending content using Brave Search API
@@ -619,13 +661,10 @@ _discover_trending_content() {
   local trigger_json="$1"
   local dynamic_queries="${2:-}"
 
-  # No fixed category restrictions - topics are derived from conversation context and trends
-  local interests=""
-
   local brave_key="${BRAVE_API_KEY:-}"
   if [[ -z "${brave_key}" ]]; then
     log "WARN: Proactive engine: BRAVE_API_KEY not set, using LLM knowledge only"
-    _discover_trending_content_llm_only "${interests}"
+    _discover_trending_content_llm_only
     return
   fi
 
@@ -644,10 +683,10 @@ _discover_trending_content() {
 
   local queries=()
   if [[ -n "${dynamic_queries}" ]] && echo "${dynamic_queries}" | jq '.[0]' > /dev/null 2>&1; then
-    # Use dynamic queries only (up to 7) - no category-based fallback mixing
+    # Use dynamic queries only (up to 12) - no category-based fallback mixing
     local dq_count
     dq_count=$(echo "${dynamic_queries}" | jq 'length')
-    local dq_max=$(( dq_count > 7 ? 7 : dq_count ))
+    local dq_max=$(( dq_count > 12 ? 12 : dq_count ))
     local dqi=0
     while [[ ${dqi} -lt ${dq_max} ]]; do
       local dq
@@ -655,7 +694,10 @@ _discover_trending_content() {
       queries+=("${dq}")
       dqi=$((dqi + 1))
     done
-    log "Proactive engine: Using ${#queries[@]} dynamic queries from chat context (no category fallback)"
+    log "Proactive engine: Using ${#queries[@]} dynamic queries from per-chat context (no category fallback)"
+    # Also add 1-2 generic fallback queries to ensure minimum article diversity
+    queries+=("${fallback_queries[0]}")
+    queries+=("${fallback_queries[1]}")
   else
     # No dynamic queries available, use generic fallback queries
     log "Proactive engine: No dynamic queries, using generic fallback queries"
@@ -690,7 +732,7 @@ _discover_trending_content() {
 
   if [[ -z "${search_results}" || "${search_results}" == "[]" ]]; then
     log "WARN: Proactive engine: Brave Search returned no results, falling back to LLM"
-    _discover_trending_content_llm_only "${interests}"
+    _discover_trending_content_llm_only
     return
   fi
 
@@ -724,27 +766,20 @@ ${search_results}
   local response
   response=$(invoke_claude "${prompt}")
 
-  # Strip markdown code fences
-  response=$(echo "${response}" | sed '/^```\(json\)\?$/d')
+  # Parse curated content using common parser
+  local parsed
+  parsed=$(_extract_json_array "${response}")
 
-  # Validate JSON
-  if echo "${response}" | jq '.[0]' > /dev/null 2>&1; then
-    echo "${response}"
+  if [[ -n "${parsed}" ]]; then
+    echo "${parsed}"
   else
-    local json_part
-    json_part=$(echo "${response}" | sed -n '/^[[:space:]]*\[/,/^[[:space:]]*\]/p')
-    if [[ -n "${json_part}" ]] && echo "${json_part}" | jq '.[0]' > /dev/null 2>&1; then
-      echo "${json_part}"
-    else
-      log "WARN: Proactive engine: Failed to parse curated content, falling back to LLM"
-      _discover_trending_content_llm_only "${interests}"
-    fi
+    log "WARN: Proactive engine: Failed to parse curated content, falling back to LLM"
+    _discover_trending_content_llm_only
   fi
 }
 
 # Fallback: generate trending content using LLM knowledge only
 _discover_trending_content_llm_only() {
-  local interests="$1"
   local today
   today=$(_get_jst_date)
 
@@ -772,19 +807,15 @@ _discover_trending_content_llm_only() {
 
   local response
   response=$(invoke_claude "${prompt}")
-  response=$(echo "${response}" | sed '/^```\(json\)\?$/d')
 
-  if echo "${response}" | jq '.[0]' > /dev/null 2>&1; then
-    echo "${response}"
+  local parsed
+  parsed=$(_extract_json_array "${response}")
+
+  if [[ -n "${parsed}" ]]; then
+    echo "${parsed}"
   else
-    local json_part
-    json_part=$(echo "${response}" | sed -n '/^[[:space:]]*\[/,/^[[:space:]]*\]/p')
-    if [[ -n "${json_part}" ]] && echo "${json_part}" | jq '.[0]' > /dev/null 2>&1; then
-      echo "${json_part}"
-    else
-      log "WARN: Proactive engine: LLM fallback also failed to produce valid JSON"
-      echo '[{"title":"コンテンツ生成エラー","url":null,"summary":"トレンドコンテンツの生成に失敗しました","category":"info","interest_score":0}]'
-    fi
+    log "WARN: Proactive engine: LLM fallback also failed to produce valid JSON"
+    echo '[{"title":"コンテンツ生成エラー","url":null,"summary":"トレンドコンテンツの生成に失敗しました","category":"info","interest_score":0}]'
   fi
 }
 
@@ -1539,13 +1570,18 @@ ${trends_hint:-なし}
 ## 割り当てルール（最重要・厳守）
 各チャットに正確に **3件** の記事を割り当てること。3件の内訳は以下の通り：
 
-1. **コンテキスト記事2件**: そのチャットの「最近の会話」の内容に最も関連する記事を2件選ぶ。会話で話されていた具体的なトピックに合致する記事を優先。会話コンテキストがない場合はaudienceとトーンに基づいて最適な記事を選ぶ
+1. **コンテキスト記事2件**: そのチャットの「最近の会話」の内容に **直接関連する** 記事を2件選ぶ。
+   - 「最近の会話」に具体的なトピック（例：ゲーム、株、料理、AI等）があればそのトピックに合致する記事を選ぶ
+   - 会話コンテキストがない場合はaudienceとトーンに基づいて選ぶ
+   - **重要**: 各チャットの会話内容が異なる場合、必ず異なる記事を選ぶこと
 2. **多様性確保記事1件**: 上記2件とは異なるジャンルの記事を1件選ぶ。Google Trends急上昇ワードに関連する記事があれば優先。なければ候補記事の中からコンテキスト記事とは最も異なるジャンルの記事を選ぶ
 
-追加ルール：
-- **チャットごとに異なる記事セットにする（必須）**: 割り当てセット全体が同一になってはならない
-- チャットの対象者に合わない記事は割り当てない（例：家族向けチャットに専門的すぎる記事は避ける）
-- 会話の内容から自由にトピックを判定し、カテゴリに制限なく最適な記事を選択すること。テクノロジー・ゲームなどの特定ジャンルに偏らないこと
+## 差別化ルール（最重要）
+- **各チャットの「最近の会話」が異なるトピックを含んでいる場合、コンテキスト記事2件は必ずチャット間で異なる記事にすること**
+- 例：チャットAで「ゲーム」、チャットBで「投資」が話されていた場合、Aにはゲーム関連を、Bには投資関連を割り当てる
+- 記事数が足りず完全な差別化が困難な場合でも、少なくとも1件は各チャット固有の記事にする
+- 家族向けチャットに専門的すぎる記事は割り当てない
+- 会話の内容から自由にトピックを判定し、カテゴリに制限なく最適な記事を選択すること
 
 ## 出力形式（厳守）
 思考過程や説明文は一切出力しないこと。以下のJSON形式のみ出力すること。
@@ -1638,7 +1674,30 @@ ${trends_hint:-なし}
     local total_sets
     total_sets=$(echo "${assignments}" | jq 'keys | length' 2>/dev/null || echo 0)
     if [[ "${unique_sets}" -eq 1 && "${total_sets}" -gt 1 ]]; then
-      log "WARN: Proactive engine: All ${total_sets} chats received identical article assignments - differentiation failed"
+      log "WARN: Proactive engine: All ${total_sets} chats received identical assignments - applying round-robin offset"
+      # Force differentiation by offsetting articles for each chat
+      local rr_total_fix
+      rr_total_fix=$(echo "${content_json}" | jq 'length' 2>/dev/null || echo 0)
+      if [[ ${rr_total_fix} -ge 4 ]]; then
+        local fixed_assignments="{"
+        local rr_fi=0
+        while [[ ${rr_fi} -lt ${total_sets} ]]; do
+          local rr_base
+          rr_base=$(echo "${assignments}" | jq -r --arg idx "${rr_fi}" '.[$idx] // .["0"] | .[0]' 2>/dev/null || echo 0)
+          local rr_off=$(( rr_fi % (rr_total_fix - 2) ))
+          local rr_f1=$(( (rr_base + rr_off) % rr_total_fix ))
+          local rr_f2=$(( (rr_base + rr_off + 1) % rr_total_fix ))
+          local rr_f3=$(( (rr_base + rr_off + 2) % rr_total_fix ))
+          [[ ${rr_fi} -gt 0 ]] && fixed_assignments="${fixed_assignments},"
+          fixed_assignments="${fixed_assignments}\"${rr_fi}\":[${rr_f1},${rr_f2},${rr_f3}]"
+          rr_fi=$((rr_fi + 1))
+        done
+        fixed_assignments="${fixed_assignments}}"
+        assignments=$(echo "${fixed_assignments}" | jq '.' 2>/dev/null)
+        log "Proactive engine: Applied round-robin offset to differentiate: $(echo "${assignments}" | jq -c '.' 2>/dev/null)"
+      else
+        log "WARN: Proactive engine: Not enough articles (${rr_total_fix}) to differentiate, keeping identical assignments"
+      fi
     else
       log "Proactive engine: ${unique_sets} unique assignment sets for ${total_sets} chats"
     fi
@@ -1738,7 +1797,8 @@ ${trends_hint:-なし}
       --arg status "${delivery_status}" \
       --arg error "${delivery_error}" \
       --arg chars "${#formatted_content}" \
-      '. + [{destination: $type, target_id: $tid, session_key: $sk, status: $status, error: $error, content_length: ($chars | tonumber)}]')
+      --argjson articles "${assigned_indices:-[]}" \
+      '. + [{destination: $type, target_id: $tid, session_key: $sk, status: $status, error: $error, content_length: ($chars | tonumber), assigned_articles: $articles}]')
 
     i=$((i + 1))
   done
@@ -1759,7 +1819,17 @@ ${trends_hint:-なし}
       content: $content,
       deliveries: $deliveries,
       created_at: $created
-    }')
+    }' 2>/dev/null)
+
+  # Guard against empty/invalid broadcast record
+  if [[ -z "${broadcast_record}" ]] || ! echo "${broadcast_record}" | jq '.id' > /dev/null 2>&1; then
+    log "WARN: Proactive engine: broadcast_record was empty or invalid, creating error record"
+    broadcast_record=$(jq -n \
+      --arg id "${broadcast_id}" --arg trigger "${trigger_name}" \
+      --arg mode "${mode}" --arg created "${now_ts}" \
+      --argjson deliveries "${delivery_results}" \
+      '{id: $id, trigger: $trigger, mode: $mode, content: [], deliveries: $deliveries, created_at: $created, error: "broadcast_record_generation_failed"}')
+  fi
 
   local broadcast_file="${PROACTIVE_BROADCAST_DIR}/${broadcast_id}.json"
   local tmp
@@ -1939,6 +2009,23 @@ ${chat_context}"
     log "Proactive engine: Added Google Trends keyword to on-demand queries"
   fi
 
+  # Ensure minimum query diversity: if dynamic queries < 3, add generic fallback queries
+  local dq_count=0
+  if [[ -n "${dynamic_queries}" ]]; then
+    dq_count=$(echo "${dynamic_queries}" | jq 'length' 2>/dev/null || echo 0)
+  fi
+  if [[ ${dq_count} -lt 3 ]]; then
+    local today_fallback
+    today_fallback=$(_get_jst_date)
+    local fallback_items='["最新ニュース 話題 '"${today_fallback}"'","trending topics '"${today_fallback}"'","いま話題のニュース '"${today_fallback}"'"]'
+    if [[ -n "${dynamic_queries}" && "${dynamic_queries}" != "[]" ]]; then
+      dynamic_queries=$(echo "${dynamic_queries}" | jq --argjson fb "${fallback_items}" '. + $fb' 2>/dev/null)
+    else
+      dynamic_queries="${fallback_items}"
+    fi
+    log "Proactive engine: Dynamic queries were ${dq_count}, added fallback queries for minimum diversity"
+  fi
+
   # Discover content using chat-context-aware queries
   local content_json
   content_json=$(_discover_trending_content "${trigger_json}" "${dynamic_queries}")
@@ -2084,7 +2171,17 @@ ${trends_hint:-なし}
     --arg id "${broadcast_id}" --arg trigger "ondemand" \
     --arg mode "${mode}" --arg created "${now_ts}" \
     --argjson content "${selected_content}" --argjson deliveries "${delivery_results}" \
-    '{id: $id, trigger: $trigger, mode: $mode, content: $content, deliveries: $deliveries, created_at: $created}')
+    '{id: $id, trigger: $trigger, mode: $mode, content: $content, deliveries: $deliveries, created_at: $created}' 2>/dev/null)
+
+  # Guard against empty/invalid broadcast record
+  if [[ -z "${broadcast_record}" ]] || ! echo "${broadcast_record}" | jq '.id' > /dev/null 2>&1; then
+    log "WARN: Proactive engine: broadcast_record was empty or invalid, creating error record"
+    broadcast_record=$(jq -n \
+      --arg id "${broadcast_id}" --arg trigger "ondemand" \
+      --arg mode "${mode}" --arg created "${now_ts}" \
+      --argjson deliveries "${delivery_results}" \
+      '{id: $id, trigger: $trigger, mode: $mode, content: [], deliveries: $deliveries, created_at: $created, error: "broadcast_record_generation_failed"}')
+  fi
 
   local broadcast_file="${PROACTIVE_BROADCAST_DIR}/${broadcast_id}.json"
   local tmp
