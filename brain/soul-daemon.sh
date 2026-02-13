@@ -149,6 +149,7 @@ main_loop() {
     check_personality_manual_trigger || log "WARN: check_personality_manual_trigger error"
     check_personality_rollback_trigger || log "WARN: check_personality_rollback_trigger error"
     check_personality_external_trigger || log "WARN: check_personality_external_trigger error"
+    check_personality_freeform_trigger || log "WARN: check_personality_freeform_trigger error"
 
     sleep "${POLL_INTERVAL}"
   done

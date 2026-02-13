@@ -279,12 +279,14 @@ Masaruのことをもっと正確に再現するために、以下の質問に�
     message="${message}
 ※回答は番号付きでお願いします
 ※全問でなくても答えられる分だけで大丈夫です
-※48時間以内にご回答ください"
+※48時間以内にご回答ください
+※質問に答える代わりに「Masaru情報 〇〇」とフリーテキストで情報を送ることもできます"
   else
     message="${message}
 ※回答は番号付きでお願いします
 ※全問じゃなくても答えられる分だけでOK
-※48時間以内に回答してください"
+※48時間以内に回答してください
+※質問に答える代わりに「性格メモ 〇〇」とフリーテキストで直接入力もできるで"
   fi
 
   _pi_send_line_message "${message}"
@@ -588,14 +590,61 @@ _pi_process_answers() {
     questions_context=$(cat "${PI_DIR}/${pending_ref}")
   fi
 
-  # Determine mode
+  # Determine mode and input type
   local mode
   mode=$(_pi_get_mode)
+  local input_type
+  input_type=$(jq -r '.input_type // "qa"' "${trigger_file}" 2>/dev/null)
 
   # Generate personality updates via Claude
   local prompt
   local mode_intro mode_extra_rules
-  if [[ "${mode}" == "external" ]]; then
+  if [[ "${input_type}" == "freeform" ]]; then
+    # Freeform text input - specialized prompt
+    local freeform_intro
+    if [[ "${mode}" == "external" ]]; then
+      freeform_intro="あなたはSoul Systemのパーソナリティ更新エンジンです。
+Masaruの知人からのフリーテキスト情報に基づいて、パーソナリティファイル（SOUL.mdとAGENTS.md）の更新内容を生成してください。
+提供者はMasaruを外から見ている第三者です。"
+      mode_extra_rules="
+### 外部改善固有ルール（厳守）:
+- 既存の定義（Masaru自身の回答に基づくもの）と矛盾する場合は、**既存を優先**する
+- Masaru自身の好み・価値観・内面的な判断基準を上書きしない
+- 外見的な行動パターン・対人印象の反映に重点を置く
+- 「周囲からは○○と思われている」「○○な印象を与える」等の第三者視点表現を使う
+- 内面の記述を追加する場合は「周囲から見ると」等の限定をつける
+"
+    else
+      freeform_intro="あなたはSoul Systemのパーソナリティ更新エンジンです。
+Masaru本人の自由記述に基づいて、パーソナリティファイル（SOUL.mdとAGENTS.md）の更新内容を生成してください。"
+      mode_extra_rules=""
+    fi
+
+    local raw_answers
+    raw_answers=$(jq -r '.raw_answers // ""' "${answer_file}" 2>/dev/null)
+
+    prompt="${freeform_intro}
+
+## 現在のSOUL.md:
+${soul_md}
+
+## 現在のAGENTS.md:
+${agents_md}
+
+## 提供されたフリーテキスト情報:
+${raw_answers}
+
+## 更新ルール（厳守）:
+${mode_extra_rules}
+
+### フリーテキスト固有ルール:
+- テキストの内容を正確に解釈し、パーソナリティ定義に反映すること
+- 曖昧な記述を過度に解釈・拡大解釈しないこと
+- セキュリティ情報（パスワード、トークン、API鍵、サーバー構成等）は絶対に反映しない
+- 個人情報（住所、電話番号、マイナンバー等）は反映しない
+- 短いテキストでも有意義な情報があれば変更を提案すること
+- 既に定義済みの内容と同じ情報は重複して追加しないこと"
+  elif [[ "${mode}" == "external" ]]; then
     mode_intro="あなたはSoul Systemのパーソナリティ更新エンジンです。
 Masaruの知人からの回答に基づいて、パーソナリティファイル（SOUL.mdとAGENTS.md）の更新内容を生成してください。
 回答者はMasaruを外から見ている第三者です。"
@@ -607,13 +656,8 @@ Masaruの知人からの回答に基づいて、パーソナリティファイ�
 - 「周囲からは○○と思われている」「○○な印象を与える」等の第三者視点表現を使う
 - 内面の記述を追加する場合は「周囲から見ると」等の限定をつける
 "
-  else
-    mode_intro="あなたはSoul Systemのパーソナリティ更新エンジンです。
-Masaruの回答に基づいて、パーソナリティファイル（SOUL.mdとAGENTS.md）の更新内容を生成してください。"
-    mode_extra_rules=""
-  fi
 
-  prompt="${mode_intro}
+    prompt="${mode_intro}
 
 ## 現在のSOUL.md:
 ${soul_md}
@@ -628,7 +672,32 @@ ${answers}
 ${questions_context}
 
 ## 更新ルール（厳守）:
-${mode_extra_rules}
+${mode_extra_rules}"
+  else
+    mode_intro="あなたはSoul Systemのパーソナリティ更新エンジンです。
+Masaruの回答に基づいて、パーソナリティファイル（SOUL.mdとAGENTS.md）の更新内容を生成してください。"
+    mode_extra_rules=""
+
+    prompt="${mode_intro}
+
+## 現在のSOUL.md:
+${soul_md}
+
+## 現在のAGENTS.md:
+${agents_md}
+
+## 質問と回答:
+${answers}
+
+## 質問の元コンテキスト:
+${questions_context}
+
+## 更新ルール（厳守）:
+${mode_extra_rules}"
+  fi
+
+  # Common sections appended to all prompts
+  prompt="${prompt}
 
 ### 変更禁止セクション（SOUL.md）:
 以下のセクションは**絶対に変更しない**：
@@ -753,10 +822,12 @@ JSONのみ出力してください。"
       --arg soul_after "$(md5sum /soul/worker/openclaw/personality/SOUL.md | awk '{print $1}')" \
       --arg agents_after "$(md5sum /soul/worker/openclaw/personality/AGENTS.md | awk '{print $1}')" \
       --arg mode "${mode}" \
+      --arg input_type "${input_type}" \
       --arg external_user_id "${external_user_id}" \
       '{
         timestamp: $ts,
         mode: $mode,
+        input_type: $input_type,
         changes: $changes.changes,
         summary: $changes.summary,
         hashes_before: { soul_md: $soul_before, agents_md: $agents_before },
@@ -832,7 +903,11 @@ ${changes_detail}
     log "Personality improvement: Completed successfully (${changes_count} changes)"
 
     # Git commit and push personality changes
-    if [[ "${mode}" == "external" ]]; then
+    if [[ "${input_type}" == "freeform" && "${mode}" == "external" ]]; then
+      _pi_git_commit_and_push "外部フリーテキストからのパーソナリティ改善: ${summary}"
+    elif [[ "${input_type}" == "freeform" ]]; then
+      _pi_git_commit_and_push "フリーテキストからのパーソナリティ改善: ${summary}"
+    elif [[ "${mode}" == "external" ]]; then
       _pi_git_commit_and_push "外部からのパーソナリティ改善: ${summary}"
     else
       _pi_git_commit_and_push "${summary}"
@@ -1632,4 +1707,152 @@ check_personality_external_trigger() {
   chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
 
   log "Personality improvement: External trigger accepted (user: ${trigger_user_id})"
+}
+
+# ============================================================
+# Freeform personality input trigger handler
+# Allows direct free-text personality info without Q&A flow
+# ============================================================
+
+check_personality_freeform_trigger() {
+  [[ "${NODE_NAME}" == "triceratops" ]] || return 0
+
+  # Scan bot_commands for freeform trigger files (self and external)
+  local bot_cmd_trigger=""
+  local freeform_mode=""
+  for candidate in "${SHARED_DIR}"/bot_commands/personality_freeform_trigger*.json "${SHARED_DIR}"/bot_commands/personality_external_freeform_trigger*.json; do
+    [[ -f "${candidate}" ]] || continue
+    local cand_status
+    cand_status=$(jq -r '.status // ""' "${candidate}" 2>/dev/null)
+    if [[ "${cand_status}" == "pending" ]]; then
+      bot_cmd_trigger="${candidate}"
+      # Determine mode from filename
+      local bname
+      bname=$(basename "${candidate}")
+      if [[ "${bname}" == personality_external_freeform_trigger* ]]; then
+        freeform_mode="external"
+      else
+        freeform_mode="self"
+      fi
+      break
+    fi
+  done
+
+  [[ -n "${bot_cmd_trigger}" ]] || return 0
+
+  log "Personality improvement: Freeform trigger detected (mode: ${freeform_mode})"
+
+  # Check if an improvement process is already active
+  local trigger_file="${PI_DIR}/trigger.json"
+  if [[ -f "${trigger_file}" ]]; then
+    local current_status
+    current_status=$(jq -r '.status // ""' "${trigger_file}" 2>/dev/null)
+    if [[ "${current_status}" == "pending" || "${current_status}" == "questions_sent" || "${current_status}" == "answers_received" ]]; then
+      log "Personality improvement: Freeform trigger REJECTED - improvement already in progress (status: ${current_status})"
+      local tmp
+      tmp=$(mktemp)
+      jq '.status = "rejected" | .reason = "improvement_in_progress"' "${bot_cmd_trigger}" > "${tmp}" && mv "${tmp}" "${bot_cmd_trigger}"
+      chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
+      return 0
+    fi
+  fi
+
+  # Authenticate based on mode
+  local trigger_user_id
+  trigger_user_id=$(jq -r '.user_id // ""' "${bot_cmd_trigger}" 2>/dev/null)
+
+  if [[ "${freeform_mode}" == "external" ]]; then
+    if ! _pi_is_external_authorized "${trigger_user_id}"; then
+      log "SECURITY: Personality improvement: Freeform external trigger REJECTED - user_id not authorized (got: ${trigger_user_id:-empty})"
+      local tmp
+      tmp=$(mktemp)
+      jq '.status = "rejected" | .reason = "unauthorized"' "${bot_cmd_trigger}" > "${tmp}" && mv "${tmp}" "${bot_cmd_trigger}"
+      chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
+      return 0
+    fi
+  else
+    if [[ -z "${trigger_user_id}" || "${trigger_user_id}" != "${PI_OWNER_LINE_ID}" ]]; then
+      log "SECURITY: Personality improvement: Freeform trigger REJECTED - user_id mismatch (got: ${trigger_user_id:-empty})"
+      local tmp
+      tmp=$(mktemp)
+      jq '.status = "rejected" | .reason = "unauthorized"' "${bot_cmd_trigger}" > "${tmp}" && mv "${tmp}" "${bot_cmd_trigger}"
+      chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
+      return 0
+    fi
+  fi
+
+  # Extract free_text
+  local free_text
+  free_text=$(jq -r '.free_text // ""' "${bot_cmd_trigger}" 2>/dev/null)
+  if [[ -z "${free_text}" ]]; then
+    log "Personality improvement: Freeform trigger REJECTED - free_text is empty"
+    local tmp
+    tmp=$(mktemp)
+    jq '.status = "rejected" | .reason = "empty_free_text"' "${bot_cmd_trigger}" > "${tmp}" && mv "${tmp}" "${bot_cmd_trigger}"
+    chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
+    return 0
+  fi
+
+  # Read reply_to destination
+  local reply_to
+  reply_to=$(jq -r '.reply_to // ""' "${bot_cmd_trigger}" 2>/dev/null)
+  if [[ "${freeform_mode}" == "external" ]]; then
+    [[ -n "${reply_to}" ]] || reply_to="${trigger_user_id}"
+  else
+    [[ -n "${reply_to}" ]] || reply_to="${PI_OWNER_LINE_ID}"
+  fi
+  export PI_REPLY_TO="${reply_to}"
+
+  # Create synthetic answer file
+  local answer_timestamp
+  answer_timestamp=$(date -u +%Y%m%d_%H%M%S)
+  local answer_file="${PI_DIR}/answers_${answer_timestamp}.json"
+  local ans_tmp
+  ans_tmp=$(mktemp)
+  jq -n \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg status "collected" \
+    --arg raw_text "${free_text}" \
+    --arg input_type "freeform" \
+    '{
+      timestamp: $ts,
+      status: $status,
+      input_type: $input_type,
+      raw_answers: $raw_text,
+      parsed_answers: [],
+      questions: 0
+    }' > "${ans_tmp}" && mv "${ans_tmp}" "${answer_file}"
+
+  mkdir -p "${PI_DIR}" "${PI_HISTORY_DIR}"
+
+  # Create trigger.json directly in answers_received state (skip Q&A)
+  local mode_value="${freeform_mode}"
+  local trig_tmp
+  trig_tmp=$(mktemp)
+  jq -n \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg src "freeform" \
+    --arg reply_to "${reply_to}" \
+    --arg mode "${mode_value}" \
+    --arg input_type "freeform" \
+    --arg answer_file "answers_${answer_timestamp}.json" \
+    --arg external_user_id "${trigger_user_id}" \
+    '{
+      type: "personality_improvement",
+      status: "answers_received",
+      triggered_at: $ts,
+      triggered_by: $src,
+      reply_to: $reply_to,
+      mode: $mode,
+      input_type: $input_type,
+      answer_file: $answer_file
+    } + (if $mode == "external" then { external_user_id: $external_user_id } else {} end)' > "${trig_tmp}" && mv "${trig_tmp}" "${trigger_file}"
+
+  # Mark freeform trigger as processed
+  local mt_tmp
+  mt_tmp=$(mktemp)
+  jq '.status = "processed"' "${bot_cmd_trigger}" > "${mt_tmp}" && mv "${mt_tmp}" "${bot_cmd_trigger}"
+  chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
+
+  log "Personality improvement: Freeform trigger accepted (mode: ${freeform_mode}, user: ${trigger_user_id}, text length: ${#free_text})"
 }

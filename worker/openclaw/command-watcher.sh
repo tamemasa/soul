@@ -18,7 +18,7 @@ process_command() {
   local basename
   basename=$(basename "${cmd_file}")
   case "${basename}" in
-    personality_manual_trigger*.json|personality_rollback_trigger*.json|personality_answer*.json)
+    personality_manual_trigger*.json|personality_rollback_trigger*.json|personality_answer*.json|personality_external_trigger*.json|personality_external_answer*.json|personality_freeform_trigger*.json|personality_external_freeform_trigger*.json)
       return 0
       ;;
   esac
