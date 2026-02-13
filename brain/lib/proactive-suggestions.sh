@@ -2176,7 +2176,7 @@ ${trends_hint:-なし}
     fi
 
     if [[ -n "${selected_indices}" ]] && echo "${selected_indices}" | jq '.[0]' > /dev/null 2>&1; then
-      selected_content=$(echo "${content_json}" | jq -c --argjson indices "${selected_indices}" '[. as $all | $indices[] | $all[.] // empty] | if length == 0 then $all[:3] else . end')
+      selected_content=$(echo "${content_json}" | jq -c --argjson indices "${selected_indices}" '. as $all | [. as $all | $indices[] | $all[.] // empty] | if length == 0 then $all[:3] else . end')
       log "Proactive engine: Selected articles: ${selected_indices}"
     else
       log "WARN: Proactive engine: Article selection failed, using first 3"
