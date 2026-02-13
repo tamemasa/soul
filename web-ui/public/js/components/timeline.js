@@ -23,7 +23,7 @@ export function renderTimeline(rounds, options = {}) {
     comments = [], isDiscussing = false, currentRound = 0, maxRounds = 3,
     decision = null, result = null, isExecuting = false, progress = null,
     history = [], isAnnouncing = false, announceProgress = null,
-    taskId = null
+    taskId = null, previousAttempts = []
   } = options;
 
   if ((!rounds || rounds.length === 0) && comments.length === 0 && !decision && history.length === 0) {
@@ -98,7 +98,7 @@ export function renderTimeline(rounds, options = {}) {
       } else if (ev.type === 'decision') {
         out += renderDecisionItem(decision);
         out += renderAnnouncementItem(decision, isAnnouncing, announceProgress);
-        out += renderExecutionItem(result, isExecuting, progress, decision);
+        out += renderExecutionItem(result, isExecuting, progress, decision, previousAttempts);
       }
     }
     return out;
@@ -162,7 +162,7 @@ export function renderTimeline(rounds, options = {}) {
     if (round.round === finalRound) {
       html += renderDecisionItem(decision);
       html += renderAnnouncementItem(decision, isAnnouncing, announceProgress);
-      html += renderExecutionItem(result, isExecuting, progress, decision);
+      html += renderExecutionItem(result, isExecuting, progress, decision, previousAttempts);
     }
 
     // Render floating events between this round and the next
@@ -281,15 +281,32 @@ function extractAnnouncementFromProgress(events) {
 }
 
 // --- Execution timeline item ---
-function renderExecutionItem(result, isExecuting, progress, decision) {
-  if (!isExecuting && !result?.result && !(progress?.length)) return '';
+function renderExecutionItem(result, isExecuting, progress, decision, previousAttempts = []) {
+  const hasPrevAttempts = previousAttempts && previousAttempts.length > 0;
+  if (!isExecuting && !result?.result && !(progress?.length) && !hasPrevAttempts) return '';
 
+  const retryCount = decision?.retry_count || 0;
+  const attemptLabel = retryCount > 0 ? ` (Attempt ${retryCount + 1})` : '';
   let inner = '';
+
+  // Show previous attempts as collapsed sections
+  if (hasPrevAttempts) {
+    for (const attempt of previousAttempts) {
+      inner += `
+      <details class="previous-attempt">
+        <summary class="previous-attempt-summary">Previous Attempt ${attempt.attempt + 1} (interrupted)</summary>
+        <div class="previous-attempt-content">
+          ${renderProgressSnapshotInline(attempt.events)}
+        </div>
+      </details>`;
+    }
+  }
+
   if (isExecuting) {
-    inner = `
+    inner += `
       <div class="execution-progress" id="execution-progress">
         <div class="execution-progress-header">
-          <span class="execution-progress-title">Execution Progress</span>
+          <span class="execution-progress-title">Execution Progress${attemptLabel}</span>
           ${nodeBadge(decision?.executor || 'panda')}
         </div>
         <div class="progress-events" id="progress-events">
@@ -316,7 +333,7 @@ function renderExecutionItem(result, isExecuting, progress, decision) {
 
   return `
     <div class="timeline-item timeline-execution-item">
-      <div class="timeline-round">Execution</div>
+      <div class="timeline-round">Execution${attemptLabel}</div>
       ${inner}
     </div>`;
 }

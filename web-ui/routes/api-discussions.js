@@ -105,6 +105,7 @@ module.exports = function (sharedDir) {
     // Include progress events for executing and completed tasks
     let progress = null;
     let announceProgress = null;
+    let previousAttempts = [];
     const effectiveStatus = decision?.status || status?.status;
     if (effectiveStatus === 'executing' || effectiveStatus === 'completed') {
       progress = await readProgressFile(path.join(sharedDir, 'decisions', `${taskId}_progress.jsonl`));
@@ -117,7 +118,18 @@ module.exports = function (sharedDir) {
       announceProgress = await readProgressFile(announceFile);
     }
 
-    res.json({ task_id: taskId, task, status, rounds, decision, result, comments, progress, announceProgress, history });
+    // Load previous execution attempts (from retry backups)
+    if (decision?.retry_count > 0) {
+      for (let i = 0; i < decision.retry_count; i++) {
+        const attemptFile = path.join(sharedDir, 'decisions', `${taskId}_progress_attempt${i}.jsonl`);
+        const attemptProgress = await readProgressFile(attemptFile);
+        if (attemptProgress) {
+          previousAttempts.push({ attempt: i, events: attemptProgress });
+        }
+      }
+    }
+
+    res.json({ task_id: taskId, task, status, rounds, decision, result, comments, progress, announceProgress, history, previousAttempts });
   });
 
   // Progress endpoint for real-time execution monitoring

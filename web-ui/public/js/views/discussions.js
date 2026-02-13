@@ -100,6 +100,10 @@ export async function renderDiscussionDetail(app, taskId) {
     : (data.decision?.status || discussionStatus);
   const pipelineHtml = renderPipeline(effectiveStatus, data.result);
 
+  const isMobile = window.innerWidth <= 768;
+  const descriptionHtml = data.task?.description ? `<div class="text-secondary mt-2">${escapeHtml(data.task.description)}</div>` : '';
+  const attachmentsHtml = data.task?.attachments?.length ? `<div class="attachment-list mt-2">${data.task.attachments.map(a => `<a class="attachment-badge" href="/api/discussions/${taskId}/attachments/${encodeURIComponent(a.filename)}" target="_blank" title="${escapeHtml(a.original_name)} (${formatFileSize(a.size)})">${escapeHtml(a.original_name)}<span class="attachment-size">${formatFileSize(a.size)}</span></a>`).join('')}</div>` : '';
+
   app.innerHTML = `
     <div class="detail-sticky-header">
       <div class="page-header">
@@ -112,14 +116,15 @@ export async function renderDiscussionDetail(app, taskId) {
           <span class="badge badge-status badge-${effectiveStatus}">${effectiveStatus}</span>
           <span class="text-sm text-secondary" style="font-family:var(--font-mono)">Round ${currentRound} / ${data.status?.max_rounds || 3}</span>
         </div>
-        ${data.task?.description ? `<div class="text-secondary mt-2">${escapeHtml(data.task.description)}</div>` : ''}
-        ${data.task?.attachments?.length ? `<div class="attachment-list mt-2">${data.task.attachments.map(a => `<a class="attachment-badge" href="/api/discussions/${taskId}/attachments/${encodeURIComponent(a.filename)}" target="_blank" title="${escapeHtml(a.original_name)} (${formatFileSize(a.size)})">${escapeHtml(a.original_name)}<span class="attachment-size">${formatFileSize(a.size)}</span></a>`).join('')}</div>` : ''}
+        ${isMobile ? '' : descriptionHtml}
+        ${isMobile ? '' : attachmentsHtml}
       </div>
 
-      ${pipelineHtml}
+      ${isMobile ? '' : pipelineHtml}
     </div>
 
     <div class="detail-scroll-area" id="detail-scroll-area">
+      ${isMobile ? `<div class="card mb-4">${descriptionHtml}${attachmentsHtml}</div>${pipelineHtml}` : ''}
       ${renderTimeline(data.rounds, {
         comments: data.comments || [],
         isDiscussing,
@@ -132,7 +137,8 @@ export async function renderDiscussionDetail(app, taskId) {
         history: data.history || [],
         isAnnouncing,
         announceProgress: data.announceProgress,
-        taskId
+        taskId,
+        previousAttempts: data.previousAttempts || []
       })}
 
       <div class="card comment-form-card" style="margin-top:24px;">

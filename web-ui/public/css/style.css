@@ -884,6 +884,30 @@ body {
 }
 
 /* ─── Execution Progress ─── */
+.previous-attempt {
+  margin-top: 12px;
+  border: 1px solid rgba(245,158,11,0.3);
+  border-left: 3px solid rgba(245,158,11,0.6);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.previous-attempt-summary {
+  padding: 10px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(245,158,11,0.9);
+  background: rgba(245,158,11,0.06);
+  user-select: none;
+}
+.previous-attempt-summary:hover {
+  background: rgba(245,158,11,0.12);
+}
+.previous-attempt-content {
+  padding: 0 12px 12px;
+  max-height: 400px;
+  overflow-y: auto;
+}
 .execution-progress {
   background: var(--bg-secondary);
   border: 1px solid rgba(96,165,250,0.3);
@@ -1107,14 +1131,14 @@ body {
 
 /* ─── Responsive ─── */
 @media (max-width: 768px) {
-  /* Bottom navigation */
+  /* Top navigation (mobile) */
   #sidebar {
     position: fixed;
-    bottom: 0; top: auto; left: 0;
+    top: 0; bottom: auto; left: 0;
     width: 100%; height: auto;
     flex-direction: row;
     border-right: none;
-    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
     background: var(--bg-secondary);
     z-index: 100;
   }
@@ -1140,13 +1164,13 @@ body {
     text-align: center;
     justify-content: center;
   }
-  .nav-item.active { border-left: none; border-bottom: 2px solid var(--accent); background: none; }
+  .nav-item.active { border-left: none; border-top: 2px solid var(--accent); background: none; }
   .nav-text { display: none; }
   .nav-icon { width: 16px; height: 16px; }
 
   /* Main content area */
-  #app { margin-left: 0; padding: 12px; padding-bottom: 64px; }
-  #app.detail-view { padding-bottom: 0; height: calc(100vh - 52px); }
+  #app { margin-left: 0; padding: 12px; padding-top: 56px; }
+  #app.detail-view { padding-top: 0; margin-top: 52px; height: calc(100vh - 52px); }
 
   /* Page header */
   .page-header { margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
@@ -1251,6 +1275,21 @@ body {
 
   /* Decision box */
   .decision-box { padding: 12px; }
+
+  /* Safety fallback: prevent sticky header from blocking scroll */
+  .detail-sticky-header .card { max-height: 100px; overflow-y: auto; }
+
+  /* ─── Horizontal scroll prevention ─── */
+  html, body { overflow-x: hidden; max-width: 100vw; }
+  #app { max-width: 100%; overflow-x: hidden; }
+
+  /* ─── Element width constraints ─── */
+  .card, .detail-scroll-area, .detail-sticky-header { max-width: 100%; overflow-x: hidden; }
+  .result-content pre, .response-content pre { max-width: calc(100vw - 24px); overflow-x: auto; }
+  .pipeline-stepper { max-width: 100%; }
+
+  /* ─── Text wrapping ─── */
+  .page-title, .card, .response-opinion, .result-content { word-break: break-word; overflow-wrap: break-word; }
 }
 
 /* ─── Buddy Monitor ─── */

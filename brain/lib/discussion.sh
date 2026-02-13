@@ -499,14 +499,53 @@ execute_decision() {
   local original_decided_at
   original_decided_at=$(jq -r '.decided_at // ""' "${decision_file}")
 
+  # Track retry count and backup previous progress
+  local retry_count
+  retry_count=$(jq -r '.retry_count // 0' "${decision_file}")
+  local progress_file="${SHARED_DIR}/decisions/${task_id}_progress.jsonl"
+  local previous_result_context=""
+
+  if [[ ${retry_count} -gt 0 ]] || [[ -s "${progress_file}" ]]; then
+    # Backup previous progress file
+    local attempt_num=$((retry_count))
+    local backup_file="${SHARED_DIR}/decisions/${task_id}_progress_attempt${attempt_num}.jsonl"
+    if [[ -s "${progress_file}" ]]; then
+      cp "${progress_file}" "${backup_file}" 2>/dev/null || true
+      log "Backed up previous progress to ${backup_file}"
+    fi
+
+    # Extract previous execution result for context
+    local prev_result
+    prev_result=$(jq -r 'select(.type == "result") | .result // ""' "${progress_file}" 2>/dev/null | tail -1)
+    if [[ -z "${prev_result}" ]]; then
+      # Fallback: extract last assistant messages
+      prev_result=$(jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text // ""' \
+        "${progress_file}" 2>/dev/null | tail -n 30 | head -c 5000)
+    fi
+    if [[ -n "${prev_result}" ]]; then
+      previous_result_context="
+
+## Previous Execution Result (Attempt $((retry_count)))
+The previous execution was interrupted (container restart/rebuild). Here is what was accomplished:
+
+${prev_result}
+
+## Instructions for Continuation
+Review the previous result above. Continue from where it left off. Do NOT redo work that was already completed.
+If the previous attempt completed all work, verify the results and report completion."
+    fi
+
+    retry_count=$((retry_count + 1))
+  fi
+
   # Mark as executing
   local tmp
   tmp=$(mktemp)
-  jq '.status = "executing" | .executor = "'"${NODE_NAME}"'" | .execution_started_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+  jq --argjson rc "${retry_count}" '.status = "executing" | .executor = "'"${NODE_NAME}"'" | .execution_started_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .retry_count = $rc' \
     "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
 
   set_activity "executing" "\"task_id\":\"${task_id}\","
-  log "Executing task ${task_id} with approach: ${approach}"
+  log "Executing task ${task_id} with approach: ${approach} (attempt $((retry_count + 1)))"
 
   # Load task execution protocol
   local protocol
@@ -527,13 +566,13 @@ ${attachment_context}
 
 ## Agreed Approach
 ${approach}
+${previous_result_context}
 
 ## Instructions
 Execute this task following the agreed approach. Work within the /shared/workspace/ directory.
 Report your results."
 
   # Stream execution to progress file for real-time UI display
-  local progress_file="${SHARED_DIR}/decisions/${task_id}_progress.jsonl"
   : > "${progress_file}"
 
   # Run claude in background so we can monitor for cancellation
