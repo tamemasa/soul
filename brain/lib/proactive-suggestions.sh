@@ -1915,13 +1915,21 @@ _check_broadcast_request() {
   return 0
 }
 
-# Check ondemand cooldown - returns 0 if allowed, 1 if in cooldown
+# Check ondemand cooldown per target_id - returns 0 if allowed, 1 if in cooldown
 _check_ondemand_cooldown() {
+  local target_id="${1:-}"
   local cooldown_secs
   cooldown_secs=$(jq -r '.ondemand_cooldown_seconds // 1800' "${PROACTIVE_CONFIG}")
 
   local last_ondemand
-  last_ondemand=$(jq -r '.last_ondemand_at // ""' "${PROACTIVE_STATE}")
+  if [[ -n "${target_id}" ]]; then
+    # Per-target cooldown check
+    last_ondemand=$(jq -r --arg tid "${target_id}" '.ondemand_cooldowns[$tid] // ""' "${PROACTIVE_STATE}" 2>/dev/null)
+  else
+    # Legacy global check
+    last_ondemand=$(jq -r '.last_ondemand_at // ""' "${PROACTIVE_STATE}")
+  fi
+
   if [[ -z "${last_ondemand}" || "${last_ondemand}" == "null" ]]; then
     return 0
   fi
@@ -1933,21 +1941,69 @@ _check_ondemand_cooldown() {
 
   if [[ ${elapsed} -lt ${cooldown_secs} ]]; then
     local remaining=$((cooldown_secs - elapsed))
-    log "Proactive engine: On-demand cooldown active (${remaining}s remaining)"
+    log "Proactive engine: On-demand cooldown active for ${target_id:-global} (${remaining}s remaining)"
     return 1
   fi
 
   return 0
 }
 
-# Record ondemand broadcast timestamp
+# Record ondemand broadcast timestamp per target_id
 _record_ondemand_broadcast() {
+  local target_id="${1:-}"
   local now_ts
   now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   local tmp
   tmp=$(mktemp)
-  jq --arg ts "${now_ts}" '.last_ondemand_at = $ts' \
-    "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
+
+  if [[ -n "${target_id}" ]]; then
+    jq --arg ts "${now_ts}" --arg tid "${target_id}" \
+      '.ondemand_cooldowns[$tid] = $ts | .last_ondemand_at = $ts' \
+      "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
+  else
+    jq --arg ts "${now_ts}" '.last_ondemand_at = $ts' \
+      "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
+  fi
+}
+
+# Notify user that ondemand cooldown is active (safety net for Brain-side cooldown)
+_notify_ondemand_cooldown() {
+  local target_id="$1"
+  local platform="$2"
+
+  local mode
+  mode=$(jq -r '.mode // "dryrun"' "${PROACTIVE_CONFIG}")
+
+  local cooldown_secs remaining_secs
+  cooldown_secs=$(jq -r '.ondemand_cooldown_seconds // 1800' "${PROACTIVE_CONFIG}")
+  local last_ondemand
+  last_ondemand=$(jq -r --arg tid "${target_id}" '.ondemand_cooldowns[$tid] // ""' "${PROACTIVE_STATE}" 2>/dev/null)
+  if [[ -n "${last_ondemand}" && "${last_ondemand}" != "null" ]]; then
+    local last_epoch now_epoch
+    last_epoch=$(date -d "${last_ondemand}" +%s 2>/dev/null || echo 0)
+    now_epoch=$(date +%s)
+    remaining_secs=$(( cooldown_secs - (now_epoch - last_epoch) ))
+    if [[ ${remaining_secs} -lt 0 ]]; then remaining_secs=0; fi
+  else
+    remaining_secs=0
+  fi
+
+  local remaining_min=$(( (remaining_secs + 59) / 60 ))
+  local message="さっきニュース送ったばかりだぜ。あと${remaining_min}分くらい待ってくれ！"
+
+  if [[ "${mode}" == "dryrun" ]]; then
+    log "Proactive engine [DRYRUN]: Would send cooldown notification to ${platform}:${target_id}: ${message}"
+    return 0
+  fi
+
+  case "${platform}" in
+    line)
+      _deliver_line "${target_id}" "${message}"
+      ;;
+    discord)
+      _deliver_discord_bot "${target_id}" "${message}"
+      ;;
+  esac
 }
 
 # Execute on-demand broadcast for a specific chat (from OpenClaw request)
@@ -2200,11 +2256,33 @@ ${trends_hint:-なし}
   log "Proactive engine: On-demand broadcast ${broadcast_id} completed"
 
   # Write marker so OpenClaw knows a broadcast was recently served
+  # Write per-target marker so OpenClaw knows when each target was last served
   local marker_file="/openclaw-suggestions/broadcast_last_served.json"
   local marker_tmp
   marker_tmp=$(mktemp)
-  jq -n --arg ts "${now_ts}" --arg id "${broadcast_id}" --arg tid "${target_id}" \
-    '{served_at: $ts, broadcast_id: $id, target_id: $tid}' \
+  local existing_markers="{}"
+  if [[ -f "${marker_file}" ]]; then
+    existing_markers=$(cat "${marker_file}" 2>/dev/null || echo "{}")
+    if ! echo "${existing_markers}" | jq '.' > /dev/null 2>&1; then
+      existing_markers="{}"
+    fi
+    # Migrate old single-record format if detected
+    if echo "${existing_markers}" | jq -e '.served_at' > /dev/null 2>&1; then
+      local old_tid old_ts old_id
+      old_tid=$(echo "${existing_markers}" | jq -r '.target_id // ""')
+      old_ts=$(echo "${existing_markers}" | jq -r '.served_at // ""')
+      old_id=$(echo "${existing_markers}" | jq -r '.broadcast_id // ""')
+      if [[ -n "${old_tid}" ]]; then
+        existing_markers=$(jq -n --arg tid "${old_tid}" --arg ts "${old_ts}" --arg id "${old_id}" \
+          '{($tid): {served_at: $ts, broadcast_id: $id}}')
+      else
+        existing_markers="{}"
+      fi
+    fi
+  fi
+  echo "${existing_markers}" | jq \
+    --arg tid "${target_id}" --arg ts "${now_ts}" --arg id "${broadcast_id}" \
+    '.[$tid] = {served_at: $ts, broadcast_id: $id}' \
     > "${marker_tmp}" && mv "${marker_tmp}" "${marker_file}" 2>/dev/null || true
 
   set_activity "idle"
@@ -2250,7 +2328,11 @@ check_proactive_suggestions() {
       local broadcast_request
       broadcast_request=$(_check_broadcast_request)
       if [[ -n "${broadcast_request}" ]]; then
-        if _check_ondemand_cooldown; then
+        local req_target_id req_platform
+        req_target_id=$(echo "${broadcast_request}" | jq -r '.chat.target_id // ""')
+        req_platform=$(echo "${broadcast_request}" | jq -r '.chat.platform // ""')
+
+        if _check_ondemand_cooldown "${req_target_id}"; then
           local category="info"
           if _check_rate_limit "${category}"; then
             local tn
@@ -2258,11 +2340,14 @@ check_proactive_suggestions() {
             if [[ -n "${tn}" && "${tn}" != "null" ]]; then
               _execute_ondemand_broadcast "${broadcast_request}" "${tn}"
               _increment_daily_count "${category}"
-              _record_ondemand_broadcast
+              _record_ondemand_broadcast "${req_target_id}"
             fi
           else
             log "Proactive engine: On-demand broadcast rate-limited"
           fi
+        else
+          log "Proactive engine: On-demand cooldown active for ${req_target_id}, sending notification"
+          _notify_ondemand_cooldown "${req_target_id}" "${req_platform}"
         fi
       fi
       return 0
@@ -2310,7 +2395,11 @@ check_proactive_suggestions() {
   local broadcast_request
   broadcast_request=$(_check_broadcast_request)
   if [[ -n "${broadcast_request}" ]]; then
-    if _check_ondemand_cooldown; then
+    local req_target_id req_platform
+    req_target_id=$(echo "${broadcast_request}" | jq -r '.chat.target_id // ""')
+    req_platform=$(echo "${broadcast_request}" | jq -r '.chat.platform // ""')
+
+    if _check_ondemand_cooldown "${req_target_id}"; then
       local category="info"
       if _check_rate_limit "${category}"; then
         local trending_trigger
@@ -2318,12 +2407,15 @@ check_proactive_suggestions() {
         if [[ -n "${trending_trigger}" && "${trending_trigger}" != "null" ]]; then
           _execute_ondemand_broadcast "${broadcast_request}" "${trending_trigger}"
           _increment_daily_count "${category}"
-          _record_ondemand_broadcast
+          _record_ondemand_broadcast "${req_target_id}"
           return 0
         fi
       else
         log "Proactive engine: On-demand broadcast rate-limited"
       fi
+    else
+      log "Proactive engine: On-demand cooldown active for ${req_target_id}, sending notification"
+      _notify_ondemand_cooldown "${req_target_id}" "${req_platform}"
     fi
   fi
 
