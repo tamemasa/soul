@@ -93,10 +93,14 @@ check_unified_openclaw_monitor() {
   # 3. Count messages and check for new activity
   local msg_count
   msg_count=$(echo "${messages}" | jq 'length' 2>/dev/null || echo 0)
+  msg_count=${msg_count//[^0-9]/}
+  : "${msg_count:=0}"
 
   local last_msg_count=0
   if [[ -f "${UNIFIED_STATE_FILE}" ]]; then
     last_msg_count=$(jq -r '.last_message_count // 0' "${UNIFIED_STATE_FILE}")
+    last_msg_count=${last_msg_count//[^0-9]/}
+    : "${last_msg_count:=0}"
   fi
 
   if [[ "${force_check}" != "true" && ${msg_count} -le ${last_msg_count} ]]; then
@@ -347,6 +351,8 @@ check_unified_openclaw_monitor() {
     local os=-1
     if [[ -n "${identity_compliance:-}" ]]; then
       os=$(echo "${identity_compliance}" | jq -r '.overall_score // -1' 2>/dev/null)
+      os=${os//[^0-9\-]/}
+      : "${os:=-1}"
     fi
     local tmp_state
     tmp_state=$(mktemp)
