@@ -416,7 +416,6 @@ _mark_trigger_fired() {
 # Returns newline-separated list of search queries (5-8 items)
 _generate_dynamic_queries() {
   local chat_contexts="$1"
-  local preferred_topics_hint="$2"
 
   if [[ -z "${chat_contexts}" ]]; then
     log "Proactive engine: No chat context available for dynamic query generation"
@@ -429,15 +428,13 @@ _generate_dynamic_queries() {
 ## チャットの会話コンテキスト
 ${chat_contexts}
 
-## トピックのヒント
-${preferred_topics_hint}
-
 ## ルール
 - 会話で実際に話題になっている具体的なテーマから検索クエリを生成する
-- 固定カテゴリに限定せず、会話の文脈から自由にトピックを選ぶ
+- カテゴリに一切制限なし。会話の文脈から自由にトピックを選ぶ
 - 各クエリは検索エンジンで使える具体的なキーワード（2〜5語程度）にする
 - 日本語クエリと英語クエリを混ぜる
 - 抽象的すぎるクエリ（例：「テクノロジー」だけ）は避ける
+- テクノロジー・ゲームなどの特定ジャンルに偏らず、会話内容を忠実に反映すること
 
 ## 出力形式（厳守）
 思考過程や説明文は一切出力しないこと。以下のJSON配列のみ出力すること。
@@ -506,19 +503,14 @@ _collect_all_chat_contexts() {
     chat=$(echo "${active_chats}" | jq -c ".[${i}]")
     session_key=$(echo "${chat}" | jq -r '.session_key // ""')
 
-    # Get chat profile for preferred_topics hint
+    # Get chat profile for name
     local profile
     profile=$(echo "${chat_profiles_json}" | jq -c --arg sk "${session_key}" '.[$sk] // null' 2>/dev/null)
     if [[ -z "${profile}" || "${profile}" == "null" ]]; then
       profile="${default_profile_json}"
     fi
-    local profile_name profile_topics
+    local profile_name
     profile_name=$(echo "${profile}" | jq -r '.name // "不明"')
-    profile_topics=$(echo "${profile}" | jq -r '.preferred_topics // [] | join(", ")')
-
-    if [[ -n "${profile_topics}" ]]; then
-      all_topics="${all_topics}, ${profile_topics}"
-    fi
 
     # Get recent conversation context
     if [[ -n "${session_key}" ]]; then
@@ -627,11 +619,8 @@ _discover_trending_content() {
   local trigger_json="$1"
   local dynamic_queries="${2:-}"
 
-  local interests
-  interests=$(echo "${trigger_json}" | jq -r '.fallback_categories // .interest_categories // [] | join(", ")')
-  if [[ -z "${interests}" ]]; then
-    interests="AI, テクノロジー, 投資, 暗号資産, ゲーム, プログラミング"
-  fi
+  # No fixed category restrictions - topics are derived from conversation context and trends
+  local interests=""
 
   local brave_key="${BRAVE_API_KEY:-}"
   if [[ -z "${brave_key}" ]]; then
@@ -643,34 +632,22 @@ _discover_trending_content() {
   local today
   today=$(_get_jst_date)
 
-  # Build search queries: dynamic queries from chat context + fallback category-based queries
+  # Build search queries: dynamic queries from chat context + generic fallback queries
   local search_results=""
 
-  # Generate fallback queries from fallback_categories config
+  # Generic fallback queries (no category dependency)
   local fallback_queries=()
-  local fb_cats_json
-  fb_cats_json=$(echo "${trigger_json}" | jq -r '.fallback_categories // .interest_categories // []' 2>/dev/null)
-  local fb_cats_count
-  fb_cats_count=$(echo "${fb_cats_json}" | jq 'length' 2>/dev/null || echo 0)
-  if [[ ${fb_cats_count} -gt 0 ]]; then
-    local fbi=0
-    while [[ ${fbi} -lt ${fb_cats_count} ]]; do
-      local fb_cat
-      fb_cat=$(echo "${fb_cats_json}" | jq -r ".[${fbi}]")
-      fallback_queries+=("${fb_cat} 最新ニュース ${today}")
-      fbi=$((fbi + 1))
-    done
-  fi
-  # Always include a social trends query
+  fallback_queries+=("最新ニュース 話題 ${today}")
+  fallback_queries+=("trending topics ${today}")
+  fallback_queries+=("いま話題のニュース ${today}")
   fallback_queries+=("trending topics site:x.com ${today}")
-  fallback_queries+=("話題 トレンド ${today}")
 
   local queries=()
   if [[ -n "${dynamic_queries}" ]] && echo "${dynamic_queries}" | jq '.[0]' > /dev/null 2>&1; then
-    # Use dynamic queries (up to 5)
+    # Use dynamic queries only (up to 7) - no category-based fallback mixing
     local dq_count
     dq_count=$(echo "${dynamic_queries}" | jq 'length')
-    local dq_max=$(( dq_count > 5 ? 5 : dq_count ))
+    local dq_max=$(( dq_count > 7 ? 7 : dq_count ))
     local dqi=0
     while [[ ${dqi} -lt ${dq_max} ]]; do
       local dq
@@ -678,18 +655,10 @@ _discover_trending_content() {
       queries+=("${dq}")
       dqi=$((dqi + 1))
     done
-    log "Proactive engine: Using ${#queries[@]} dynamic queries from chat context"
-
-    # Add 2 random fixed queries to avoid echo chamber
-    local fb_count=${#fallback_queries[@]}
-    local fb_idx1=$(( RANDOM % fb_count ))
-    local fb_idx2=$(( (fb_idx1 + 1 + RANDOM % (fb_count - 1)) % fb_count ))
-    queries+=("${fallback_queries[${fb_idx1}]}")
-    queries+=("${fallback_queries[${fb_idx2}]}")
-    log "Proactive engine: Added 2 random fallback queries for diversity"
+    log "Proactive engine: Using ${#queries[@]} dynamic queries from chat context (no category fallback)"
   else
-    # No dynamic queries available, use all fixed queries
-    log "Proactive engine: No dynamic queries, using fixed queries"
+    # No dynamic queries available, use generic fallback queries
+    log "Proactive engine: No dynamic queries, using generic fallback queries"
     queries=("${fallback_queries[@]}")
   fi
 
@@ -726,22 +695,19 @@ _discover_trending_content() {
   fi
 
   # Use LLM to curate and select the best items
-  local prompt="あなたはニュースキュレーターです。以下の検索結果から、Masaru Tamegaiが最も興味を持ちそうな記事を8〜10件選んでください。
-
-## Masaruの興味分野（参考）
-${interests}
+  local prompt="あなたはニュースキュレーターです。以下の検索結果から、最も興味深く価値のある記事を8〜10件選んでください。
 
 ## 検索結果
 ${search_results}
 
 ## 選定基準
-- 検索結果の内容に最も適したカテゴリを自由に付与すること（上記の興味分野に限定しない）
+- カテゴリは記事の内容から自由に判定すること。特定のジャンル（テクノロジー・ゲーム等）に偏らないこと
 - 新鮮で話題性のあるもの
 - X（旧Twitter）で話題のトピックも含めること
 - 暴力的・過激な政治発言・個人攻撃・センセーショナルなゴシップは除外
 - 実用的・教育的・インスピレーションを与える内容を優先
 - 重複する話題は最も情報量の多いものを1つだけ選択
-- カテゴリは記事の内容から自然に決めること。固定リストに縛られない
+- 多様なジャンルの記事を幅広く選定すること
 
 以下のJSON配列で回答してください（コードフェンスなし、JSONのみ）：
 [
@@ -781,10 +747,7 @@ _discover_trending_content_llm_only() {
   local today
   today=$(_get_jst_date)
 
-  local prompt="あなたはニュースキュレーターです。${today}の最新トレンドとして、以下の興味分野を参考に8〜10件のニューストピックを紹介してください。X（旧Twitter）で話題のトピックも含めてください。
-
-## 興味分野（参考）
-${interests}
+  local prompt="あなたはニュースキュレーターです。${today}の最新トレンドとして、多様なジャンルから8〜10件のニューストピックを紹介してください。X（旧Twitter）で話題のトピックも含めてください。
 
 ## 条件
 - あなたの知識に基づく最新の話題やトレンドを紹介
@@ -792,7 +755,8 @@ ${interests}
 - 暴力的・過激な政治発言・個人攻撃は除外
 - 実用的・教育的な内容を優先
 - URLは含めず、トピックの紹介に集中
-- カテゴリは上記の興味分野に限定せず、記事内容に最も適したカテゴリ名を自由に付与すること
+- カテゴリは特定のジャンルに限定せず、記事内容に最も適したカテゴリ名を自由に付与すること
+- テクノロジー・ゲームなどの特定ジャンルに偏らず、幅広いジャンルから選定すること
 
 以下のJSON配列で回答してください（コードフェンスなし、JSONのみ）：
 [
@@ -1418,17 +1382,14 @@ _execute_trending_broadcast() {
   activity_window_pre=$(echo "${trigger_json}" | jq -r '.activity_window_hours // 72')
   local chat_profiles_pre default_profile_pre
   chat_profiles_pre=$(echo "${trigger_json}" | jq -c '.chat_profiles // {}')
-  default_profile_pre=$(echo "${trigger_json}" | jq -c '.default_profile // {"name":"一般","audience":"一般","preferred_topics":["AI","テクノロジー"],"tone":"カジュアル"}')
+  default_profile_pre=$(echo "${trigger_json}" | jq -c '.default_profile // {"name":"一般","audience":"一般","tone":"カジュアル"}')
 
   local all_chat_contexts
   all_chat_contexts=$(_collect_all_chat_contexts "${activity_window_pre}" "${chat_profiles_pre}" "${default_profile_pre}")
 
   local dynamic_queries=""
   if [[ -n "${all_chat_contexts}" ]]; then
-    # Gather preferred_topics as hints
-    local topics_hint
-    topics_hint=$(echo "${chat_profiles_pre}" | jq -r '[.[] | .preferred_topics // [] | .[]] | unique | join(", ")' 2>/dev/null)
-    dynamic_queries=$(_generate_dynamic_queries "${all_chat_contexts}" "${topics_hint:-}")
+    dynamic_queries=$(_generate_dynamic_queries "${all_chat_contexts}")
   else
     log "Proactive engine: No chat context available, will use fixed queries only"
   fi
@@ -1481,7 +1442,7 @@ _execute_trending_broadcast() {
   local dest_templates chat_profiles default_profile
   dest_templates=$(echo "${trigger_json}" | jq -c '.destinations // []')
   chat_profiles=$(echo "${trigger_json}" | jq -c '.chat_profiles // {}')
-  default_profile=$(echo "${trigger_json}" | jq -c '.default_profile // {"name":"一般","audience":"一般","preferred_topics":["AI","テクノロジー"],"tone":"カジュアル"}')
+  default_profile=$(echo "${trigger_json}" | jq -c '.default_profile // {"name":"一般","audience":"一般","tone":"カジュアル"}')
 
   # Build actual delivery targets
   local delivery_targets="[]"
@@ -1527,12 +1488,11 @@ _execute_trending_broadcast() {
   local chat_descriptions=""
   local i=0
   while [[ ${i} -lt ${dest_count} ]]; do
-    local dest session_key profile_name profile_audience profile_topics profile_tone
+    local dest session_key profile_name profile_audience profile_tone
     dest=$(echo "${delivery_targets}" | jq -c ".[${i}]")
     session_key=$(echo "${dest}" | jq -r '.session_key // ""')
     profile_name=$(echo "${dest}" | jq -r '.chat_profile.name // "不明"')
     profile_audience=$(echo "${dest}" | jq -r '.chat_profile.audience // "一般"')
-    profile_topics=$(echo "${dest}" | jq -r '.chat_profile.preferred_topics // [] | join(", ")')
     profile_tone=$(echo "${dest}" | jq -r '.chat_profile.tone // "カジュアル"')
 
     # Get recent conversation context if available
@@ -1545,7 +1505,6 @@ _execute_trending_broadcast() {
 ### チャット${i}: ${profile_name}
 - session_key: ${session_key}
 - 対象: ${profile_audience}
-- 好みのトピック: ${profile_topics}
 - トーン: ${profile_tone}"
     if [[ -n "${recent_context}" ]]; then
       chat_descriptions="${chat_descriptions}
@@ -1559,9 +1518,11 @@ _execute_trending_broadcast() {
   local numbered_articles
   numbered_articles=$(echo "${content_json}" | jq '[to_entries[] | {index: .key, title: .value.title, category: .value.category, summary: .value.summary}]')
 
-  # Get fallback_categories for random diversity pick
-  local fallback_categories
-  fallback_categories=$(echo "${trigger_json}" | jq -r '.fallback_categories // .interest_categories // [] | join(", ")')
+  # Build Google Trends hint for diversity pick
+  local trends_hint=""
+  if [[ -n "${google_trends_json}" ]]; then
+    trends_hint=$(echo "${google_trends_json}" | jq -r '.keyword // ""' 2>/dev/null)
+  fi
 
   local assignment_prompt="あなたはニュース配信の最適化エンジンです。各チャットの会話コンテキストと属性を分析し、それぞれに最適な記事を正確に3件選んでください。
 
@@ -1571,19 +1532,19 @@ ${numbered_articles}
 ## チャット一覧
 ${chat_descriptions}
 
-## フォールバックカテゴリ（多様性確保用）
-${fallback_categories}
+## Google Trends急上昇ワード（多様性確保の参考）
+${trends_hint:-なし}
 
 ## 割り当てルール（最重要・厳守）
 各チャットに正確に **3件** の記事を割り当てること。3件の内訳は以下の通り：
 
-1. **コンテキスト記事2件**: そのチャットの「最近の会話」の内容に最も関連する記事を2件選ぶ。会話で話されていた具体的なトピックに合致する記事を優先。会話コンテキストがない場合はpreferred_topicsとaudienceに基づいて選ぶ
-2. **フォールバック記事1件**: 上記のフォールバックカテゴリからランダムに1つ選び、そのカテゴリに該当する記事を1件選ぶ。コンテキスト記事と重複しないこと
+1. **コンテキスト記事2件**: そのチャットの「最近の会話」の内容に最も関連する記事を2件選ぶ。会話で話されていた具体的なトピックに合致する記事を優先。会話コンテキストがない場合はaudienceとトーンに基づいて最適な記事を選ぶ
+2. **多様性確保記事1件**: 上記2件とは異なるジャンルの記事を1件選ぶ。Google Trends急上昇ワードに関連する記事があれば優先。なければ候補記事の中からコンテキスト記事とは最も異なるジャンルの記事を選ぶ
 
 追加ルール：
 - **チャットごとに異なる記事セットにする（必須）**: 割り当てセット全体が同一になってはならない
 - チャットの対象者に合わない記事は割り当てない（例：家族向けチャットに専門的すぎる記事は避ける）
-- カテゴリはpreferred_topicsに限定せず、会話の文脈から自由に判断する
+- 会話の内容から自由にトピックを判定し、カテゴリに制限なく最適な記事を選択すること。テクノロジー・ゲームなどの特定ジャンルに偏らないこと
 
 ## 出力形式（厳守）
 思考過程や説明文は一切出力しないこと。以下のJSON形式のみ出力すること。
@@ -1711,32 +1672,10 @@ ${fallback_categories}
       # Try both string and numeric key for the chat index
       assigned_indices=$(echo "${assignments}" | jq -c --arg idx "${i}" --argjson idxn "${i}" '.[$idx] // .[$idxn | tostring] // []' 2>/dev/null)
       if [[ -z "${assigned_indices}" || "${assigned_indices}" == "null" || "${assigned_indices}" == "[]" ]]; then
-        # Fallback: filter articles by chat's preferred_topics instead of using all articles
+        # Fallback: use first 3 articles (no category-based filtering)
         log "WARN: Proactive engine: No assignment for chat ${i} (session: ${session_key}). Assignment keys: $(echo "${assignments}" | jq -c 'keys' 2>/dev/null)"
-        local preferred_topics_json
-        preferred_topics_json=$(echo "${chat_profile}" | jq -c '.preferred_topics // []' 2>/dev/null)
-        if [[ -n "${preferred_topics_json}" && "${preferred_topics_json}" != "[]" ]]; then
-          # Filter articles whose category matches any preferred topic (case-insensitive partial match)
-          assigned_indices=$(echo "${content_json}" | jq -c --argjson topics "${preferred_topics_json}" '
-            [range(length)] as $all |
-            [range(length) | . as $idx |
-              if ($all[$idx] | .category // "" | ascii_downcase) as $cat |
-                ($topics | map(ascii_downcase) | any(. as $t | $cat | contains($t)))
-              then $idx
-              else empty
-              end
-            ] |
-            if length == 0 then [range('"$(echo "${content_json}" | jq 'length')"')][0:3]
-            else .
-            end
-          ' 2>/dev/null)
-          log "Proactive engine: Fallback filtered by preferred_topics for chat ${i}: ${assigned_indices}"
-        fi
-        # Ultimate fallback: first 3 articles
-        if [[ -z "${assigned_indices}" || "${assigned_indices}" == "null" || "${assigned_indices}" == "[]" ]]; then
-          assigned_indices=$(echo "${content_json}" | jq '[range([length, 3] | min)]')
-          log "WARN: Proactive engine: Using first 3 articles as ultimate fallback for chat ${i}"
-        fi
+        assigned_indices=$(echo "${content_json}" | jq '[range([length, 3] | min)]')
+        log "WARN: Proactive engine: Using first 3 articles as fallback for chat ${i}"
       else
         log "Proactive engine: Chat ${i} (${session_key}) assigned articles: ${assigned_indices}"
       fi
@@ -1905,6 +1844,41 @@ _check_broadcast_request() {
   return 0
 }
 
+# Check ondemand cooldown - returns 0 if allowed, 1 if in cooldown
+_check_ondemand_cooldown() {
+  local cooldown_secs
+  cooldown_secs=$(jq -r '.ondemand_cooldown_seconds // 1800' "${PROACTIVE_CONFIG}")
+
+  local last_ondemand
+  last_ondemand=$(jq -r '.last_ondemand_at // ""' "${PROACTIVE_STATE}")
+  if [[ -z "${last_ondemand}" || "${last_ondemand}" == "null" ]]; then
+    return 0
+  fi
+
+  local last_epoch now_epoch elapsed
+  last_epoch=$(date -d "${last_ondemand}" +%s 2>/dev/null || echo 0)
+  now_epoch=$(date +%s)
+  elapsed=$((now_epoch - last_epoch))
+
+  if [[ ${elapsed} -lt ${cooldown_secs} ]]; then
+    local remaining=$((cooldown_secs - elapsed))
+    log "Proactive engine: On-demand cooldown active (${remaining}s remaining)"
+    return 1
+  fi
+
+  return 0
+}
+
+# Record ondemand broadcast timestamp
+_record_ondemand_broadcast() {
+  local now_ts
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local tmp
+  tmp=$(mktemp)
+  jq --arg ts "${now_ts}" '.last_ondemand_at = $ts' \
+    "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
+}
+
 # Execute on-demand broadcast for a specific chat (from OpenClaw request)
 _execute_ondemand_broadcast() {
   local request_json="$1"
@@ -1948,7 +1922,7 @@ _execute_ondemand_broadcast() {
   session_key=$(echo "${request_json}" | jq -r '.chat.session_key // ""')
   local chat_profiles default_profile
   chat_profiles=$(echo "${trigger_json}" | jq -c '.chat_profiles // {}')
-  default_profile=$(echo "${trigger_json}" | jq -c '.default_profile // {"name":"一般","audience":"一般","preferred_topics":["AI","テクノロジー"],"tone":"カジュアル"}')
+  default_profile=$(echo "${trigger_json}" | jq -c '.default_profile // {"name":"一般","audience":"一般","tone":"カジュアル"}')
   chat_profile=$(echo "${chat_profiles}" | jq -c --arg sk "${session_key}" '.[$sk] // null')
   if [[ "${chat_profile}" == "null" || -z "${chat_profile}" ]]; then
     chat_profile="${default_profile}"
@@ -2061,16 +2035,19 @@ check_proactive_suggestions() {
       local broadcast_request
       broadcast_request=$(_check_broadcast_request)
       if [[ -n "${broadcast_request}" ]]; then
-        local category="info"
-        if _check_rate_limit "${category}"; then
-          local tn
-          tn=$(jq '.triggers.trending_news' "${PROACTIVE_CONFIG}" 2>/dev/null)
-          if [[ -n "${tn}" && "${tn}" != "null" ]]; then
-            _execute_ondemand_broadcast "${broadcast_request}" "${tn}"
-            _increment_daily_count "${category}"
+        if _check_ondemand_cooldown; then
+          local category="info"
+          if _check_rate_limit "${category}"; then
+            local tn
+            tn=$(jq '.triggers.trending_news' "${PROACTIVE_CONFIG}" 2>/dev/null)
+            if [[ -n "${tn}" && "${tn}" != "null" ]]; then
+              _execute_ondemand_broadcast "${broadcast_request}" "${tn}"
+              _increment_daily_count "${category}"
+              _record_ondemand_broadcast
+            fi
+          else
+            log "Proactive engine: On-demand broadcast rate-limited"
           fi
-        else
-          log "Proactive engine: On-demand broadcast rate-limited"
         fi
       fi
       return 0
@@ -2118,17 +2095,20 @@ check_proactive_suggestions() {
   local broadcast_request
   broadcast_request=$(_check_broadcast_request)
   if [[ -n "${broadcast_request}" ]]; then
-    local category="info"
-    if _check_rate_limit "${category}"; then
-      local trending_trigger
-      trending_trigger=$(jq '.triggers.trending_news' "${PROACTIVE_CONFIG}" 2>/dev/null)
-      if [[ -n "${trending_trigger}" && "${trending_trigger}" != "null" ]]; then
-        _execute_ondemand_broadcast "${broadcast_request}" "${trending_trigger}"
-        _increment_daily_count "${category}"
-        return 0
+    if _check_ondemand_cooldown; then
+      local category="info"
+      if _check_rate_limit "${category}"; then
+        local trending_trigger
+        trending_trigger=$(jq '.triggers.trending_news' "${PROACTIVE_CONFIG}" 2>/dev/null)
+        if [[ -n "${trending_trigger}" && "${trending_trigger}" != "null" ]]; then
+          _execute_ondemand_broadcast "${broadcast_request}" "${trending_trigger}"
+          _increment_daily_count "${category}"
+          _record_ondemand_broadcast
+          return 0
+        fi
+      else
+        log "Proactive engine: On-demand broadcast rate-limited"
       fi
-    else
-      log "Proactive engine: On-demand broadcast rate-limited"
     fi
   fi
 
