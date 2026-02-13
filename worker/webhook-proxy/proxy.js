@@ -7,12 +7,88 @@ const UPSTREAM_HOST = "openclaw";
 const UPSTREAM_PORT = 18789;
 const BUFFER_DIR = "/webhook_buffer";
 const REPLAY_INTERVAL_MS = 5000;
+const PROBE_INTERVAL_MS = 3000;
+const PROBE_TIMEOUT_MS = 3000;
+const GRACE_PERIOD_MS = parseInt(process.env.UPSTREAM_GRACE_PERIOD_MS || "60000", 10);
+const PROXY_STARTED_AT = Date.now();
+const PROXY_FRESH_THRESHOLD_MS = 30000;
+
+let upstreamState = "UNKNOWN"; // UNKNOWN, DOWN, STARTING, READY
+let firstRespondAt = 0;
 
 // Ensure buffer directory exists
 fs.mkdirSync(BUFFER_DIR, { recursive: true });
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
+}
+
+// Probe upstream with a lightweight GET request
+function probeUpstream() {
+  const req = http.get(
+    {
+      hostname: UPSTREAM_HOST,
+      port: UPSTREAM_PORT,
+      path: "/",
+      timeout: PROBE_TIMEOUT_MS,
+    },
+    (res) => {
+      // Any response means the port is open
+      res.resume(); // drain response
+      onProbeSuccess();
+    }
+  );
+
+  req.on("error", () => {
+    onProbeFailure();
+  });
+
+  req.on("timeout", () => {
+    req.destroy();
+    onProbeFailure();
+  });
+}
+
+function onProbeSuccess() {
+  const prev = upstreamState;
+
+  if (upstreamState === "UNKNOWN") {
+    const elapsed = Date.now() - PROXY_STARTED_AT;
+    if (elapsed > PROXY_FRESH_THRESHOLD_MS) {
+      // Proxy has been running > 30s — gateway was already up, skip grace
+      upstreamState = "READY";
+      log(`Upstream detected as already running (proxy uptime ${Math.round(elapsed / 1000)}s) → READY`);
+      replayBuffered();
+    } else {
+      upstreamState = "STARTING";
+      firstRespondAt = Date.now();
+      log(`Upstream first responded (proxy uptime ${Math.round(elapsed / 1000)}s) → STARTING (grace ${GRACE_PERIOD_MS}ms)`);
+    }
+  } else if (upstreamState === "DOWN") {
+    upstreamState = "STARTING";
+    firstRespondAt = Date.now();
+    log(`Upstream responded → STARTING (grace ${GRACE_PERIOD_MS}ms)`);
+  } else if (upstreamState === "STARTING") {
+    const elapsed = Date.now() - firstRespondAt;
+    if (elapsed >= GRACE_PERIOD_MS) {
+      upstreamState = "READY";
+      log(`Grace period elapsed (${Math.round(elapsed / 1000)}s) → READY`);
+      replayBuffered();
+    }
+  }
+  // READY + probe success → no change
+}
+
+function onProbeFailure() {
+  const prev = upstreamState;
+  if (upstreamState === "READY" || upstreamState === "STARTING" || upstreamState === "UNKNOWN") {
+    upstreamState = "DOWN";
+    firstRespondAt = 0;
+    if (prev !== "UNKNOWN") {
+      log(`Upstream probe failed → DOWN (was ${prev})`);
+    }
+  }
+  // already DOWN → no log spam
 }
 
 // Forward a request to upstream, returns a promise
@@ -64,6 +140,8 @@ function bufferRequest(method, url, headers, body) {
 
 // Replay buffered requests in chronological order
 async function replayBuffered() {
+  if (upstreamState !== "READY") return;
+
   let files;
   try {
     files = fs.readdirSync(BUFFER_DIR).filter((f) => f.endsWith(".json")).sort();
@@ -75,6 +153,11 @@ async function replayBuffered() {
   log(`Replaying ${files.length} buffered request(s)...`);
 
   for (const file of files) {
+    if (upstreamState !== "READY") {
+      log("Upstream no longer READY, stopping replay");
+      break;
+    }
+
     const filepath = path.join(BUFFER_DIR, file);
     let entry;
     try {
@@ -103,12 +186,26 @@ async function replayBuffered() {
   }
 }
 
+function getBufferCount() {
+  try {
+    return fs.readdirSync(BUFFER_DIR).filter((f) => f.endsWith(".json")).length;
+  } catch {
+    return 0;
+  }
+}
+
 // HTTP server
 const server = http.createServer((req, res) => {
   // Health check endpoint
   if (req.method === "GET" && req.url === "/health") {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("ok");
+    const status = {
+      upstreamState,
+      buffered: getBufferCount(),
+      uptimeSeconds: Math.round((Date.now() - PROXY_STARTED_AT) / 1000),
+    };
+    const code = upstreamState === "READY" ? 200 : 503;
+    res.writeHead(code, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(status));
     return;
   }
 
@@ -121,6 +218,13 @@ const server = http.createServer((req, res) => {
     // Always return 200 to LINE immediately
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end("{}");
+
+    // If upstream is not ready, buffer immediately
+    if (upstreamState !== "READY") {
+      log(`Upstream not ready (${upstreamState}), buffering ${method} ${url}`);
+      bufferRequest(method, url, headers, body);
+      return;
+    }
 
     // Forward asynchronously
     try {
@@ -140,7 +244,12 @@ const server = http.createServer((req, res) => {
 
 server.listen(PROXY_PORT, () => {
   log(`Webhook proxy listening on :${PROXY_PORT} → ${UPSTREAM_HOST}:${UPSTREAM_PORT}`);
+  log(`Upstream grace period: ${GRACE_PERIOD_MS}ms, probe interval: ${PROBE_INTERVAL_MS}ms`);
 });
 
 // Replay timer
 setInterval(replayBuffered, REPLAY_INTERVAL_MS);
+
+// Probe timer — start immediately
+setInterval(probeUpstream, PROBE_INTERVAL_MS);
+probeUpstream();
