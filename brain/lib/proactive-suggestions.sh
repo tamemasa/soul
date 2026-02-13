@@ -541,6 +541,84 @@ ${context}
   fi
 }
 
+# ---- Google Trends ----
+
+# Fetch Google Trends trending searches for Japan
+# Returns a JSON string: {"keyword": "...", "description": "..."} or empty string on failure
+_fetch_google_trends() {
+  log "Proactive engine: Fetching Google Trends RSS for Japan..."
+  local rss_content
+  rss_content=$(curl -s --max-time 10 "https://trends.google.com/trending/rss?geo=JP" 2>/dev/null)
+
+  if [[ -z "${rss_content}" ]]; then
+    log "WARN: Proactive engine: Google Trends RSS fetch failed"
+    echo ""
+    return
+  fi
+
+  # Extract <title> tags from RSS items (skip the first one which is the feed title)
+  local titles
+  titles=$(echo "${rss_content}" | grep -oP '<title>\K[^<]+' | tail -n +2 | head -5)
+
+  if [[ -z "${titles}" ]]; then
+    log "WARN: Proactive engine: No trending keywords found in Google Trends RSS"
+    echo ""
+    return
+  fi
+
+  local count
+  count=$(echo "${titles}" | wc -l)
+  log "Proactive engine: Found ${count} Google Trends keywords"
+
+  # Pick one at random
+  local total_lines
+  total_lines=$(echo "${titles}" | wc -l)
+  local random_line=$(( (RANDOM % total_lines) + 1 ))
+  local selected_keyword
+  selected_keyword=$(echo "${titles}" | sed -n "${random_line}p")
+
+  log "Proactive engine: Selected Google Trends keyword: ${selected_keyword}"
+
+  # Try to get a brief description via Brave Search or LLM
+  local brave_key="${BRAVE_API_KEY:-}"
+  local description=""
+
+  if [[ -n "${brave_key}" ]]; then
+    local encoded_kw
+    encoded_kw=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${selected_keyword}'))" 2>/dev/null || echo "${selected_keyword}")
+    local search_resp
+    search_resp=$(curl -s --max-time 8 \
+      -H "Accept: application/json" \
+      -H "X-Subscription-Token: ${brave_key}" \
+      "https://api.search.brave.com/res/v1/web/search?q=${encoded_kw}&count=1&freshness=pd" 2>/dev/null)
+
+    if [[ -n "${search_resp}" ]]; then
+      local first_result
+      first_result=$(echo "${search_resp}" | jq -r '.web.results[0] // empty' 2>/dev/null)
+      if [[ -n "${first_result}" ]]; then
+        local title url desc
+        title=$(echo "${first_result}" | jq -r '.title // ""')
+        url=$(echo "${first_result}" | jq -r '.url // ""')
+        desc=$(echo "${first_result}" | jq -r '.description // ""')
+        description="${title} - ${desc}"
+        if [[ -n "${url}" ]]; then
+          description="${description} (${url})"
+        fi
+      fi
+    fi
+  fi
+
+  # If no search result, generate a brief description via LLM
+  if [[ -z "${description}" ]]; then
+    description=$(invoke_claude "「${selected_keyword}」について、1-2文で簡潔に説明してください。何が話題になっているかだけ述べてください。説明以外の出力は不要です。" 2>/dev/null)
+    description="${description:-${selected_keyword}が日本でトレンド入り}"
+  fi
+
+  # Return as JSON
+  jq -n --arg kw "${selected_keyword}" --arg desc "${description}" \
+    '{keyword: $kw, description: $desc}'
+}
+
 # ---- Trending Content Discovery ----
 
 # Search for trending content using Brave Search API
@@ -565,17 +643,27 @@ _discover_trending_content() {
   local today
   today=$(_get_jst_date)
 
-  # Build search queries: dynamic queries from chat context + fallback fixed queries
+  # Build search queries: dynamic queries from chat context + fallback category-based queries
   local search_results=""
-  local fallback_queries=(
-    "最新ニュース AI テクノロジー ${today}"
-    "crypto blockchain news today"
-    "テック ニュース 投資 トレンド"
-    "gaming industry news latest"
-    "programming developer news"
-    "trending topics site:x.com ${today}"
-    "話題 トレンド site:x.com OR site:twitter.com"
-  )
+
+  # Generate fallback queries from fallback_categories config
+  local fallback_queries=()
+  local fb_cats_json
+  fb_cats_json=$(echo "${trigger_json}" | jq -r '.fallback_categories // .interest_categories // []' 2>/dev/null)
+  local fb_cats_count
+  fb_cats_count=$(echo "${fb_cats_json}" | jq 'length' 2>/dev/null || echo 0)
+  if [[ ${fb_cats_count} -gt 0 ]]; then
+    local fbi=0
+    while [[ ${fbi} -lt ${fb_cats_count} ]]; do
+      local fb_cat
+      fb_cat=$(echo "${fb_cats_json}" | jq -r ".[${fbi}]")
+      fallback_queries+=("${fb_cat} 最新ニュース ${today}")
+      fbi=$((fbi + 1))
+    done
+  fi
+  # Always include a social trends query
+  fallback_queries+=("trending topics site:x.com ${today}")
+  fallback_queries+=("話題 トレンド ${today}")
 
   local queries=()
   if [[ -n "${dynamic_queries}" ]] && echo "${dynamic_queries}" | jq '.[0]' > /dev/null 2>&1; then
@@ -640,19 +728,20 @@ _discover_trending_content() {
   # Use LLM to curate and select the best items
   local prompt="あなたはニュースキュレーターです。以下の検索結果から、Masaru Tamegaiが最も興味を持ちそうな記事を8〜10件選んでください。
 
-## Masaruの興味分野
+## Masaruの興味分野（参考）
 ${interests}
 
 ## 検索結果
 ${search_results}
 
 ## 選定基準
-- 上記の興味分野に関連するもの
+- 検索結果の内容に最も適したカテゴリを自由に付与すること（上記の興味分野に限定しない）
 - 新鮮で話題性のあるもの
 - X（旧Twitter）で話題のトピックも含めること
 - 暴力的・過激な政治発言・個人攻撃・センセーショナルなゴシップは除外
 - 実用的・教育的・インスピレーションを与える内容を優先
 - 重複する話題は最も情報量の多いものを1つだけ選択
+- カテゴリは記事の内容から自然に決めること。固定リストに縛られない
 
 以下のJSON配列で回答してください（コードフェンスなし、JSONのみ）：
 [
@@ -660,7 +749,7 @@ ${search_results}
     \"title\": \"記事タイトル\",
     \"url\": \"記事URL\",
     \"summary\": \"2〜3文の要約\",
-    \"category\": \"該当カテゴリ（AI/テクノロジー/投資/暗号資産/ゲーム/プログラミング/Xトレンド）\",
+    \"category\": \"記事の内容に最も適したカテゴリ名（自由記述）\",
     \"interest_score\": 8
   }
 ]"
@@ -692,9 +781,9 @@ _discover_trending_content_llm_only() {
   local today
   today=$(_get_jst_date)
 
-  local prompt="あなたはニュースキュレーターです。${today}の最新トレンドとして、以下の興味分野から8〜10件のニューストピックを紹介してください。X（旧Twitter）で話題のトピックも含めてください。
+  local prompt="あなたはニュースキュレーターです。${today}の最新トレンドとして、以下の興味分野を参考に8〜10件のニューストピックを紹介してください。X（旧Twitter）で話題のトピックも含めてください。
 
-## 興味分野
+## 興味分野（参考）
 ${interests}
 
 ## 条件
@@ -703,6 +792,7 @@ ${interests}
 - 暴力的・過激な政治発言・個人攻撃は除外
 - 実用的・教育的な内容を優先
 - URLは含めず、トピックの紹介に集中
+- カテゴリは上記の興味分野に限定せず、記事内容に最も適したカテゴリ名を自由に付与すること
 
 以下のJSON配列で回答してください（コードフェンスなし、JSONのみ）：
 [
@@ -710,7 +800,7 @@ ${interests}
     \"title\": \"トピックタイトル\",
     \"url\": null,
     \"summary\": \"2〜3文の要約\",
-    \"category\": \"該当カテゴリ\",
+    \"category\": \"記事の内容に最も適したカテゴリ名（自由記述）\",
     \"interest_score\": 8
   }
 ]"
@@ -741,6 +831,7 @@ _format_content_for_destination() {
   local content_json="$1"
   local dest_json="$2"
   local chat_profile_json="${3:-}"
+  local google_trends_json="${4:-}"
 
   local dest_type
   dest_type=$(echo "${dest_json}" | jq -r '.type')
@@ -760,6 +851,20 @@ _format_content_for_destination() {
   local today
   today=$(_get_jst_date)
 
+  # Build Google Trends section if available
+  local trends_section=""
+  if [[ -n "${google_trends_json}" && "${google_trends_json}" != "null" ]]; then
+    local trends_kw trends_desc
+    trends_kw=$(echo "${google_trends_json}" | jq -r '.keyword // ""' 2>/dev/null)
+    trends_desc=$(echo "${google_trends_json}" | jq -r '.description // ""' 2>/dev/null)
+    if [[ -n "${trends_kw}" ]]; then
+      trends_section="
+## いま話題（Google Trends）
+キーワード: ${trends_kw}
+${trends_desc}"
+    fi
+  fi
+
   # Base personality: OpenClaw (Masaru) persona
   local personality_base="あなたは「Masaruくん」というキャラクターとして情報を配信する。以下のパーソナリティルールを厳守すること：
 - 絵文字は使わない（絶対に使用禁止）
@@ -777,8 +882,9 @@ _format_content_for_destination() {
 - 対象: ${profile_audience:-一般}
 - トーン指示: ${profile_tone:-カジュアル}
 
-## 配信するニュース・トレンド情報
+## 配信するニュース・トレンド情報（3件）
 ${content_json}
+${trends_section}
 
 ## フォーマット指示"
 
@@ -789,7 +895,12 @@ Discord向けにフォーマットしてください：
 - 各ニュースは **太字タイトル** で始め、リンクがあれば含める
 - 技術的な詳細も含めてOK（対象に合わせて調整）
 - 全体を1つのメッセージにまとめる（2000文字以内）
-- 自然な書き出しから始める（「おつ」「よう」等カジュアルに）
+- 自然な書き出しから始める（「おつ」「よう」等カジュアルに）"
+      if [[ -n "${trends_section}" ]]; then
+        prompt="${prompt}
+- 「いま話題」セクションをメッセージの最後に追加し、Google Trendsのキーワードを紹介する"
+      fi
+      prompt="${prompt}
 
 プレーンテキストで回答してください（JSONではなく、そのままDiscordに投稿できる形式）："
       ;;
@@ -800,7 +911,12 @@ LINE向けにフォーマットしてください：
 - 対象に合わせて技術用語を調整（家族向けなら分かりやすく言い換え）
 - 全体を1つのメッセージにまとめる（1000文字以内）
 - 自然な書き出しから始める
-- URLは省略可（タイトルと要約で十分）
+- URLは省略可（タイトルと要約で十分）"
+      if [[ -n "${trends_section}" ]]; then
+        prompt="${prompt}
+- 「いま話題」セクションをメッセージの最後に追加し、Google Trendsのキーワードを紹介する"
+      fi
+      prompt="${prompt}
 
 プレーンテキストで回答してください（JSONではなく、そのままLINEに送信できる形式）："
       ;;
@@ -1273,11 +1389,11 @@ _get_recent_chat_context() {
     return
   fi
 
-  # Get last 40 lines and extract user/assistant text content using jq
-  # Execute jq inside the container to avoid pipe buffering issues with large JSON lines
-  # Increased from 3 to 5 messages for better topic coverage
+  # Get last 40 lines and extract ONLY user text content using jq
+  # Bot/assistant messages are excluded to prevent echo chamber effect
+  # (previous broadcast content would otherwise influence next broadcast's topic analysis)
   local context
-  context=$(docker exec soul-openclaw sh -c "tail -40 '${session_file}' | jq -r 'select(.type == \"message\") | select(.message.role == \"user\" or .message.role == \"assistant\") | .message.content | if type == \"array\" then map(select(.type == \"text\") | .text) | join(\" \") elif type == \"string\" then . else empty end' 2>/dev/null | tail -5 | cut -c1-200 | tr '\n' ' '" 2>/dev/null \
+  context=$(docker exec soul-openclaw sh -c "tail -40 '${session_file}' | jq -r 'select(.type == \"message\") | select(.message.role == \"user\") | .message.content | if type == \"array\" then map(select(.type == \"text\") | .text) | join(\" \") elif type == \"string\" then . else empty end' 2>/dev/null | tail -5 | cut -c1-200 | tr '\n' ' '" 2>/dev/null \
     | sed 's/  */ /g')
 
   if [[ -n "${context}" ]]; then
@@ -1315,6 +1431,25 @@ _execute_trending_broadcast() {
     dynamic_queries=$(_generate_dynamic_queries "${all_chat_contexts}" "${topics_hint:-}")
   else
     log "Proactive engine: No chat context available, will use fixed queries only"
+  fi
+
+  # Step 0.5: Fetch Google Trends trending keyword
+  log "Proactive engine: Fetching Google Trends..."
+  local google_trends_json
+  google_trends_json=$(_fetch_google_trends)
+  if [[ -n "${google_trends_json}" ]]; then
+    log "Proactive engine: Google Trends topic: $(echo "${google_trends_json}" | jq -r '.keyword' 2>/dev/null)"
+
+    # Also add the trends keyword to dynamic queries for search diversity
+    local trends_kw
+    trends_kw=$(echo "${google_trends_json}" | jq -r '.keyword // ""' 2>/dev/null)
+    if [[ -n "${trends_kw}" && -n "${dynamic_queries}" ]]; then
+      dynamic_queries=$(echo "${dynamic_queries}" | jq --arg kw "${trends_kw}" '. + [$kw]' 2>/dev/null)
+    elif [[ -n "${trends_kw}" ]]; then
+      dynamic_queries="[\"${trends_kw}\"]"
+    fi
+  else
+    log "Proactive engine: Google Trends unavailable, continuing without"
   fi
 
   # Step 1: Discover trending content (single fetch, 8-10 items)
@@ -1424,8 +1559,11 @@ _execute_trending_broadcast() {
   local numbered_articles
   numbered_articles=$(echo "${content_json}" | jq '[to_entries[] | {index: .key, title: .value.title, category: .value.category, summary: .value.summary}]')
 
-  local assignment_prompt="あなたはニュース配信の最適化エンジンです。以下の候補記事リストから、各チャットに最適な3〜5件を選んでください。
-チャットの属性（対象、好みのトピック、トーン、最近の会話）を考慮して、そのチャットで最も盛り上がりそうな記事を選んでください。
+  # Get fallback_categories for random diversity pick
+  local fallback_categories
+  fallback_categories=$(echo "${trigger_json}" | jq -r '.fallback_categories // .interest_categories // [] | join(", ")')
+
+  local assignment_prompt="あなたはニュース配信の最適化エンジンです。各チャットの会話コンテキストと属性を分析し、それぞれに最適な記事を正確に3件選んでください。
 
 ## 候補記事
 ${numbered_articles}
@@ -1433,62 +1571,115 @@ ${numbered_articles}
 ## チャット一覧
 ${chat_descriptions}
 
-## ルール
-- 各チャットに3〜5件の記事インデックス（数値）を割り当てる
-- チャットごとに異なる記事セットになるよう最適化する（最近の会話コンテキストを最重視）
-- 好みのトピックに合わない記事は割り当てない
-- 全チャットで同じ記事セットにしないこと
-- 最近の会話で話題になっているテーマに関連する記事を優先する
+## フォールバックカテゴリ（多様性確保用）
+${fallback_categories}
+
+## 割り当てルール（最重要・厳守）
+各チャットに正確に **3件** の記事を割り当てること。3件の内訳は以下の通り：
+
+1. **コンテキスト記事2件**: そのチャットの「最近の会話」の内容に最も関連する記事を2件選ぶ。会話で話されていた具体的なトピックに合致する記事を優先。会話コンテキストがない場合はpreferred_topicsとaudienceに基づいて選ぶ
+2. **フォールバック記事1件**: 上記のフォールバックカテゴリからランダムに1つ選び、そのカテゴリに該当する記事を1件選ぶ。コンテキスト記事と重複しないこと
+
+追加ルール：
+- **チャットごとに異なる記事セットにする（必須）**: 割り当てセット全体が同一になってはならない
+- チャットの対象者に合わない記事は割り当てない（例：家族向けチャットに専門的すぎる記事は避ける）
+- カテゴリはpreferred_topicsに限定せず、会話の文脈から自由に判断する
 
 ## 出力形式（厳守）
 思考過程や説明文は一切出力しないこと。以下のJSON形式のみ出力すること。
-キーはチャット番号（文字列）、値は記事インデックス（数値）の配列。
+キーはチャット番号（文字列）、値は記事インデックス（数値）の配列（正確に3件）。
 
-\`\`\`json
 {
   \"assignments\": {
-    \"0\": [0, 2, 4],
+    \"0\": [0, 2, 7],
     \"1\": [1, 3, 5]
   }
-}
-\`\`\`"
+}"
 
+  log "Proactive engine: Sending assignment prompt to LLM (${#assignment_prompt} chars)..."
   local assignment_response
   assignment_response=$(invoke_claude "${assignment_prompt}")
 
   if [[ -z "${assignment_response}" ]]; then
     log "ERROR: Proactive engine: invoke_claude returned empty response for article assignment"
+    log "ERROR: Proactive engine: Will use round-robin fallback for all chats"
   else
-    log "Proactive engine: Assignment response length: ${#assignment_response}"
+    log "Proactive engine: Assignment response received (${#assignment_response} chars)"
+    log "Proactive engine: Assignment raw (first 300 chars): ${assignment_response:0:300}"
   fi
 
-  # Robust JSON extraction: strip code fences, thinking text, etc.
-  # Step 1: Extract ```json ... ``` block if present
-  local clean_response
-  clean_response=$(echo "${assignment_response}" | sed -n '/^```\(json\)\?$/,/^```$/p' | sed '/^```\(json\)\?$/d;/^```$/d')
-  if [[ -z "${clean_response}" ]]; then
-    # Step 2: Strip any code fences and try raw content
-    clean_response=$(echo "${assignment_response}" | sed '/^```\(json\)\?$/d;/^```$/d')
+  # Robust JSON extraction with 3-stage fallback
+  local assignments=""
+
+  if [[ -n "${assignment_response}" ]]; then
+    # Stage 1: Extract ```json ... ``` code block
+    local clean_response
+    clean_response=$(echo "${assignment_response}" | sed -n '/^```\(json\)\?$/,/^```$/p' | sed '/^```\(json\)\?$/d;/^```$/d')
+
+    if [[ -n "${clean_response}" ]]; then
+      assignments=$(echo "${clean_response}" | jq '.assignments // empty' 2>/dev/null)
+      [[ -n "${assignments}" && "${assignments}" != "null" ]] && \
+        log "Proactive engine: JSON parsed via Stage 1 (code fence extraction)"
+    fi
+
+    # Stage 2: Extract from first { to last }
+    if [[ -z "${assignments}" || "${assignments}" == "null" ]]; then
+      local json_block
+      json_block=$(echo "${assignment_response}" | sed -n '/[{]/,/[}]/p' | sed '/^```/d')
+      if [[ -n "${json_block}" ]]; then
+        assignments=$(echo "${json_block}" | jq '.assignments // empty' 2>/dev/null)
+        if [[ -z "${assignments}" || "${assignments}" == "null" ]]; then
+          # Try: top-level keys are numeric strings ("0": [...])
+          assignments=$(echo "${json_block}" | jq 'if (keys[0] // "" | test("^[0-9]+$")) then . else empty end' 2>/dev/null)
+        fi
+        [[ -n "${assignments}" && "${assignments}" != "null" ]] && \
+          log "Proactive engine: JSON parsed via Stage 2 (brace extraction)"
+      fi
+    fi
+
+    # Stage 3: Try jq fromjson on the entire response (handles escaped JSON strings)
+    if [[ -z "${assignments}" || "${assignments}" == "null" ]]; then
+      local stripped
+      stripped=$(echo "${assignment_response}" | sed '/^```/d' | tr -d '\n')
+      assignments=$(echo "${stripped}" | jq -r 'if type == "string" then fromjson else . end | .assignments // empty' 2>/dev/null)
+      [[ -n "${assignments}" && "${assignments}" != "null" ]] && \
+        log "Proactive engine: JSON parsed via Stage 3 (fromjson)"
+    fi
   fi
 
-  # Parse assignment JSON with multiple fallback strategies
-  local assignments
-  # Strategy 1: Direct parse
-  assignments=$(echo "${clean_response}" | jq '.assignments // empty' 2>/dev/null)
-  if [[ -z "${assignments}" || "${assignments}" == "null" ]]; then
-    # Strategy 2: Extract JSON object block and parse
-    local json_part
-    json_part=$(echo "${clean_response}" | sed -n '/[[:space:]]*{/,/[[:space:]]*}/p' | head -50)
-    assignments=$(echo "${json_part}" | jq '.assignments // empty' 2>/dev/null)
-  fi
-  if [[ -z "${assignments}" || "${assignments}" == "null" ]]; then
-    # Strategy 3: Handle string keys with numeric values (e.g., "0": [...])
-    assignments=$(echo "${clean_response}" | jq 'if .assignments then .assignments elif keys[0] | test("^[0-9]+$") then . else {} end' 2>/dev/null)
-  fi
+  # Final validation
   if [[ -z "${assignments}" || "${assignments}" == "null" || "${assignments}" == "{}" ]]; then
-    log "WARN: Proactive engine: Failed to parse article assignments. Raw response (first 500 chars): ${assignment_response:0:500}"
+    log "WARN: Proactive engine: All 3 JSON parse stages failed. Raw response (first 500 chars): ${assignment_response:0:500}"
+    log "WARN: Proactive engine: Using round-robin fallback assignment (3 articles per chat)"
+    # Round-robin fallback: distribute articles evenly across chats
+    assignments="{"
+    local rr_total
+    rr_total=$(echo "${content_json}" | jq 'length' 2>/dev/null || echo 0)
+    local rr_i=0
+    while [[ ${rr_i} -lt ${dest_count} ]]; do
+      local rr_start=$(( (rr_i * 3) % rr_total ))
+      local rr_a1=$(( rr_start % rr_total ))
+      local rr_a2=$(( (rr_start + 1) % rr_total ))
+      local rr_a3=$(( (rr_start + 2) % rr_total ))
+      [[ ${rr_i} -gt 0 ]] && assignments="${assignments},"
+      assignments="${assignments}\"${rr_i}\":[${rr_a1},${rr_a2},${rr_a3}]"
+      rr_i=$((rr_i + 1))
+    done
+    assignments="${assignments}}"
+    log "Proactive engine: Round-robin fallback assignments: ${assignments}"
+    assignments=$(echo "${assignments}" | jq '.' 2>/dev/null)
   else
-    log "Proactive engine: Successfully parsed assignments for $(echo "${assignments}" | jq 'keys | length') chats"
+    log "Proactive engine: Successfully parsed assignments: $(echo "${assignments}" | jq -c '.' 2>/dev/null)"
+    # Validate: check if all chats got identical assignments
+    local unique_sets
+    unique_sets=$(echo "${assignments}" | jq '[.[] | sort | tostring] | unique | length' 2>/dev/null || echo 0)
+    local total_sets
+    total_sets=$(echo "${assignments}" | jq 'keys | length' 2>/dev/null || echo 0)
+    if [[ "${unique_sets}" -eq 1 && "${total_sets}" -gt 1 ]]; then
+      log "WARN: Proactive engine: All ${total_sets} chats received identical article assignments - differentiation failed"
+    else
+      log "Proactive engine: ${unique_sets} unique assignment sets for ${total_sets} chats"
+    fi
   fi
   # Ensure assignments is at least an empty object
   assignments="${assignments:-{}}"
@@ -1520,9 +1711,34 @@ ${chat_descriptions}
       # Try both string and numeric key for the chat index
       assigned_indices=$(echo "${assignments}" | jq -c --arg idx "${i}" --argjson idxn "${i}" '.[$idx] // .[$idxn | tostring] // []' 2>/dev/null)
       if [[ -z "${assigned_indices}" || "${assigned_indices}" == "null" || "${assigned_indices}" == "[]" ]]; then
-        # Fallback: use all articles if assignment failed
-        log "WARN: Proactive engine: No assignment for chat ${i} (session: ${session_key}), falling back to all articles. Assignment keys available: $(echo "${assignments}" | jq -c 'keys' 2>/dev/null)"
-        assigned_indices=$(echo "${content_json}" | jq '[range(length)]')
+        # Fallback: filter articles by chat's preferred_topics instead of using all articles
+        log "WARN: Proactive engine: No assignment for chat ${i} (session: ${session_key}). Assignment keys: $(echo "${assignments}" | jq -c 'keys' 2>/dev/null)"
+        local preferred_topics_json
+        preferred_topics_json=$(echo "${chat_profile}" | jq -c '.preferred_topics // []' 2>/dev/null)
+        if [[ -n "${preferred_topics_json}" && "${preferred_topics_json}" != "[]" ]]; then
+          # Filter articles whose category matches any preferred topic (case-insensitive partial match)
+          assigned_indices=$(echo "${content_json}" | jq -c --argjson topics "${preferred_topics_json}" '
+            [range(length)] as $all |
+            [range(length) | . as $idx |
+              if ($all[$idx] | .category // "" | ascii_downcase) as $cat |
+                ($topics | map(ascii_downcase) | any(. as $t | $cat | contains($t)))
+              then $idx
+              else empty
+              end
+            ] |
+            if length == 0 then [range('"$(echo "${content_json}" | jq 'length')"')][0:3]
+            else .
+            end
+          ' 2>/dev/null)
+          log "Proactive engine: Fallback filtered by preferred_topics for chat ${i}: ${assigned_indices}"
+        fi
+        # Ultimate fallback: first 3 articles
+        if [[ -z "${assigned_indices}" || "${assigned_indices}" == "null" || "${assigned_indices}" == "[]" ]]; then
+          assigned_indices=$(echo "${content_json}" | jq '[range([length, 3] | min)]')
+          log "WARN: Proactive engine: Using first 3 articles as ultimate fallback for chat ${i}"
+        fi
+      else
+        log "Proactive engine: Chat ${i} (${session_key}) assigned articles: ${assigned_indices}"
       fi
 
       # Build per-chat content from assigned indices
@@ -1530,7 +1746,7 @@ ${chat_descriptions}
       chat_content=$(echo "${content_json}" | jq -c --argjson indices "${assigned_indices}" '[. as $all | $indices[] | $all[.] // empty]')
 
       log "Proactive engine: Formatting content for ${dest_type} (target: ${target_id}, articles: $(echo "${chat_content}" | jq 'length'))..."
-      formatted_content=$(_format_content_for_destination "${chat_content}" "${dest}" "${chat_profile}")
+      formatted_content=$(_format_content_for_destination "${chat_content}" "${dest}" "${chat_profile}" "${google_trends_json}")
 
       if [[ "${mode}" == "dryrun" ]]; then
         log "Proactive engine [DRYRUN]: Would deliver to ${dest_type}:${target_id}: ${#formatted_content} chars"
