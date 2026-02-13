@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # proactive-suggestions.sh - Proactive Suggestion Engine
 #
-# Monitors time-based and random-window triggers, generates suggestions,
-# discovers trending content, and delivers to multiple destinations.
+# Discovers trending content and delivers to multiple destinations.
+# Scheduled (automatic) broadcasts are DISABLED by default (config enabled=false).
+# Broadcasts are triggered manually via dashboard force_trigger or
+# on-demand via OpenClaw broadcast_request.
 #
 # Only triceratops runs this engine (as executor node).
 
@@ -32,7 +34,7 @@ _init_proactive_engine() {
   "discord_webhook_url": "",
   "triggers": {
     "daily_asset_summary": {
-      "enabled": true,
+      "enabled": false,
       "type": "time",
       "schedule_hour_jst": 9,
       "schedule_minute": 0,
@@ -41,7 +43,7 @@ _init_proactive_engine() {
       "description": "ポートフォリオ概況、前日比、注目銘柄"
     },
     "weekly_report": {
-      "enabled": true,
+      "enabled": false,
       "type": "time",
       "schedule_day_of_week": 1,
       "schedule_hour_jst": 9,
@@ -85,6 +87,20 @@ CFGEOF
   "total_suggestions_generated": 0
 }
 EOF
+  fi
+
+  # Log scheduled broadcast status
+  local _any_scheduled_enabled=false
+  for _tname in $(jq -r '.triggers | keys[]' "${PROACTIVE_CONFIG}" 2>/dev/null); do
+    local _tenabled
+    _tenabled=$(jq -r ".triggers.\"${_tname}\".enabled // false" "${PROACTIVE_CONFIG}" 2>/dev/null)
+    if [[ "${_tenabled}" == "true" ]]; then
+      _any_scheduled_enabled=true
+      break
+    fi
+  done
+  if [[ "${_any_scheduled_enabled}" == "false" ]]; then
+    log "Proactive engine: All scheduled broadcasts are DISABLED. Manual trigger and on-demand only."
   fi
 
   # Load credentials from secrets file
@@ -1876,7 +1892,9 @@ _check_force_trigger() {
     return 1
   fi
 
-  log "Proactive engine: Force trigger detected: ${trigger_type}"
+  local triggered_by
+  triggered_by=$(jq -r '.triggered_by // "unknown"' "${force_file}" 2>/dev/null)
+  log "Proactive engine: Manual force trigger detected: ${trigger_type} (triggered_by: ${triggered_by})"
   rm -f "${force_file}"
 
   # Return the trigger name to fire
@@ -2308,7 +2326,7 @@ check_proactive_suggestions() {
       local force_trigger
       force_trigger=$(_check_force_trigger)
       if [[ -n "${force_trigger}" ]]; then
-        log "Proactive engine: Processing force trigger: ${force_trigger}"
+        log "Proactive engine: Processing manual force trigger: ${force_trigger}"
         local trigger_json
         trigger_json=$(jq ".triggers.\"${force_trigger}\"" "${PROACTIVE_CONFIG}" 2>/dev/null)
         if [[ -n "${trigger_json}" && "${trigger_json}" != "null" ]]; then

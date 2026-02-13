@@ -14,6 +14,15 @@ process_command() {
   local cmd_file="$1"
   [[ -f "${cmd_file}" ]] || return 0
 
+  # Skip trigger files handled directly by Brain nodes (not command-watcher)
+  local basename
+  basename=$(basename "${cmd_file}")
+  case "${basename}" in
+    personality_manual_trigger.json|personality_rollback_trigger.json)
+      return 0
+      ;;
+  esac
+
   local status
   status=$(jq -r '.status // ""' "${cmd_file}" 2>/dev/null)
   [[ "${status}" == "pending" ]] || return 0

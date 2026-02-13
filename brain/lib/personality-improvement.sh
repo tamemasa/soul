@@ -14,6 +14,7 @@ PI_DIR="${SHARED_DIR}/personality_improvement"
 PI_HISTORY_DIR="${PI_DIR}/history"
 PI_QUESTION_HISTORY="${PI_DIR}/question_history.jsonl"
 PI_OPENCLAW_CONTAINER="soul-openclaw"
+PI_OWNER_LINE_ID="Ua78c97ab5f7b6090fc17656bc12f5c99"
 
 # Security marker comments in SOUL.md (sections to never modify)
 PI_SECURITY_START_MARKER="## セキュリティ境界（不可侵）"
@@ -135,9 +136,11 @@ JSONのみ出力してください。余計な説明は不要です。"
 
   # Extract JSON from result (handle markdown code blocks)
   local json_result
-  json_result=$(echo "${result}" | sed -n '/^{/,/^}/p' | head -1)
-  if [[ -z "${json_result}" ]]; then
-    json_result=$(echo "${result}" | sed -n '/```json/,/```/p' | sed '1d;$d')
+  # Try: ```json ... ``` block first (most common Claude response format)
+  json_result=$(echo "${result}" | sed -n '/```json/,/```/{/```/d;p}')
+  if [[ -z "${json_result}" ]] || ! echo "${json_result}" | jq empty 2>/dev/null; then
+    # Fallback: extract from first { to last }
+    json_result=$(echo "${result}" | awk '/^\{/{found=1} found{buf=buf $0 "\n"} /^\}/{if(found){printf "%s",buf; exit}}')
   fi
   if [[ -z "${json_result}" ]]; then
     json_result="${result}"
@@ -170,28 +173,29 @@ JSONのみ出力してください。余計な説明は不要です。"
       questions: $questions.questions
     }' > "${tmp}" && mv "${tmp}" "${pending_file}"
 
-  # Write questions to bot_commands for OpenClaw to send via LINE
-  local cmd_file="${SHARED_DIR}/bot_commands/personality_q_${timestamp}.json"
-  local cmd_tmp
-  cmd_tmp=$(mktemp)
-  jq -n \
-    --arg id "cmd_$(date +%s)_$((RANDOM % 10000))" \
-    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --arg pending_file "pending_${timestamp}.json" \
-    --argjson questions "${json_result}" \
-    '{
-      id: $id,
-      action: "personality_questions",
-      params: {
-        questions: $questions.questions,
-        pending_file: $pending_file,
-        analysis: $questions.analysis
-      },
-      timestamp: $ts,
-      reason: "Personality improvement - daily question generation",
-      source: "personality_improvement",
-      status: "pending"
-    }' > "${cmd_tmp}" && mv "${cmd_tmp}" "${cmd_file}"
+  # Send questions directly via LINE Push API (same pattern as broadcast delivery)
+  local message
+  message="パーソナリティ改善の質問です！
+おれのことをもっと正確に再現するために、以下の質問に答えてくれ。番号付きで回答してくれると助かる（例: 1. 回答内容）
+
+"
+  local i=0
+  while true; do
+    local q
+    q=$(echo "${json_result}" | jq -r ".questions[${i}].question // empty" 2>/dev/null)
+    [[ -z "${q}" ]] && break
+    local qnum=$((i + 1))
+    message="${message}${qnum}. ${q}
+"
+    ((i++))
+  done
+
+  message="${message}
+※回答は番号付きでお願いします
+※全問じゃなくても答えられる分だけでOK
+※48時間以内に回答してください"
+
+  _pi_send_line_message "${message}"
 
   # Record questions in history
   echo "${json_result}" | jq -c '.questions[]' >> "${PI_QUESTION_HISTORY}" 2>/dev/null
@@ -199,7 +203,7 @@ JSONのみ出力してください。余計な説明は不要です。"
   # Update trigger status
   _pi_update_trigger "questions_sent" "" "${timestamp}"
 
-  log "Personality improvement: 5 questions generated and sent to bot_commands (pending_${timestamp}.json)"
+  log "Personality improvement: 5 questions generated and sent via LINE (pending_${timestamp}.json)"
   set_activity "idle"
 }
 
@@ -325,9 +329,9 @@ ${answer_text}
 
   # Extract JSON
   local json_parsed
-  json_parsed=$(echo "${parsed}" | sed -n '/^{/,/^}/p' | head -1)
-  if [[ -z "${json_parsed}" ]]; then
-    json_parsed=$(echo "${parsed}" | sed -n '/```json/,/```/p' | sed '1d;$d')
+  json_parsed=$(echo "${parsed}" | sed -n '/```json/,/```/{/```/d;p}')
+  if [[ -z "${json_parsed}" ]] || ! echo "${json_parsed}" | jq empty 2>/dev/null; then
+    json_parsed=$(echo "${parsed}" | awk '/^\{/{found=1} found{buf=buf $0 "\n"} /^\}/{if(found){printf "%s",buf; exit}}')
   fi
   if [[ -z "${json_parsed}" ]]; then
     json_parsed="${parsed}"
@@ -437,7 +441,7 @@ ${questions_context}
 以下のセクションは**絶対に変更しない**：
 - 「## セキュリティ境界（不可侵）」セクション全体（「## コアアイデンティティ」の直前まで）
 - 「## バディミッション」セクション
-- 言語バランス設定：「標準語ベースが約7割、関西弁語尾入りが約3割」の比率は変更しない
+- 言語バランス設定：標準語と関西弁の比率は変更しない
 - 関西弁の使用制限ルール全体
 - 「## 口調サンプル」の良い例・悪い例
 
@@ -497,9 +501,9 @@ JSONのみ出力してください。"
 
   # Extract JSON
   local json_result
-  json_result=$(echo "${result}" | sed -n '/^{/,/^}/p' | head -1)
-  if [[ -z "${json_result}" ]]; then
-    json_result=$(echo "${result}" | sed -n '/```json/,/```/p' | sed '1d;$d')
+  json_result=$(echo "${result}" | sed -n '/```json/,/```/{/```/d;p}')
+  if [[ -z "${json_result}" ]] || ! echo "${json_result}" | jq empty 2>/dev/null; then
+    json_result=$(echo "${result}" | awk '/^\{/{found=1} found{buf=buf $0 "\n"} /^\}/{if(found){printf "%s",buf; exit}}')
   fi
   if [[ -z "${json_result}" ]]; then
     json_result="${result}"
@@ -832,8 +836,8 @@ _pi_verify_post_change() {
     return 1
   fi
 
-  # Verify language balance in SOUL.md
-  if ! grep -q "標準語ベースが約7割、関西弁語尾入りが約3割" "${soul_file}" 2>/dev/null; then
+  # Verify language balance in SOUL.md (check that some language balance rule exists)
+  if ! grep -q "標準語.*関西弁" "${soul_file}" 2>/dev/null; then
     log "SECURITY ALERT: SOUL.md language balance setting was removed!"
     return 1
   fi
@@ -1239,6 +1243,17 @@ check_personality_manual_trigger() {
 
   log "Personality improvement: Manual trigger detected"
 
+  # Verify owner identity (user_id must match OWNER_LINE_ID)
+  local trigger_user_id
+  trigger_user_id=$(jq -r '.user_id // ""' "${manual_trigger}" 2>/dev/null)
+  if [[ -z "${trigger_user_id}" || "${trigger_user_id}" != "${PI_OWNER_LINE_ID}" ]]; then
+    log "SECURITY: Personality improvement: Manual trigger REJECTED - user_id mismatch (got: ${trigger_user_id:-empty})"
+    local tmp
+    tmp=$(mktemp)
+    jq '.status = "rejected" | .reason = "unauthorized"' "${manual_trigger}" > "${tmp}" && mv "${tmp}" "${manual_trigger}"
+    return 0
+  fi
+
   # Check cooldown (6 hours since last trigger)
   local trigger_file="${PI_DIR}/trigger.json"
   if [[ -f "${trigger_file}" ]]; then
@@ -1310,6 +1325,17 @@ check_personality_rollback_trigger() {
   [[ "${status}" == "pending" ]] || return 0
 
   log "Personality improvement: Rollback trigger detected"
+
+  # Verify owner identity
+  local trigger_user_id
+  trigger_user_id=$(jq -r '.user_id // ""' "${rollback_trigger}" 2>/dev/null)
+  if [[ -z "${trigger_user_id}" || "${trigger_user_id}" != "${PI_OWNER_LINE_ID}" ]]; then
+    log "SECURITY: Personality improvement: Rollback trigger REJECTED - user_id mismatch (got: ${trigger_user_id:-empty})"
+    local tmp
+    tmp=$(mktemp)
+    jq '.status = "rejected" | .reason = "unauthorized"' "${rollback_trigger}" > "${tmp}" && mv "${tmp}" "${rollback_trigger}"
+    return 0
+  fi
 
   # Process rollback
   _pi_rollback_last_change

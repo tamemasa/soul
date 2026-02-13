@@ -14,9 +14,9 @@ log "OpenClaw container starting..."
 if [[ "$(id -u)" == "0" ]]; then
   /app/network-restrict.sh apply
   log "Network restrictions applied. Dropping privileges to openclaw user..."
-  # Ensure bot_commands directory is writable by openclaw
+  # Ensure bot_commands directory is writable by all (shared with Brain nodes)
   if [[ -d /bot_commands ]]; then
-    chown openclaw:openclaw /bot_commands 2>/dev/null || true
+    chmod 777 /bot_commands 2>/dev/null || true
   fi
 fi
 

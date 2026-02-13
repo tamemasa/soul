@@ -213,39 +213,51 @@ EOF
 
 trigger_personality_improvement() {
   local pi_dir="${SHARED_DIR}/personality_improvement"
-  mkdir -p "${pi_dir}"
-
   local trigger_file="${pi_dir}/trigger.json"
 
-  # 連続トリガー防止: 最終実行から6時間以内は無視
+  mkdir -p "${pi_dir}"
+
+  # Check if a trigger is already active (pending/questions_sent/answers_received/processing)
+  if [[ -f "${trigger_file}" ]]; then
+    local current_status
+    current_status=$(jq -r '.status // ""' "${trigger_file}" 2>/dev/null)
+    case "${current_status}" in
+      pending|questions_sent|answers_received|processing)
+        log "Personality improvement: Skipping scheduled trigger - already in progress (status: ${current_status})"
+        return 0
+        ;;
+    esac
+  fi
+
+  # Check cooldown (6 hours since last trigger)
   if [[ -f "${trigger_file}" ]]; then
     local last_triggered
     last_triggered=$(jq -r '.triggered_at // ""' "${trigger_file}" 2>/dev/null)
     if [[ -n "${last_triggered}" ]]; then
-      local last_epoch
+      local last_epoch now_epoch
       last_epoch=$(date -d "${last_triggered}" +%s 2>/dev/null || echo 0)
-      local now_epoch
       now_epoch=$(date +%s)
       if (( now_epoch - last_epoch < 21600 )); then
-        log "Personality improvement: skipped (last trigger was ${last_triggered}, within 6h cooldown)"
+        log "Personality improvement: Skipping scheduled trigger - within 6h cooldown"
         return 0
       fi
     fi
   fi
 
+  # Create the trigger
   local tmp
   tmp=$(mktemp)
-  jq -n \
-    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --arg src "scheduler" \
-    '{
-      type: "personality_improvement",
-      status: "pending",
-      triggered_at: $ts,
-      triggered_by: $src
-    }' > "${tmp}" && mv "${tmp}" "${trigger_file}"
+  cat > "${tmp}" <<EOF
+{
+  "type": "personality_improvement",
+  "status": "pending",
+  "triggered_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "triggered_by": "scheduler_daily_1230"
+}
+EOF
+  mv "${tmp}" "${trigger_file}"
 
-  log "Personality improvement trigger created"
+  log "Personality improvement: Daily 12:30 trigger created"
 }
 
 case "${ACTION}" in
