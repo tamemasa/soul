@@ -34,11 +34,19 @@ COPY protocols/ /brain/protocols/
 
 RUN chmod +x /brain/soul-daemon.sh /brain/lib/*.sh
 
+# Replace Claude Code's vendored ripgrep with system version
+# (vendored jemalloc crashes on ARM64 16KB page size - Raspberry Pi 5)
+RUN find /usr/lib/node_modules/@anthropic-ai/claude-code/vendor/ripgrep -name rg -type f 2>/dev/null \
+    | while read f; do rm -f "$f" && ln -s /usr/bin/rg "$f"; done
+
 # Docker command guard: prevents self-destructive docker operations
 COPY lib/docker-guard.sh /usr/local/bin/docker
 RUN chmod +x /usr/local/bin/docker
 
 HEALTHCHECK --interval=60s --timeout=10s --retries=3 --start-period=60s \
   CMD grep -q soul-daemon /proc/1/cmdline 2>/dev/null || exit 1
+
+# Disable core dumps (prevent core.* file pollution)
+ENV ULIMIT_CORE=0
 
 ENTRYPOINT ["/brain/soul-daemon.sh"]
