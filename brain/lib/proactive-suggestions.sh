@@ -410,14 +410,147 @@ _mark_trigger_fired() {
     "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
 }
 
+# ---- Dynamic Query Generation ----
+
+# Generate search queries dynamically from chat conversation context
+# Returns newline-separated list of search queries (5-8 items)
+_generate_dynamic_queries() {
+  local chat_contexts="$1"
+  local preferred_topics_hint="$2"
+
+  if [[ -z "${chat_contexts}" ]]; then
+    log "Proactive engine: No chat context available for dynamic query generation"
+    echo ""
+    return
+  fi
+
+  local prompt="あなたは検索クエリ生成エンジンです。以下のチャット会話のコンテキストから、今日検索すべきニュース・トレンドのトピックを5〜8件生成してください。
+
+## チャットの会話コンテキスト
+${chat_contexts}
+
+## トピックのヒント
+${preferred_topics_hint}
+
+## ルール
+- 会話で実際に話題になっている具体的なテーマから検索クエリを生成する
+- 固定カテゴリに限定せず、会話の文脈から自由にトピックを選ぶ
+- 各クエリは検索エンジンで使える具体的なキーワード（2〜5語程度）にする
+- 日本語クエリと英語クエリを混ぜる
+- 抽象的すぎるクエリ（例：「テクノロジー」だけ）は避ける
+
+## 出力形式（厳守）
+思考過程や説明文は一切出力しないこと。以下のJSON配列のみ出力すること。
+
+\`\`\`json
+[\"クエリ1\", \"クエリ2\", \"クエリ3\", \"クエリ4\", \"クエリ5\"]
+\`\`\`"
+
+  local response
+  response=$(invoke_claude "${prompt}")
+
+  if [[ -z "${response}" ]]; then
+    log "WARN: Proactive engine: Dynamic query generation returned empty response"
+    echo ""
+    return
+  fi
+
+  # Extract JSON array from response
+  local clean_response
+  clean_response=$(echo "${response}" | sed -n '/^```\(json\)\?$/,/^```$/p' | sed '/^```\(json\)\?$/d;/^```$/d')
+  if [[ -z "${clean_response}" ]]; then
+    clean_response=$(echo "${response}" | sed '/^```\(json\)\?$/d;/^```$/d')
+  fi
+
+  local queries_json
+  queries_json=$(echo "${clean_response}" | jq -c '.' 2>/dev/null)
+  if [[ -z "${queries_json}" ]] || ! echo "${queries_json}" | jq '.[0]' > /dev/null 2>&1; then
+    # Try extracting array portion
+    local json_part
+    json_part=$(echo "${clean_response}" | sed -n '/[[:space:]]*\[/,/[[:space:]]*\]/p')
+    queries_json=$(echo "${json_part}" | jq -c '.' 2>/dev/null)
+  fi
+
+  if [[ -n "${queries_json}" ]] && echo "${queries_json}" | jq '.[0]' > /dev/null 2>&1; then
+    local count
+    count=$(echo "${queries_json}" | jq 'length')
+    log "Proactive engine: Generated ${count} dynamic search queries from chat context"
+    echo "${queries_json}"
+  else
+    log "WARN: Proactive engine: Failed to parse dynamic queries from LLM response"
+    echo ""
+  fi
+}
+
+# Collect conversation contexts from all active chats for dynamic query generation
+_collect_all_chat_contexts() {
+  local activity_window_hours="${1:-72}"
+  local chat_profiles_json="${2:-{}}"
+  local default_profile_json="${3:-{}}"
+
+  local active_chats
+  active_chats=$(_get_active_chats "${activity_window_hours}")
+  local active_count
+  active_count=$(echo "${active_chats}" | jq 'length' 2>/dev/null || echo 0)
+
+  if [[ ${active_count} -eq 0 ]]; then
+    echo ""
+    return
+  fi
+
+  local all_contexts=""
+  local all_topics=""
+  local i=0
+  while [[ ${i} -lt ${active_count} ]]; do
+    local chat session_key
+    chat=$(echo "${active_chats}" | jq -c ".[${i}]")
+    session_key=$(echo "${chat}" | jq -r '.session_key // ""')
+
+    # Get chat profile for preferred_topics hint
+    local profile
+    profile=$(echo "${chat_profiles_json}" | jq -c --arg sk "${session_key}" '.[$sk] // null' 2>/dev/null)
+    if [[ -z "${profile}" || "${profile}" == "null" ]]; then
+      profile="${default_profile_json}"
+    fi
+    local profile_name profile_topics
+    profile_name=$(echo "${profile}" | jq -r '.name // "不明"')
+    profile_topics=$(echo "${profile}" | jq -r '.preferred_topics // [] | join(", ")')
+
+    if [[ -n "${profile_topics}" ]]; then
+      all_topics="${all_topics}, ${profile_topics}"
+    fi
+
+    # Get recent conversation context
+    if [[ -n "${session_key}" ]]; then
+      local context
+      context=$(_get_recent_chat_context "${session_key}")
+      if [[ -n "${context}" ]]; then
+        all_contexts="${all_contexts}
+### ${profile_name} (${session_key})
+${context}
+"
+      fi
+    fi
+
+    i=$((i + 1))
+  done
+
+  # Output context and topics as two lines
+  if [[ -n "${all_contexts}" ]]; then
+    echo "${all_contexts}"
+  fi
+}
+
 # ---- Trending Content Discovery ----
 
 # Search for trending content using Brave Search API
+# Now accepts optional dynamic_queries parameter
 _discover_trending_content() {
   local trigger_json="$1"
+  local dynamic_queries="${2:-}"
 
   local interests
-  interests=$(echo "${trigger_json}" | jq -r '.interest_categories // [] | join(", ")')
+  interests=$(echo "${trigger_json}" | jq -r '.fallback_categories // .interest_categories // [] | join(", ")')
   if [[ -z "${interests}" ]]; then
     interests="AI, テクノロジー, 投資, 暗号資産, ゲーム, プログラミング"
   fi
@@ -432,9 +565,9 @@ _discover_trending_content() {
   local today
   today=$(_get_jst_date)
 
-  # Search queries: mix of Japanese and English for broader coverage, including X/Twitter trends
+  # Build search queries: dynamic queries from chat context + fallback fixed queries
   local search_results=""
-  local queries=(
+  local fallback_queries=(
     "最新ニュース AI テクノロジー ${today}"
     "crypto blockchain news today"
     "テック ニュース 投資 トレンド"
@@ -443,6 +576,34 @@ _discover_trending_content() {
     "trending topics site:x.com ${today}"
     "話題 トレンド site:x.com OR site:twitter.com"
   )
+
+  local queries=()
+  if [[ -n "${dynamic_queries}" ]] && echo "${dynamic_queries}" | jq '.[0]' > /dev/null 2>&1; then
+    # Use dynamic queries (up to 5)
+    local dq_count
+    dq_count=$(echo "${dynamic_queries}" | jq 'length')
+    local dq_max=$(( dq_count > 5 ? 5 : dq_count ))
+    local dqi=0
+    while [[ ${dqi} -lt ${dq_max} ]]; do
+      local dq
+      dq=$(echo "${dynamic_queries}" | jq -r ".[${dqi}]")
+      queries+=("${dq}")
+      dqi=$((dqi + 1))
+    done
+    log "Proactive engine: Using ${#queries[@]} dynamic queries from chat context"
+
+    # Add 2 random fixed queries to avoid echo chamber
+    local fb_count=${#fallback_queries[@]}
+    local fb_idx1=$(( RANDOM % fb_count ))
+    local fb_idx2=$(( (fb_idx1 + 1 + RANDOM % (fb_count - 1)) % fb_count ))
+    queries+=("${fallback_queries[${fb_idx1}]}")
+    queries+=("${fallback_queries[${fb_idx2}]}")
+    log "Proactive engine: Added 2 random fallback queries for diversity"
+  else
+    # No dynamic queries available, use all fixed queries
+    log "Proactive engine: No dynamic queries, using fixed queries"
+    queries=("${fallback_queries[@]}")
+  fi
 
   for query in "${queries[@]}"; do
     local encoded_query
@@ -1080,29 +1241,50 @@ _get_active_chats() {
 
 # ---- Trending News Broadcast ----
 
-# Get recent conversation topic hints from a session file (last few assistant messages)
+# Get recent conversation topic hints from a session file (last few messages)
+# Returns user and assistant text content for topic analysis
 _get_recent_chat_context() {
   local session_key="$1"
 
-  local session_file
-  session_file=$(docker exec soul-openclaw cat /home/openclaw/.openclaw/agents/main/sessions/sessions.json 2>/dev/null \
-    | jq -r --arg key "${session_key}" '.[$key].sessionFile // ""' 2>/dev/null)
-
-  if [[ -z "${session_file}" || "${session_file}" == "null" ]]; then
+  # Check if OpenClaw container is running
+  if ! docker ps --filter "name=soul-openclaw" --filter "status=running" --format '{{.Names}}' 2>/dev/null | grep -q "soul-openclaw"; then
+    log "WARN: Proactive engine: OpenClaw container is not running, skipping context for ${session_key}"
     echo ""
     return
   fi
 
-  # Get last 3 assistant text snippets (truncated) for topic hints
-  local context
-  context=$(docker exec soul-openclaw tail -20 "${session_file}" 2>/dev/null \
-    | grep -o '"text":"[^"]*"' 2>/dev/null \
-    | tail -3 \
-    | sed 's/"text":"//;s/"$//' \
-    | cut -c1-100 \
-    | tr '\n' ' ')
+  # Get session ID from sessions.json
+  local session_id
+  session_id=$(docker exec soul-openclaw cat /home/openclaw/.openclaw/agents/main/sessions/sessions.json 2>/dev/null \
+    | jq -r --arg key "${session_key}" '.[$key].sessionId // ""' 2>/dev/null)
 
-  echo "${context}"
+  if [[ -z "${session_id}" || "${session_id}" == "null" ]]; then
+    log "WARN: Proactive engine: No sessionId found for ${session_key}"
+    echo ""
+    return
+  fi
+
+  local session_file="/home/openclaw/.openclaw/agents/main/sessions/${session_id}.jsonl"
+
+  # Check if session file exists
+  if ! docker exec soul-openclaw test -f "${session_file}" 2>/dev/null; then
+    log "WARN: Proactive engine: Session file not found for ${session_key}: ${session_file}"
+    echo ""
+    return
+  fi
+
+  # Get last 40 lines and extract user/assistant text content using jq
+  # Execute jq inside the container to avoid pipe buffering issues with large JSON lines
+  # Increased from 3 to 5 messages for better topic coverage
+  local context
+  context=$(docker exec soul-openclaw sh -c "tail -40 '${session_file}' | jq -r 'select(.type == \"message\") | select(.message.role == \"user\" or .message.role == \"assistant\") | .message.content | if type == \"array\" then map(select(.type == \"text\") | .text) | join(\" \") elif type == \"string\" then . else empty end' 2>/dev/null | tail -5 | cut -c1-200 | tr '\n' ' '" 2>/dev/null \
+    | sed 's/  */ /g')
+
+  if [[ -n "${context}" ]]; then
+    echo "${context}"
+  else
+    echo ""
+  fi
 }
 
 # Main broadcast flow for trending_news trigger
@@ -1114,10 +1296,31 @@ _execute_trending_broadcast() {
   _update_broadcast_state "delivering"
   set_activity "broadcasting_news" "\"trigger\":\"${trigger_name}\","
 
+  # Step 0: Collect chat contexts and generate dynamic search queries
+  log "Proactive engine: Collecting chat contexts for dynamic query generation..."
+  local activity_window_pre
+  activity_window_pre=$(echo "${trigger_json}" | jq -r '.activity_window_hours // 72')
+  local chat_profiles_pre default_profile_pre
+  chat_profiles_pre=$(echo "${trigger_json}" | jq -c '.chat_profiles // {}')
+  default_profile_pre=$(echo "${trigger_json}" | jq -c '.default_profile // {"name":"一般","audience":"一般","preferred_topics":["AI","テクノロジー"],"tone":"カジュアル"}')
+
+  local all_chat_contexts
+  all_chat_contexts=$(_collect_all_chat_contexts "${activity_window_pre}" "${chat_profiles_pre}" "${default_profile_pre}")
+
+  local dynamic_queries=""
+  if [[ -n "${all_chat_contexts}" ]]; then
+    # Gather preferred_topics as hints
+    local topics_hint
+    topics_hint=$(echo "${chat_profiles_pre}" | jq -r '[.[] | .preferred_topics // [] | .[]] | unique | join(", ")' 2>/dev/null)
+    dynamic_queries=$(_generate_dynamic_queries "${all_chat_contexts}" "${topics_hint:-}")
+  else
+    log "Proactive engine: No chat context available, will use fixed queries only"
+  fi
+
   # Step 1: Discover trending content (single fetch, 8-10 items)
   log "Proactive engine: Discovering trending content via Brave Search..."
   local content_json
-  content_json=$(_discover_trending_content "${trigger_json}")
+  content_json=$(_discover_trending_content "${trigger_json}" "${dynamic_queries}")
 
   if [[ -z "${content_json}" || "${content_json}" == "[]" ]]; then
     log "ERROR: Proactive engine: No trending content discovered"
@@ -1231,32 +1434,64 @@ ${numbered_articles}
 ${chat_descriptions}
 
 ## ルール
-- 各チャットに3〜5件の記事インデックスを割り当てる
-- チャットごとに異なる記事セットになるよう最適化する
+- 各チャットに3〜5件の記事インデックス（数値）を割り当てる
+- チャットごとに異なる記事セットになるよう最適化する（最近の会話コンテキストを最重視）
 - 好みのトピックに合わない記事は割り当てない
 - 全チャットで同じ記事セットにしないこと
+- 最近の会話で話題になっているテーマに関連する記事を優先する
 
-以下のJSON形式で回答してください（コードフェンスなし、JSONのみ）：
+## 出力形式（厳守）
+思考過程や説明文は一切出力しないこと。以下のJSON形式のみ出力すること。
+キーはチャット番号（文字列）、値は記事インデックス（数値）の配列。
+
+\`\`\`json
 {
   \"assignments\": {
     \"0\": [0, 2, 4],
     \"1\": [1, 3, 5]
   }
-}"
+}
+\`\`\`"
 
   local assignment_response
   assignment_response=$(invoke_claude "${assignment_prompt}")
-  assignment_response=$(echo "${assignment_response}" | sed '/^```\(json\)\?$/d')
 
-  # Parse assignment JSON
-  local assignments
-  assignments=$(echo "${assignment_response}" | jq '.assignments // {}' 2>/dev/null)
-  if [[ -z "${assignments}" || "${assignments}" == "null" || "${assignments}" == "{}" ]]; then
-    # Try extracting JSON object
-    local json_part
-    json_part=$(echo "${assignment_response}" | sed -n '/^[[:space:]]*{/,/^[[:space:]]*}/p')
-    assignments=$(echo "${json_part}" | jq '.assignments // {}' 2>/dev/null || echo '{}')
+  if [[ -z "${assignment_response}" ]]; then
+    log "ERROR: Proactive engine: invoke_claude returned empty response for article assignment"
+  else
+    log "Proactive engine: Assignment response length: ${#assignment_response}"
   fi
+
+  # Robust JSON extraction: strip code fences, thinking text, etc.
+  # Step 1: Extract ```json ... ``` block if present
+  local clean_response
+  clean_response=$(echo "${assignment_response}" | sed -n '/^```\(json\)\?$/,/^```$/p' | sed '/^```\(json\)\?$/d;/^```$/d')
+  if [[ -z "${clean_response}" ]]; then
+    # Step 2: Strip any code fences and try raw content
+    clean_response=$(echo "${assignment_response}" | sed '/^```\(json\)\?$/d;/^```$/d')
+  fi
+
+  # Parse assignment JSON with multiple fallback strategies
+  local assignments
+  # Strategy 1: Direct parse
+  assignments=$(echo "${clean_response}" | jq '.assignments // empty' 2>/dev/null)
+  if [[ -z "${assignments}" || "${assignments}" == "null" ]]; then
+    # Strategy 2: Extract JSON object block and parse
+    local json_part
+    json_part=$(echo "${clean_response}" | sed -n '/[[:space:]]*{/,/[[:space:]]*}/p' | head -50)
+    assignments=$(echo "${json_part}" | jq '.assignments // empty' 2>/dev/null)
+  fi
+  if [[ -z "${assignments}" || "${assignments}" == "null" ]]; then
+    # Strategy 3: Handle string keys with numeric values (e.g., "0": [...])
+    assignments=$(echo "${clean_response}" | jq 'if .assignments then .assignments elif keys[0] | test("^[0-9]+$") then . else {} end' 2>/dev/null)
+  fi
+  if [[ -z "${assignments}" || "${assignments}" == "null" || "${assignments}" == "{}" ]]; then
+    log "WARN: Proactive engine: Failed to parse article assignments. Raw response (first 500 chars): ${assignment_response:0:500}"
+  else
+    log "Proactive engine: Successfully parsed assignments for $(echo "${assignments}" | jq 'keys | length') chats"
+  fi
+  # Ensure assignments is at least an empty object
+  assignments="${assignments:-{}}"
 
   local broadcast_id now_ts
   broadcast_id=$(_generate_suggestion_id)
@@ -1282,10 +1517,11 @@ ${chat_descriptions}
     if true; then
       # Get assigned article indices for this chat
       local assigned_indices
-      assigned_indices=$(echo "${assignments}" | jq -c --arg idx "${i}" '.[$idx] // []' 2>/dev/null)
+      # Try both string and numeric key for the chat index
+      assigned_indices=$(echo "${assignments}" | jq -c --arg idx "${i}" --argjson idxn "${i}" '.[$idx] // .[$idxn | tostring] // []' 2>/dev/null)
       if [[ -z "${assigned_indices}" || "${assigned_indices}" == "null" || "${assigned_indices}" == "[]" ]]; then
         # Fallback: use all articles if assignment failed
-        log "WARN: Proactive engine: No assignment for chat ${i}, using all articles"
+        log "WARN: Proactive engine: No assignment for chat ${i} (session: ${session_key}), falling back to all articles. Assignment keys available: $(echo "${assignments}" | jq -c 'keys' 2>/dev/null)"
         assigned_indices=$(echo "${content_json}" | jq '[range(length)]')
       fi
 
@@ -1439,7 +1675,14 @@ _check_broadcast_request() {
   fi
 
   log "Proactive engine: Broadcast request detected from OpenClaw"
-  rm -f "${request_file}"
+
+  # Remove the file; if rm fails due to permissions (sticky bit + different owner),
+  # try to truncate it or use docker exec to delete from the owning container
+  if ! rm -f "${request_file}" 2>/dev/null; then
+    if ! : > "${request_file}" 2>/dev/null; then
+      docker exec soul-openclaw rm -f /suggestions/broadcast_request.json 2>/dev/null || true
+    fi
+  fi
 
   # Return the request JSON
   echo "${request_json}"
