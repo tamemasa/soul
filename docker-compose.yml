@@ -78,10 +78,16 @@ services:
   scheduler:
     build:
       context: ./scheduler
+      args:
+        DOCKER_GID: "${DOCKER_GID:-984}"
     container_name: soul-scheduler
     user: "${SOUL_UID:-1000}:${SOUL_GID:-1000}"
+    group_add:
+      - "${DOCKER_GID:-984}"
     volumes:
       - shared:/shared
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PWD}:/soul:ro
     networks:
       - soul-net
     restart: unless-stopped

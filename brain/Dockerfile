@@ -34,4 +34,11 @@ COPY protocols/ /brain/protocols/
 
 RUN chmod +x /brain/soul-daemon.sh /brain/lib/*.sh
 
+# Docker command guard: prevents self-destructive docker operations
+COPY lib/docker-guard.sh /usr/local/bin/docker
+RUN chmod +x /usr/local/bin/docker
+
+HEALTHCHECK --interval=60s --timeout=10s --retries=3 --start-period=60s \
+  CMD grep -q soul-daemon /proc/1/cmdline 2>/dev/null || exit 1
+
 ENTRYPOINT ["/brain/soul-daemon.sh"]

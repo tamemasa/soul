@@ -132,15 +132,65 @@ healthcheck() {
       fi
     fi
 
-    # Executing スタック検出 (30分以上)
+    # Executing スタック検出 + 自動復旧 (30分以上)
     if [[ "${dec_status}" == "executing" ]]; then
-      local exec_start
+      local exec_start executor
       exec_start=$(jq -r '.execution_started_at // .decided_at' "${decision_file}")
+      executor=$(jq -r '.executor // "triceratops"' "${decision_file}")
       local exec_epoch
       exec_epoch=$(date -d "${exec_start}" +%s 2>/dev/null || echo 0)
       local age=$(( now - exec_epoch ))
+
       if [[ ${age} -gt 1800 ]]; then
-        log "ALERT: ${task_id} stuck in 'executing' for ${age}s"
+        local container_name="soul-brain-${executor}"
+        local container_running
+        container_running=$(docker ps --filter "name=^/${container_name}$" --filter "status=running" --format '{{.Names}}' 2>/dev/null || true)
+
+        if [[ -z "${container_running}" ]]; then
+          # Executor container is dead - restart it
+          log "WATCHDOG: ${container_name} is dead, task ${task_id} stuck for ${age}s. Restarting."
+          if docker compose -f /soul/docker-compose.yml up -d "brain-${executor}" 2>/dev/null; then
+            log "WATCHDOG: ${container_name} restart initiated via compose"
+          elif docker start "${container_name}" 2>/dev/null; then
+            log "WATCHDOG: ${container_name} started via docker start"
+          else
+            log "WATCHDOG: Failed to restart ${container_name}"
+          fi
+          ((alert_count++))
+        elif [[ ${age} -gt 7200 ]]; then
+          # Container alive but task stuck >2h - mark as failed
+          log "WATCHDOG: ${task_id} stuck for ${age}s (>2h), container alive. Marking as failed."
+          local tmp
+          tmp=$(mktemp)
+          jq '.status = "failed" | .failed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .failure_reason = "watchdog timeout (>2h, container alive)"' \
+            "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+          ((alert_count++))
+        else
+          log "ALERT: ${task_id} executing for ${age}s, ${container_name} is running"
+          ((alert_count++))
+        fi
+      fi
+    fi
+  done
+
+  # --- 3.5 コンテナヘルス確認 ---
+  for node in panda gorilla triceratops; do
+    local container_name="soul-brain-${node}"
+    local health_status
+    health_status=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "${container_name}" 2>/dev/null || echo "not-found")
+
+    if [[ "${health_status}" == "unhealthy" ]]; then
+      log "WATCHDOG: ${container_name} is unhealthy, restarting"
+      docker restart "${container_name}" 2>/dev/null \
+        || log "WATCHDOG: Failed to restart unhealthy ${container_name}"
+      ((alert_count++))
+    elif [[ "${health_status}" == "not-found" ]]; then
+      local container_exists
+      container_exists=$(docker ps -a --filter "name=^/${container_name}$" --format '{{.Names}}' 2>/dev/null || true)
+      if [[ -z "${container_exists}" ]]; then
+        log "WATCHDOG: ${container_name} does not exist, creating"
+        docker compose -f /soul/docker-compose.yml up -d "brain-${node}" 2>/dev/null \
+          || log "WATCHDOG: Failed to create ${container_name}"
         ((alert_count++))
       fi
     fi
