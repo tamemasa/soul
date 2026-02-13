@@ -318,11 +318,17 @@ _pi_check_for_answers() {
   fi
 
   # --- Primary: Check for answer file from OpenClaw (with user_id verification) ---
-  local bot_cmd_answer="${SHARED_DIR}/bot_commands/personality_answer.json"
-  if [[ -f "${bot_cmd_answer}" ]]; then
-    local ans_status
-    ans_status=$(jq -r '.status // ""' "${bot_cmd_answer}" 2>/dev/null)
-    if [[ "${ans_status}" == "collected" ]]; then
+  local bot_cmd_answer=""
+  for candidate in "${SHARED_DIR}"/bot_commands/personality_answer*.json; do
+    [[ -f "${candidate}" ]] || continue
+    local cand_status
+    cand_status=$(jq -r '.status // ""' "${candidate}" 2>/dev/null)
+    if [[ "${cand_status}" == "collected" ]]; then
+      bot_cmd_answer="${candidate}"
+      break
+    fi
+  done
+  if [[ -n "${bot_cmd_answer}" ]]; then
       # Verify owner identity
       local ans_user_id
       ans_user_id=$(jq -r '.user_id // ""' "${bot_cmd_answer}" 2>/dev/null)
@@ -348,7 +354,6 @@ _pi_check_for_answers() {
       # Save and proceed to answer processing
       _pi_save_answer_file "${answer_text}"
       return 0
-    fi
   fi
 
   # Also check if an answer file was already saved in PI_DIR
@@ -1243,19 +1248,27 @@ check_personality_manual_trigger() {
 
   # Check both locations: PI_DIR and bot_commands (where OpenClaw writes)
   local manual_trigger="${PI_DIR}/manual_trigger.json"
-  local bot_cmd_trigger="${SHARED_DIR}/bot_commands/personality_manual_trigger.json"
+
+  # Scan bot_commands for personality_manual_trigger*.json (OpenClaw may use unique filenames)
+  local bot_cmd_trigger=""
+  for candidate in "${SHARED_DIR}"/bot_commands/personality_manual_trigger*.json; do
+    [[ -f "${candidate}" ]] || continue
+    local cand_status
+    cand_status=$(jq -r '.status // ""' "${candidate}" 2>/dev/null)
+    if [[ "${cand_status}" == "pending" ]]; then
+      bot_cmd_trigger="${candidate}"
+      break
+    fi
+  done
 
   # If trigger exists in bot_commands, move it to PI_DIR
-  if [[ -f "${bot_cmd_trigger}" ]]; then
-    local bc_status
-    bc_status=$(jq -r '.status // ""' "${bot_cmd_trigger}" 2>/dev/null)
-    if [[ "${bc_status}" == "pending" ]]; then
-      cp "${bot_cmd_trigger}" "${manual_trigger}"
-      local tmp
-      tmp=$(mktemp)
-      jq '.status = "moved_to_pi"' "${bot_cmd_trigger}" > "${tmp}" && mv "${tmp}" "${bot_cmd_trigger}"
-      chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
-    fi
+  if [[ -n "${bot_cmd_trigger}" ]]; then
+    local bc_status="pending"
+    cp "${bot_cmd_trigger}" "${manual_trigger}"
+    local tmp
+    tmp=$(mktemp)
+    jq '.status = "moved_to_pi"' "${bot_cmd_trigger}" > "${tmp}" && mv "${tmp}" "${bot_cmd_trigger}"
+    chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
   fi
 
   [[ -f "${manual_trigger}" ]] || return 0
@@ -1319,19 +1332,26 @@ check_personality_rollback_trigger() {
 
   # Check both locations: PI_DIR and bot_commands (where OpenClaw writes)
   local rollback_trigger="${PI_DIR}/rollback_trigger.json"
-  local bot_cmd_rollback="${SHARED_DIR}/bot_commands/personality_rollback_trigger.json"
+
+  # Scan bot_commands for personality_rollback_trigger*.json (OpenClaw may use unique filenames)
+  local bot_cmd_rollback=""
+  for candidate in "${SHARED_DIR}"/bot_commands/personality_rollback_trigger*.json; do
+    [[ -f "${candidate}" ]] || continue
+    local cand_status
+    cand_status=$(jq -r '.status // ""' "${candidate}" 2>/dev/null)
+    if [[ "${cand_status}" == "pending" ]]; then
+      bot_cmd_rollback="${candidate}"
+      break
+    fi
+  done
 
   # If rollback trigger exists in bot_commands, move it to PI_DIR
-  if [[ -f "${bot_cmd_rollback}" ]]; then
-    local bc_status
-    bc_status=$(jq -r '.status // ""' "${bot_cmd_rollback}" 2>/dev/null)
-    if [[ "${bc_status}" == "pending" ]]; then
-      cp "${bot_cmd_rollback}" "${rollback_trigger}"
-      local tmp
-      tmp=$(mktemp)
-      jq '.status = "moved_to_pi"' "${bot_cmd_rollback}" > "${tmp}" && mv "${tmp}" "${bot_cmd_rollback}"
-      chmod 666 "${bot_cmd_rollback}" 2>/dev/null || true
-    fi
+  if [[ -n "${bot_cmd_rollback}" ]]; then
+    cp "${bot_cmd_rollback}" "${rollback_trigger}"
+    local tmp
+    tmp=$(mktemp)
+    jq '.status = "moved_to_pi"' "${bot_cmd_rollback}" > "${tmp}" && mv "${tmp}" "${bot_cmd_rollback}"
+    chmod 666 "${bot_cmd_rollback}" 2>/dev/null || true
   fi
 
   [[ -f "${rollback_trigger}" ]] || return 0
