@@ -669,6 +669,9 @@ ${changes_detail}
 
     _pi_update_trigger "completed" "Changes applied successfully"
     log "Personality improvement: Completed successfully (${changes_count} changes)"
+
+    # Git commit and push personality changes
+    _pi_git_commit_and_push "${summary}"
   else
     log "ERROR: Personality improvement: Failed to apply changes"
     _pi_update_trigger "failed" "Change application failed"
@@ -1115,8 +1118,37 @@ if old:
   # Notify Masaru
   _pi_send_line_message "パーソナリティを直前の状態に戻しました。変更内容が元に戻っています。"
 
+  # Git commit and push rollback
+  _pi_git_commit_and_push "パーソナリティロールバック"
+
   log "Personality improvement: Rollback completed"
   set_activity "idle"
+}
+
+# ============================================================
+# Helper: git commit and push personality changes
+# ============================================================
+
+_pi_git_commit_and_push() {
+  local summary="${1:-パーソナリティ更新}"
+
+  cd /soul || return 1
+
+  # Stage personality files
+  git add worker/openclaw/personality/SOUL.md worker/openclaw/personality/AGENTS.md 2>/dev/null
+
+  # Check if there are staged changes
+  if ! git diff --cached --quiet 2>/dev/null; then
+    git commit -m "feat(personality): ${summary}" 2>&1 | while read -r line; do
+      log "Personality improvement [git]: ${line}"
+    done
+    git push 2>&1 | while read -r line; do
+      log "Personality improvement [git]: ${line}"
+    done
+    log "Personality improvement: Git commit and push completed"
+  else
+    log "Personality improvement: No personality file changes to commit"
+  fi
 }
 
 # ============================================================
