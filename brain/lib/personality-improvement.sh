@@ -16,6 +16,34 @@ PI_QUESTION_HISTORY="${PI_DIR}/question_history.jsonl"
 PI_OPENCLAW_CONTAINER="soul-openclaw"
 PI_OWNER_LINE_ID="Ua78c97ab5f7b6090fc17656bc12f5c99"
 
+# External personality improvement: authorized user IDs (comma-separated)
+PI_EXTERNAL_AUTHORIZED_IDS="${PI_EXTERNAL_AUTHORIZED_IDS:-}"
+
+# Check if a user ID is in the external authorized list
+_pi_is_external_authorized() {
+  local user_id="$1"
+  [[ -n "${user_id}" && -n "${PI_EXTERNAL_AUTHORIZED_IDS}" ]] || return 1
+  local IFS=','
+  for authorized_id in ${PI_EXTERNAL_AUTHORIZED_IDS}; do
+    # Trim whitespace
+    authorized_id=$(echo "${authorized_id}" | tr -d ' ')
+    [[ "${user_id}" == "${authorized_id}" ]] && return 0
+  done
+  return 1
+}
+
+# Get mode from trigger.json (default: "self")
+_pi_get_mode() {
+  local trigger_file="${PI_DIR}/trigger.json"
+  jq -r '.mode // "self"' "${trigger_file}" 2>/dev/null
+}
+
+# Get external_user_id from trigger.json
+_pi_get_external_user_id() {
+  local trigger_file="${PI_DIR}/trigger.json"
+  jq -r '.external_user_id // ""' "${trigger_file}" 2>/dev/null
+}
+
 # Security marker comments in SOUL.md (sections to never modify)
 PI_SECURITY_START_MARKER="## セキュリティ境界（不可侵）"
 PI_SECURITY_END_MARKER="## コアアイデンティティ"
@@ -87,9 +115,54 @@ _pi_generate_questions() {
     past_questions=$(tail -50 "${PI_QUESTION_HISTORY}" 2>/dev/null || echo "")
   fi
 
+  # Determine mode
+  local mode
+  mode=$(_pi_get_mode)
+
   # Generate questions via Claude
   local prompt
-  prompt="あなたはSoul Systemのパーソナリティ分析エンジンです。
+  if [[ "${mode}" == "external" ]]; then
+    prompt="あなたはSoul Systemのパーソナリティ分析エンジンです。
+Masaru Tamegaiを知る第三者に、Masaruがどういう人間かを聞く質問を生成してください。
+外から見えるMasaruの行動パターン・印象・対人関係の特徴に焦点を当てた質問を作ってください。
+
+## 現在のSOUL.md（人格定義）:
+${soul_md}
+
+## 現在のAGENTS.md（エージェント設定 - 性格・知識関連部分のみ参照）:
+${agents_md}
+
+## 過去に聞いた質問（重複を避けること）:
+${past_questions}
+
+## タスク:
+1. 現在のパーソナリティ定義を分析し、第三者視点で不足している情報領域を特定する
+2. Masaruの知人に対して5つの質問を生成する
+
+## 質問生成ルール:
+- Masaruの外から見える行動・印象・対人スタイルをより正確に把握するための質問であること
+- 「Masaruって○○なとき、どんな感じ？」のような、知人が答えやすい形式にすること
+- 過去に聞いた質問と重複しないこと
+- **セキュリティ関連情報（パスワード、トークン、API鍵、サーバー構成、IPアドレス等）を引き出す質問は絶対に生成しない**
+- **個人情報（住所、電話番号、マイナンバー等）を引き出す質問は生成しない**
+- **Masaruのプライベートな秘密を暴くような質問は生成しない**
+- 答えが一言で済むものと、少し詳しく答えるものをバランスよく混ぜる
+
+## 出力フォーマット（JSON）:
+{
+  \"analysis\": \"現在のパーソナリティ定義の分析（第三者視点で不足している領域の説明）\",
+  \"questions\": [
+    {\"id\": 1, \"category\": \"カテゴリ名\", \"question\": \"質問文\", \"purpose\": \"この質問の目的\"},
+    {\"id\": 2, \"category\": \"カテゴリ名\", \"question\": \"質問文\", \"purpose\": \"この質問の目的\"},
+    {\"id\": 3, \"category\": \"カテゴリ名\", \"question\": \"質問文\", \"purpose\": \"この質問の目的\"},
+    {\"id\": 4, \"category\": \"カテゴリ名\", \"question\": \"質問文\", \"purpose\": \"この質問の目的\"},
+    {\"id\": 5, \"category\": \"カテゴリ名\", \"question\": \"質問文\", \"purpose\": \"この質問の目的\"}
+  ]
+}
+
+JSONのみ出力してください。余計な説明は不要です。"
+  else
+    prompt="あなたはSoul Systemのパーソナリティ分析エンジンです。
 Masaru Tamegaiのバディボット（Masaru-kun）のパーソナリティファイルを分析し、
 より「Masaruらしさ」を再現するために不足している情報を特定してください。
 
@@ -127,6 +200,7 @@ ${past_questions}
 }
 
 JSONのみ出力してください。余計な説明は不要です。"
+  fi
 
   local result
   result=$(invoke_claude "${prompt}")
@@ -179,10 +253,17 @@ JSONのみ出力してください。余計な説明は不要です。"
 
   # Send questions directly via LINE Push API (same pattern as broadcast delivery)
   local message
-  message="パーソナリティ改善の質問です！
+  if [[ "${mode}" == "external" ]]; then
+    message="Masaruのパーソナリティ改善にご協力ありがとうございます！
+Masaruのことをもっと正確に再現するために、以下の質問に答えてください。番号付きで回答していただけると助かります（例: 1. 回答内容）
+
+"
+  else
+    message="パーソナリティ改善の質問です！
 おれのことをもっと正確に再現するために、以下の質問に答えてくれ。番号付きで回答してくれると助かる（例: 1. 回答内容）
 
 "
+  fi
   local i=0
   while true; do
     local q
@@ -194,10 +275,17 @@ JSONのみ出力してください。余計な説明は不要です。"
     ((i++))
   done
 
-  message="${message}
+  if [[ "${mode}" == "external" ]]; then
+    message="${message}
+※回答は番号付きでお願いします
+※全問でなくても答えられる分だけで大丈夫です
+※48時間以内にご回答ください"
+  else
+    message="${message}
 ※回答は番号付きでお願いします
 ※全問じゃなくても答えられる分だけでOK
 ※48時間以内に回答してください"
+  fi
 
   _pi_send_line_message "${message}"
 
@@ -231,8 +319,18 @@ _pi_save_answer_file() {
   answer_count=$(echo "${answer_text}" | grep -cE "^[1-5][.．、)）]|[[:space:]][1-5][.．、)）]" 2>/dev/null || echo 0)
   log "Personality improvement: Found ${answer_count} answer(s) from Masaru"
 
+  # Determine mode for prompt
+  local mode
+  mode=$(_pi_get_mode)
+
   # Use Claude to parse raw answers into structured format
-  local parse_prompt="以下はパーソナリティ改善の質問に対するMasaruの回答です。各質問と回答を構造化してください。
+  local parse_intro
+  if [[ "${mode}" == "external" ]]; then
+    parse_intro="以下はMasaruの知人からの、Masaruについての回答です。各質問と回答を構造化してください。"
+  else
+    parse_intro="以下はパーソナリティ改善の質問に対するMasaruの回答です。各質問と回答を構造化してください。"
+  fi
+  local parse_prompt="${parse_intro}
 
 ## 質問:
 ${questions}
@@ -317,9 +415,14 @@ _pi_check_for_answers() {
     return 0
   fi
 
+  # Determine mode for authentication
+  local mode
+  mode=$(_pi_get_mode)
+
   # --- Primary: Check for answer file from OpenClaw (with user_id verification) ---
   local bot_cmd_answer=""
-  for candidate in "${SHARED_DIR}"/bot_commands/personality_answer*.json; do
+  # Search both personality_answer*.json and personality_external_answer*.json
+  for candidate in "${SHARED_DIR}"/bot_commands/personality_answer*.json "${SHARED_DIR}"/bot_commands/personality_external_answer*.json; do
     [[ -f "${candidate}" ]] || continue
     local cand_status
     cand_status=$(jq -r '.status // ""' "${candidate}" 2>/dev/null)
@@ -329,19 +432,32 @@ _pi_check_for_answers() {
     fi
   done
   if [[ -n "${bot_cmd_answer}" ]]; then
-      # Verify owner identity
+      # Verify identity based on mode
       local ans_user_id
       ans_user_id=$(jq -r '.user_id // ""' "${bot_cmd_answer}" 2>/dev/null)
-      if [[ -z "${ans_user_id}" || "${ans_user_id}" != "${PI_OWNER_LINE_ID}" ]]; then
-        log "SECURITY: Personality improvement: Answer REJECTED - user_id mismatch (got: ${ans_user_id:-empty})"
-        local tmp
-        tmp=$(mktemp)
-        jq '.status = "rejected" | .reason = "unauthorized"' "${bot_cmd_answer}" > "${tmp}" && mv "${tmp}" "${bot_cmd_answer}"
-        chmod 666 "${bot_cmd_answer}" 2>/dev/null || true
-        return 0
+      if [[ "${mode}" == "external" ]]; then
+        # External mode: verify against authorized list
+        if ! _pi_is_external_authorized "${ans_user_id}"; then
+          log "SECURITY: Personality improvement: External answer REJECTED - user_id not authorized (got: ${ans_user_id:-empty})"
+          local tmp
+          tmp=$(mktemp)
+          jq '.status = "rejected" | .reason = "unauthorized"' "${bot_cmd_answer}" > "${tmp}" && mv "${tmp}" "${bot_cmd_answer}"
+          chmod 666 "${bot_cmd_answer}" 2>/dev/null || true
+          return 0
+        fi
+      else
+        # Self mode: verify against owner ID
+        if [[ -z "${ans_user_id}" || "${ans_user_id}" != "${PI_OWNER_LINE_ID}" ]]; then
+          log "SECURITY: Personality improvement: Answer REJECTED - user_id mismatch (got: ${ans_user_id:-empty})"
+          local tmp
+          tmp=$(mktemp)
+          jq '.status = "rejected" | .reason = "unauthorized"' "${bot_cmd_answer}" > "${tmp}" && mv "${tmp}" "${bot_cmd_answer}"
+          chmod 666 "${bot_cmd_answer}" 2>/dev/null || true
+          return 0
+        fi
       fi
 
-      log "Personality improvement: Answer file found from OpenClaw (owner verified)"
+      log "Personality improvement: Answer file found from OpenClaw (${mode} mode, user verified)"
       local answer_text
       answer_text=$(jq -r '.answer_text // ""' "${bot_cmd_answer}" 2>/dev/null)
 
@@ -367,7 +483,11 @@ _pi_check_for_answers() {
     return 0
   done
 
-  # --- Fallback (DM only): Extract answers from OpenClaw session history ---
+  # --- Fallback (DM only, self mode): Extract answers from OpenClaw session history ---
+  # External mode: rely on OpenClaw answer file only (no session scraping)
+  if [[ "${mode}" == "external" ]]; then
+    return 0
+  fi
   local reply_to
   reply_to=$(jq -r '.reply_to // ""' "${trigger_file}" 2>/dev/null)
   # Session scraping only for DM (owner is the only sender)
@@ -468,10 +588,32 @@ _pi_process_answers() {
     questions_context=$(cat "${PI_DIR}/${pending_ref}")
   fi
 
+  # Determine mode
+  local mode
+  mode=$(_pi_get_mode)
+
   # Generate personality updates via Claude
   local prompt
-  prompt="あなたはSoul Systemのパーソナリティ更新エンジンです。
-Masaruの回答に基づいて、パーソナリティファイル（SOUL.mdとAGENTS.md）の更新内容を生成してください。
+  local mode_intro mode_extra_rules
+  if [[ "${mode}" == "external" ]]; then
+    mode_intro="あなたはSoul Systemのパーソナリティ更新エンジンです。
+Masaruの知人からの回答に基づいて、パーソナリティファイル（SOUL.mdとAGENTS.md）の更新内容を生成してください。
+回答者はMasaruを外から見ている第三者です。"
+    mode_extra_rules="
+### 外部改善固有ルール（厳守）:
+- 既存の定義（Masaru自身の回答に基づくもの）と矛盾する場合は、**既存を優先**する
+- Masaru自身の好み・価値観・内面的な判断基準を上書きしない
+- 外見的な行動パターン・対人印象の反映に重点を置く
+- 「周囲からは○○と思われている」「○○な印象を与える」等の第三者視点表現を使う
+- 内面の記述を追加する場合は「周囲から見ると」等の限定をつける
+"
+  else
+    mode_intro="あなたはSoul Systemのパーソナリティ更新エンジンです。
+Masaruの回答に基づいて、パーソナリティファイル（SOUL.mdとAGENTS.md）の更新内容を生成してください。"
+    mode_extra_rules=""
+  fi
+
+  prompt="${mode_intro}
 
 ## 現在のSOUL.md:
 ${soul_md}
@@ -486,6 +628,7 @@ ${answers}
 ${questions_context}
 
 ## 更新ルール（厳守）:
+${mode_extra_rules}
 
 ### 変更禁止セクション（SOUL.md）:
 以下のセクションは**絶対に変更しない**：
@@ -600,6 +743,8 @@ JSONのみ出力してください。"
     local history_file="${PI_HISTORY_DIR}/${timestamp}.json"
     local hist_tmp
     hist_tmp=$(mktemp)
+    local external_user_id=""
+    [[ "${mode}" == "external" ]] && external_user_id=$(_pi_get_external_user_id)
     jq -n \
       --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       --argjson changes "${json_result}" \
@@ -607,13 +752,16 @@ JSONのみ出力してください。"
       --arg agents_before "$(md5sum /soul/worker/openclaw/personality/AGENTS.md.bak 2>/dev/null | awk '{print $1}')" \
       --arg soul_after "$(md5sum /soul/worker/openclaw/personality/SOUL.md | awk '{print $1}')" \
       --arg agents_after "$(md5sum /soul/worker/openclaw/personality/AGENTS.md | awk '{print $1}')" \
+      --arg mode "${mode}" \
+      --arg external_user_id "${external_user_id}" \
       '{
         timestamp: $ts,
+        mode: $mode,
         changes: $changes.changes,
         summary: $changes.summary,
         hashes_before: { soul_md: $soul_before, agents_md: $agents_before },
         hashes_after: { soul_md: $soul_after, agents_md: $agents_after }
-      }' > "${hist_tmp}" && mv "${hist_tmp}" "${history_file}"
+      } + (if $external_user_id != "" then { external_user_id: $external_user_id } else {} end)' > "${hist_tmp}" && mv "${hist_tmp}" "${history_file}"
 
     # Update integrity.json to prevent Panda false positive
     _pi_update_integrity
@@ -633,35 +781,43 @@ JSONのみ出力してください。"
     # Update integrity.json again after rebuild (container has new hashes)
     _pi_update_integrity
 
-    # Notify Masaru via LINE
+    # Notify via LINE (different message for external vs self)
     local summary
     summary=$(echo "${json_result}" | jq -r '.summary // "パーソナリティが更新されました"')
-    local changes_detail=""
-    local i=0
-    while true; do
-      local change
-      change=$(echo "${json_result}" | jq -r ".changes[${i}]" 2>/dev/null)
-      [[ "${change}" == "null" || -z "${change}" ]] && break
-      local type desc
-      type=$(echo "${change}" | jq -r '.type // ""')
-      desc=$(echo "${change}" | jq -r '.description // ""')
-      local type_label
-      case "${type}" in
-        add) type_label="追加" ;;
-        modify) type_label="修正" ;;
-        delete) type_label="削除" ;;
-        *) type_label="変更" ;;
-      esac
-      changes_detail="${changes_detail}
+
+    if [[ "${mode}" == "external" ]]; then
+      # External mode: send completion notice to external user only (not to Masaru)
+      _pi_send_line_message "パーソナリティ改善への協力ありがとうございました！
+回答内容を反映しました。"
+    else
+      # Self mode: send detailed notification to Masaru
+      local changes_detail=""
+      local i=0
+      while true; do
+        local change
+        change=$(echo "${json_result}" | jq -r ".changes[${i}]" 2>/dev/null)
+        [[ "${change}" == "null" || -z "${change}" ]] && break
+        local type desc
+        type=$(echo "${change}" | jq -r '.type // ""')
+        desc=$(echo "${change}" | jq -r '.description // ""')
+        local type_label
+        case "${type}" in
+          add) type_label="追加" ;;
+          modify) type_label="修正" ;;
+          delete) type_label="削除" ;;
+          *) type_label="変更" ;;
+        esac
+        changes_detail="${changes_detail}
 - [${type_label}] ${desc}"
-      ((i++))
-    done
-    _pi_send_line_message "パーソナリティ更新完了
+        ((i++))
+      done
+      _pi_send_line_message "パーソナリティ更新完了
 
 ${summary}
 ${changes_detail}
 
 ※「パーソナリティ戻して」で直前の変更を元に戻せます"
+    fi
 
     # Mark answer file as processed
     local tmp
@@ -676,7 +832,11 @@ ${changes_detail}
     log "Personality improvement: Completed successfully (${changes_count} changes)"
 
     # Git commit and push personality changes
-    _pi_git_commit_and_push "${summary}"
+    if [[ "${mode}" == "external" ]]; then
+      _pi_git_commit_and_push "外部からのパーソナリティ改善: ${summary}"
+    else
+      _pi_git_commit_and_push "${summary}"
+    fi
   else
     log "ERROR: Personality improvement: Failed to apply changes"
     _pi_update_trigger "failed" "Change application failed"
@@ -1388,4 +1548,88 @@ check_personality_rollback_trigger() {
   tmp=$(mktemp)
   jq '.status = "processed" | .processed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' "${rollback_trigger}" > "${tmp}" && mv "${tmp}" "${rollback_trigger}"
   chmod 666 "${rollback_trigger}" 2>/dev/null || true
+}
+
+# ============================================================
+# External personality improvement trigger handler
+# ============================================================
+
+check_personality_external_trigger() {
+  [[ "${NODE_NAME}" == "triceratops" ]] || return 0
+
+  # Scan bot_commands for personality_external_trigger*.json
+  local bot_cmd_trigger=""
+  for candidate in "${SHARED_DIR}"/bot_commands/personality_external_trigger*.json; do
+    [[ -f "${candidate}" ]] || continue
+    local cand_status
+    cand_status=$(jq -r '.status // ""' "${candidate}" 2>/dev/null)
+    if [[ "${cand_status}" == "pending" ]]; then
+      bot_cmd_trigger="${candidate}"
+      break
+    fi
+  done
+
+  [[ -n "${bot_cmd_trigger}" ]] || return 0
+
+  log "Personality improvement: External trigger detected"
+
+  # Check if an improvement process is already active
+  local trigger_file="${PI_DIR}/trigger.json"
+  if [[ -f "${trigger_file}" ]]; then
+    local current_status
+    current_status=$(jq -r '.status // ""' "${trigger_file}" 2>/dev/null)
+    if [[ "${current_status}" == "pending" || "${current_status}" == "questions_sent" || "${current_status}" == "answers_received" ]]; then
+      log "Personality improvement: External trigger REJECTED - improvement already in progress (status: ${current_status})"
+      local tmp
+      tmp=$(mktemp)
+      jq '.status = "rejected" | .reason = "improvement_in_progress"' "${bot_cmd_trigger}" > "${tmp}" && mv "${tmp}" "${bot_cmd_trigger}"
+      chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
+      return 0
+    fi
+  fi
+
+  # Verify external user authorization
+  local trigger_user_id
+  trigger_user_id=$(jq -r '.user_id // ""' "${bot_cmd_trigger}" 2>/dev/null)
+  if ! _pi_is_external_authorized "${trigger_user_id}"; then
+    log "SECURITY: Personality improvement: External trigger REJECTED - user_id not authorized (got: ${trigger_user_id:-empty})"
+    local tmp
+    tmp=$(mktemp)
+    jq '.status = "rejected" | .reason = "unauthorized"' "${bot_cmd_trigger}" > "${tmp}" && mv "${tmp}" "${bot_cmd_trigger}"
+    chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
+    return 0
+  fi
+
+  # Read reply_to destination
+  local reply_to
+  reply_to=$(jq -r '.reply_to // ""' "${bot_cmd_trigger}" 2>/dev/null)
+  [[ -n "${reply_to}" ]] || reply_to="${trigger_user_id}"
+  export PI_REPLY_TO="${reply_to}"
+
+  # Create the main trigger with external mode
+  local tmp
+  tmp=$(mktemp)
+  jq -n \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg src "external" \
+    --arg reply_to "${reply_to}" \
+    --arg mode "external" \
+    --arg external_user_id "${trigger_user_id}" \
+    '{
+      type: "personality_improvement",
+      status: "pending",
+      triggered_at: $ts,
+      triggered_by: $src,
+      reply_to: $reply_to,
+      mode: $mode,
+      external_user_id: $external_user_id
+    }' > "${tmp}" && mv "${tmp}" "${trigger_file}"
+
+  # Mark external trigger as processed
+  local mt_tmp
+  mt_tmp=$(mktemp)
+  jq '.status = "processed"' "${bot_cmd_trigger}" > "${mt_tmp}" && mv "${mt_tmp}" "${bot_cmd_trigger}"
+  chmod 666 "${bot_cmd_trigger}" 2>/dev/null || true
+
+  log "Personality improvement: External trigger accepted (user: ${trigger_user_id})"
 }

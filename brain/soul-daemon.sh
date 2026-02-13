@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# Disable core dumps (vendored ripgrep jemalloc crashes on ARM64 16KB page size)
+ulimit -c 0 2>/dev/null || true
+
 NODE_NAME="${NODE_NAME:?NODE_NAME is required}"
 SHARED_DIR="/shared"
 BRAIN_DIR="/brain"
@@ -145,6 +148,7 @@ main_loop() {
     check_personality_improvement || log "WARN: check_personality_improvement error"
     check_personality_manual_trigger || log "WARN: check_personality_manual_trigger error"
     check_personality_rollback_trigger || log "WARN: check_personality_rollback_trigger error"
+    check_personality_external_trigger || log "WARN: check_personality_external_trigger error"
 
     sleep "${POLL_INTERVAL}"
   done
