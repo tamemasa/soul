@@ -671,7 +671,7 @@ _discover_trending_content() {
       -H "Accept: application/json" \
       -H "Accept-Language: ja,en" \
       -H "X-Subscription-Token: ${brave_key}" \
-      "https://api.search.brave.com/res/v1/web/search?q=${encoded_query}&count=8&freshness=pd" 2>/dev/null)
+      "https://api.search.brave.com/res/v1/web/search?q=${encoded_query}&count=10&freshness=pd" 2>/dev/null)
 
     if [[ -n "${response}" ]] && echo "${response}" | jq '.web.results' > /dev/null 2>&1; then
       local results
@@ -695,7 +695,7 @@ _discover_trending_content() {
   fi
 
   # Use LLM to curate and select the best items
-  local prompt="あなたはニュースキュレーターです。以下の検索結果から、最も興味深く価値のある記事を8〜10件選んでください。
+  local prompt="あなたはニュースキュレーターです。以下の検索結果から、最も興味深く価値のある記事を**必ず10件**選んでください。10件に満たない場合でもできるだけ多く選んでください（最低8件）。
 
 ## 検索結果
 ${search_results}
@@ -707,7 +707,8 @@ ${search_results}
 - 暴力的・過激な政治発言・個人攻撃・センセーショナルなゴシップは除外
 - 実用的・教育的・インスピレーションを与える内容を優先
 - 重複する話題は最も情報量の多いものを1つだけ選択
-- 多様なジャンルの記事を幅広く選定すること
+- **多様なジャンルの記事を幅広く選定すること（テクノロジーばかりにならないよう注意）**
+- 異なるカテゴリ（例：経済、健康、文化、スポーツ、科学、政治、エンタメ等）から満遍なく選ぶこと
 
 以下のJSON配列で回答してください（コードフェンスなし、JSONのみ）：
 [
@@ -1898,9 +1899,49 @@ _execute_ondemand_broadcast() {
   _update_broadcast_state "delivering"
   set_activity "broadcasting_news" "\"trigger\":\"ondemand\",\"platform\":\"${platform}\","
 
-  # Discover content
+  # Extract session_key and chat profile early (needed for context-aware search)
+  local session_key
+  session_key=$(echo "${request_json}" | jq -r '.chat.session_key // ""')
+  local chat_profiles_cfg default_profile chat_profile
+  chat_profiles_cfg=$(echo "${trigger_json}" | jq -c '.chat_profiles // {}')
+  default_profile=$(echo "${trigger_json}" | jq -c '.default_profile // {"name":"一般","audience":"一般","tone":"カジュアル"}')
+  chat_profile=$(echo "${chat_profiles_cfg}" | jq -c --arg sk "${session_key}" '.[$sk] // null')
+  if [[ "${chat_profile}" == "null" || -z "${chat_profile}" ]]; then
+    chat_profile="${default_profile}"
+  fi
+
+  # Collect chat context for this specific chat to generate context-aware search queries
+  local dynamic_queries=""
+  if [[ -n "${session_key}" ]]; then
+    local chat_context
+    chat_context=$(_get_recent_chat_context "${session_key}")
+    if [[ -n "${chat_context}" ]]; then
+      local chat_profile_name
+      chat_profile_name=$(echo "${chat_profile}" | jq -r '.name // "不明"')
+      local context_text="### ${chat_profile_name} (${session_key})
+${chat_context}"
+      dynamic_queries=$(_generate_dynamic_queries "${context_text}")
+      log "Proactive engine: Generated dynamic queries from chat context for on-demand broadcast"
+    fi
+  fi
+
+  # Fetch Google Trends for additional query diversity
+  local google_trends_json=""
+  google_trends_json=$(_fetch_google_trends)
+  if [[ -n "${google_trends_json}" ]]; then
+    local trends_kw
+    trends_kw=$(echo "${google_trends_json}" | jq -r '.keyword // ""' 2>/dev/null)
+    if [[ -n "${trends_kw}" && -n "${dynamic_queries}" ]]; then
+      dynamic_queries=$(echo "${dynamic_queries}" | jq --arg kw "${trends_kw}" '. + [$kw]' 2>/dev/null)
+    elif [[ -n "${trends_kw}" ]]; then
+      dynamic_queries="[\"${trends_kw}\"]"
+    fi
+    log "Proactive engine: Added Google Trends keyword to on-demand queries"
+  fi
+
+  # Discover content using chat-context-aware queries
   local content_json
-  content_json=$(_discover_trending_content "${trigger_json}")
+  content_json=$(_discover_trending_content "${trigger_json}" "${dynamic_queries}")
   if [[ -z "${content_json}" || "${content_json}" == "[]" ]]; then
     log "ERROR: Proactive engine: No trending content for on-demand broadcast"
     _update_broadcast_state "error"
@@ -1917,24 +1958,92 @@ _execute_ondemand_broadcast() {
   local dest_template
   dest_template=$(echo "${dest_templates}" | jq -c --arg t "${platform}" '(map(select(.type == $t)) | .[0]) // {style: "default", context: ""}')
 
-  # Look up chat profile from request session_key or use default
-  local session_key chat_profile
-  session_key=$(echo "${request_json}" | jq -r '.chat.session_key // ""')
-  local chat_profiles default_profile
-  chat_profiles=$(echo "${trigger_json}" | jq -c '.chat_profiles // {}')
-  default_profile=$(echo "${trigger_json}" | jq -c '.default_profile // {"name":"一般","audience":"一般","tone":"カジュアル"}')
-  chat_profile=$(echo "${chat_profiles}" | jq -c --arg sk "${session_key}" '.[$sk] // null')
-  if [[ "${chat_profile}" == "null" || -z "${chat_profile}" ]]; then
-    chat_profile="${default_profile}"
-  fi
+  # session_key and chat_profile already extracted earlier
 
   # Build single-target delivery
   local dest
   dest=$(echo "${dest_template}" | jq -c --arg tid "${target_id}" --arg t "${platform}" '. + {type: $t, target_id: $tid}')
 
+  # Select 3 articles from the pool based on chat context
+  local item_count
+  item_count=$(echo "${content_json}" | jq 'length' 2>/dev/null || echo 0)
+
+  local selected_content="${content_json}"
+  if [[ ${item_count} -gt 3 ]]; then
+    log "Proactive engine: Selecting 3 articles from ${item_count} candidates for on-demand..."
+
+    # Get chat context for article selection
+    local recent_context=""
+    if [[ -n "${session_key}" ]]; then
+      recent_context=$(_get_recent_chat_context "${session_key}")
+    fi
+
+    local profile_name profile_audience profile_tone
+    profile_name=$(echo "${chat_profile}" | jq -r '.name // "不明"')
+    profile_audience=$(echo "${chat_profile}" | jq -r '.audience // "一般"')
+    profile_tone=$(echo "${chat_profile}" | jq -r '.tone // "カジュアル"')
+
+    local numbered_articles
+    numbered_articles=$(echo "${content_json}" | jq '[to_entries[] | {index: .key, title: .value.title, category: .value.category, summary: .value.summary}]')
+
+    local trends_hint=""
+    if [[ -n "${google_trends_json}" ]]; then
+      trends_hint=$(echo "${google_trends_json}" | jq -r '.keyword // ""' 2>/dev/null)
+    fi
+
+    local select_prompt="以下の候補記事からこのチャットに最適な3件を選んでください。
+
+## 候補記事
+${numbered_articles}
+
+## チャット情報
+- チャット名: ${profile_name}
+- 対象: ${profile_audience}
+- トーン: ${profile_tone}"
+    if [[ -n "${recent_context}" ]]; then
+      select_prompt="${select_prompt}
+- 最近の会話: ${recent_context}"
+    fi
+
+    select_prompt="${select_prompt}
+
+## Google Trends急上昇ワード
+${trends_hint:-なし}
+
+## 選択ルール
+1. コンテキスト記事2件: 会話の内容に最も関連する記事を2件選ぶ。会話コンテキストがない場合はaudienceに基づいて最適な記事を選ぶ
+2. 多様性確保記事1件: 上記2件とは異なるジャンルの記事を1件。Google Trendsに関連する記事があれば優先
+- カテゴリに制限なく、会話の内容から自由にトピックを判定すること
+
+## 出力形式（厳守）
+思考過程や説明文は一切出力しないこと。記事インデックスの配列のみ出力。
+[0, 3, 7]"
+
+    local select_response
+    select_response=$(invoke_claude "${select_prompt}")
+
+    # Parse the response - try to extract a JSON array
+    local selected_indices=""
+    if [[ -n "${select_response}" ]]; then
+      selected_indices=$(echo "${select_response}" | sed '/^```/d' | jq -c '.' 2>/dev/null)
+      if [[ -z "${selected_indices}" ]] || ! echo "${selected_indices}" | jq '.[0]' > /dev/null 2>&1; then
+        # Try extracting array from text
+        selected_indices=$(echo "${select_response}" | grep -oP '\[[\d,\s]+\]' | head -1 | jq -c '.' 2>/dev/null)
+      fi
+    fi
+
+    if [[ -n "${selected_indices}" ]] && echo "${selected_indices}" | jq '.[0]' > /dev/null 2>&1; then
+      selected_content=$(echo "${content_json}" | jq -c --argjson indices "${selected_indices}" '[. as $all | $indices[] | $all[.] // empty] | if length == 0 then $all[:3] else . end')
+      log "Proactive engine: Selected articles: ${selected_indices}"
+    else
+      log "WARN: Proactive engine: Article selection failed, using first 3"
+      selected_content=$(echo "${content_json}" | jq -c '.[0:3]')
+    fi
+  fi
+
   log "Proactive engine: Formatting content for ${platform}..."
   local formatted_content
-  formatted_content=$(_format_content_for_destination "${content_json}" "${dest}" "${chat_profile}")
+  formatted_content=$(_format_content_for_destination "${selected_content}" "${dest}" "${chat_profile}" "${google_trends_json}")
 
   local delivery_status="success"
   local delivery_error=""
@@ -1974,7 +2083,7 @@ _execute_ondemand_broadcast() {
   broadcast_record=$(jq -n \
     --arg id "${broadcast_id}" --arg trigger "ondemand" \
     --arg mode "${mode}" --arg created "${now_ts}" \
-    --argjson content "${content_json}" --argjson deliveries "${delivery_results}" \
+    --argjson content "${selected_content}" --argjson deliveries "${delivery_results}" \
     '{id: $id, trigger: $trigger, mode: $mode, content: $content, deliveries: $deliveries, created_at: $created}')
 
   local broadcast_file="${PROACTIVE_BROADCAST_DIR}/${broadcast_id}.json"
