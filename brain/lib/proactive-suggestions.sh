@@ -2283,7 +2283,7 @@ ${trends_hint:-なし}
   echo "${existing_markers}" | jq \
     --arg tid "${target_id}" --arg ts "${now_ts}" --arg id "${broadcast_id}" \
     '.[$tid] = {served_at: $ts, broadcast_id: $id}' \
-    > "${marker_tmp}" && mv "${marker_tmp}" "${marker_file}" 2>/dev/null || true
+    > "${marker_tmp}" && chmod 644 "${marker_tmp}" && mv "${marker_tmp}" "${marker_file}" 2>/dev/null || true
 
   set_activity "idle"
   return 0
