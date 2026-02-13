@@ -62,6 +62,7 @@ services:
       - HOME=/home/soul
       - CLAUDE_MODEL=opus
       - OWNER_DISCORD_ID=${OWNER_DISCORD_ID}
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
     volumes:
       - shared:/shared
       - ./brain/nodes/triceratops/CLAUDE.md:/brain/CLAUDE.md:ro

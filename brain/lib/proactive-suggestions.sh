@@ -907,7 +907,7 @@ LINE向けにフォーマットしてください：
 - 対象に合わせて技術用語を調整（家族向けなら分かりやすく言い換え）
 - 全体を1つのメッセージにまとめる（1000文字以内）
 - 自然な書き出しから始める
-- URLは省略可（タイトルと要約で十分）"
+- 各ニュースの末尾にソースURLを記載する（短い行で「→ URL」の形式）"
       if [[ -n "${trends_section}" ]]; then
         prompt="${prompt}
 - 「いま話題」セクションをメッセージの最後に追加し、Google Trendsのキーワードを紹介する"
@@ -1902,13 +1902,8 @@ _check_broadcast_request() {
 
   log "Proactive engine: Broadcast request detected from OpenClaw"
 
-  # Remove the file; if rm fails due to permissions (sticky bit + different owner),
-  # try to truncate it or use docker exec to delete from the owning container
-  if ! rm -f "${request_file}" 2>/dev/null; then
-    if ! : > "${request_file}" 2>/dev/null; then
-      docker exec soul-openclaw rm -f /suggestions/broadcast_request.json 2>/dev/null || true
-    fi
-  fi
+  # Remove the file to prevent re-processing
+  rm -f "${request_file}" 2>/dev/null || true
 
   # Return the request JSON
   echo "${request_json}"

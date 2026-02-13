@@ -14,12 +14,13 @@ source "${BRAIN_DIR}/lib/worker-manager.sh"
 source "${BRAIN_DIR}/lib/rebuild-manager.sh"
 source "${BRAIN_DIR}/lib/proactive-suggestions.sh"
 source "${BRAIN_DIR}/lib/unified-openclaw-monitor.sh"
+source "${BRAIN_DIR}/lib/personality-improvement.sh"
 
 log() {
   local timestamp
   timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   local msg="[${timestamp}] [${NODE_NAME}] $*"
-  echo "${msg}"
+  echo "${msg}" >&2
   local log_dir="${SHARED_DIR}/logs/$(date -u +%Y-%m-%d)"
   mkdir -p "${log_dir}"
   echo "${msg}" >> "${log_dir}/${NODE_NAME}.log"
@@ -95,6 +96,7 @@ ensure_dirs() {
   mkdir -p "${SHARED_DIR}/logs"
   mkdir -p "${SHARED_DIR}/nodes/${NODE_NAME}"
   mkdir -p "${SHARED_DIR}/rebuild_requests"
+  mkdir -p "${SHARED_DIR}/personality_improvement/history"
   set_activity "idle"
 }
 
@@ -138,6 +140,11 @@ main_loop() {
     # Consolidates policy, security, and integrity checks into a single monitor.
     check_unified_openclaw_monitor || log "WARN: check_unified_openclaw_monitor error"
     process_unified_approved_actions || log "WARN: process_unified_approved_actions error"
+
+    # 11. Personality improvement engine (triceratops only)
+    check_personality_improvement || log "WARN: check_personality_improvement error"
+    check_personality_manual_trigger || log "WARN: check_personality_manual_trigger error"
+    check_personality_rollback_trigger || log "WARN: check_personality_rollback_trigger error"
 
     sleep "${POLL_INTERVAL}"
   done

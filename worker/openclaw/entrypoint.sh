@@ -80,15 +80,42 @@ OWNER_CTX="${OPENCLAW_HOME}/workspace/OWNER_CONTEXT.md"
 } > "${OWNER_CTX}"
 log "OWNER_CONTEXT.md deployed to workspace."
 
-# Set up suggestion tools (symlink to PATH for easy access)
-if [[ -f /app/suggest.sh ]]; then
-  ln -sf /app/suggest.sh /usr/local/bin/suggest
-  ln -sf /app/write-approval.sh /usr/local/bin/write-approval
-  # Ensure suggestions directory is writable by both OpenClaw and Triceratops
-  mkdir -p /suggestions
-  chmod 1777 /suggestions 2>/dev/null || true
-  log "Suggestion tools available: suggest, write-approval"
+# Set up mcporter MCP servers (memory + sequential-thinking)
+MCPORTER_DIR="${OPENCLAW_HOME}/mcporter"
+mkdir -p "${MCPORTER_DIR}"
+ln -sfn "${MCPORTER_DIR}" /home/openclaw/.mcporter
+cat > "${MCPORTER_DIR}/mcporter.json" <<'MCPEOF'
+{
+  "mcpServers": {
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {
+        "MEMORY_FILE_PATH": "/home/openclaw/.openclaw/memory/memory.jsonl"
+      }
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    }
+  },
+  "imports": []
+}
+MCPEOF
+log "mcporter MCP servers configured (memory + sequential-thinking)."
+
+# Set up suggestions directory and owner ID file
+mkdir -p /suggestions
+chmod 777 /suggestions 2>/dev/null || true
+
+# Write OWNER_DISCORD_ID to a read-only file so the bot can read it via the read tool
+# (exec/bash are disabled, so environment variables are not accessible to the bot)
+if [[ -n "${OWNER_DISCORD_ID:-}" ]]; then
+  echo "${OWNER_DISCORD_ID}" > /suggestions/.owner_id
+  chmod 444 /suggestions/.owner_id
+  log "OWNER_DISCORD_ID written to /suggestions/.owner_id"
 fi
+log "Suggestions directory ready."
 
 # Check required env vars — at least one channel must be configured
 if [[ -z "${DISCORD_BOT_TOKEN:-}" && -z "${LINE_CHANNEL_ACCESS_TOKEN:-}" ]]; then
@@ -164,12 +191,22 @@ if (process.env.BRAVE_API_KEY) {
   });
 }
 
+// Deny dangerous/unnecessary tools — restrict exec/bash (arbitrary code), browser (web_fetch suffices),
+// cron (autonomous persistent tasks), gateway (Brain node responsibility), whatsapp_login (unused channel)
+config.tools = config.tools || {};
+config.tools.deny = ['exec', 'bash', 'browser', 'cron', 'gateway', 'whatsapp_login'];
+
 // Ensure Discord plugin is enabled (only if token is set)
 if (process.env.DISCORD_BOT_TOKEN) {
   config.plugins = config.plugins || {};
   config.plugins.entries = config.plugins.entries || {};
   config.plugins.entries.discord = { enabled: true };
 }
+
+// Enable mcporter skill for MCP server access (memory + sequential-thinking)
+config.skills = config.skills || {};
+config.skills.entries = config.skills.entries || {};
+config.skills.entries.mcporter = { enabled: true };
 
 fs.writeFileSync('${CONFIG_FILE}', JSON.stringify(config, null, 2));
 console.log('Config written successfully');

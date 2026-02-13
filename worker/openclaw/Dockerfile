@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install OpenClaw globally
-RUN npm install -g openclaw@latest
+# Install OpenClaw and mcporter globally
+RUN npm install -g openclaw@latest mcporter
 
 # Create non-root user
 RUN groupadd -r openclaw && useradd -r -g openclaw -m -d /home/openclaw -s /bin/bash openclaw

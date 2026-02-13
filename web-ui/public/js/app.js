@@ -150,7 +150,9 @@ function renderActivityInline(activity) {
     discussing: 'Discussing',
     announcing: 'Announcing',
     executing: 'Executing',
-    evaluating: 'Evaluating'
+    evaluating: 'Evaluating',
+    broadcasting_news: 'Broadcasting',
+    generating_suggestion: 'Suggesting'
   };
   const label = labels[activity.status] || activity.status;
   const detail = activity.task_id ? activity.task_id.replace('task_', '').substring(0, 10) : (activity.target || '');
