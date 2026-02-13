@@ -28,6 +28,7 @@ shared/attachments/*
 shared/health.json
 shared/nodes/*/activity.json
 shared/nodes/*/panda_monitor_notification.json
+shared/nodes/*/unified_monitor_notification.json
 
 # Runtime monitoring/alerts/buddy data
 shared/alerts/*
@@ -35,6 +36,11 @@ shared/buddy/*
 shared/monitoring/*
 shared/openclaw/*
 shared/rebuild_requests/*
+
+# Runtime metrics & improvement data
+shared/host_metrics/*
+shared/personality_improvement/*
+shared/bot_commands/*
 
 # Claude Code
 .claude/
