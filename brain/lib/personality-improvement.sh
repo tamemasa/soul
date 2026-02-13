@@ -628,6 +628,36 @@ JSONのみ出力してください。"
     # Update integrity.json again after rebuild (container has new hashes)
     _pi_update_integrity
 
+    # Notify Masaru via LINE
+    local summary
+    summary=$(echo "${json_result}" | jq -r '.summary // "パーソナリティが更新されました"')
+    local changes_detail=""
+    local i=0
+    while true; do
+      local change
+      change=$(echo "${json_result}" | jq -r ".changes[${i}]" 2>/dev/null)
+      [[ "${change}" == "null" || -z "${change}" ]] && break
+      local type desc
+      type=$(echo "${change}" | jq -r '.type // ""')
+      desc=$(echo "${change}" | jq -r '.description // ""')
+      local type_label
+      case "${type}" in
+        add) type_label="追加" ;;
+        modify) type_label="修正" ;;
+        delete) type_label="削除" ;;
+        *) type_label="変更" ;;
+      esac
+      changes_detail="${changes_detail}
+- [${type_label}] ${desc}"
+      ((i++))
+    done
+    _pi_send_line_message "パーソナリティ更新完了
+
+${summary}
+${changes_detail}
+
+※「パーソナリティ戻して」で直前の変更を元に戻せます"
+
     # Mark answer file as processed
     local tmp
     tmp=$(mktemp)
