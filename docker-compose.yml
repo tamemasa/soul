@@ -116,7 +116,7 @@ services:
       context: ./worker/openclaw
     container_name: soul-openclaw
     env_file:
-      - ./worker/openclaw/.env
+      - ./.env
     volumes:
       - openclaw-data:/app/data
       - openclaw-home:/home/openclaw/.openclaw
