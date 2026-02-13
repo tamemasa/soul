@@ -1992,6 +1992,15 @@ _execute_ondemand_broadcast() {
     > "${tmp}" && mv "${tmp}" "${state_file}"
 
   log "Proactive engine: On-demand broadcast ${broadcast_id} completed"
+
+  # Write marker so OpenClaw knows a broadcast was recently served
+  local marker_file="/openclaw-suggestions/broadcast_last_served.json"
+  local marker_tmp
+  marker_tmp=$(mktemp)
+  jq -n --arg ts "${now_ts}" --arg id "${broadcast_id}" --arg tid "${target_id}" \
+    '{served_at: $ts, broadcast_id: $id, target_id: $tid}' \
+    > "${marker_tmp}" && mv "${marker_tmp}" "${marker_file}" 2>/dev/null || true
+
   set_activity "idle"
   return 0
 }
