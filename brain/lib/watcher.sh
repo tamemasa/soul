@@ -411,6 +411,288 @@ check_openclaw_suggestions() {
   done
 }
 
+check_openclaw_research_requests() {
+  # Only triceratops picks up OpenClaw research requests
+  [[ "${NODE_NAME}" == "triceratops" ]] || return 0
+
+  local suggestions_dir="/openclaw-suggestions"
+  [[ -d "${suggestions_dir}" ]] || return 0
+
+  for request_file in "${suggestions_dir}"/research_request_*.json; do
+    [[ -f "${request_file}" ]] || continue
+
+    local request_filename
+    request_filename=$(basename "${request_file}")
+
+    # Skip already-submitted requests
+    local status
+    status=$(jq -r '.status // ""' "${request_file}" 2>/dev/null)
+    [[ "${status}" == "pending" ]] || continue
+
+    # Read and validate request content
+    local req_type title description
+    req_type=$(jq -r '.type // ""' "${request_file}" 2>/dev/null)
+    title=$(jq -r '.title // ""' "${request_file}" 2>/dev/null)
+    description=$(jq -r '.description // ""' "${request_file}" 2>/dev/null)
+
+    # Validate type (research/design only)
+    case "${req_type}" in
+      research|design) ;;
+      *)
+        log "OpenClaw research request ${request_filename}: invalid type '${req_type}', discarding"
+        rm -f "${request_file}"
+        continue
+        ;;
+    esac
+
+    # Validate title
+    if [[ -z "${title}" ]]; then
+      log "OpenClaw research request ${request_filename}: missing title, discarding"
+      rm -f "${request_file}"
+      continue
+    fi
+
+    # Validate description length
+    if [[ "${#description}" -lt 10 ]]; then
+      log "OpenClaw research request ${request_filename}: description too short, discarding"
+      rm -f "${request_file}"
+      continue
+    fi
+
+    # Sanitize: truncate long inputs
+    title="${title:0:200}"
+    description="${description:0:2000}"
+
+    # Duplicate check
+    local openclaw_title="[OpenClaw Research] ${title}"
+    local duplicate_found=false
+
+    for existing_task in "${SHARED_DIR}/inbox"/*.json; do
+      [[ -f "${existing_task}" ]] || continue
+      local existing_title
+      existing_title=$(jq -r '.title // ""' "${existing_task}" 2>/dev/null)
+      if [[ "${existing_title}" == "${openclaw_title}" ]]; then
+        duplicate_found=true
+        break
+      fi
+    done
+
+    if [[ "${duplicate_found}" == "false" ]]; then
+      for existing_decision in "${SHARED_DIR}/decisions"/*.json; do
+        [[ -f "${existing_decision}" ]] || continue
+        local dec_basename
+        dec_basename=$(basename "${existing_decision}")
+        [[ "${dec_basename}" != *_result.json ]] || continue
+        [[ "${dec_basename}" != *_history.json ]] || continue
+        [[ "${dec_basename}" != *_progress.jsonl ]] || continue
+        [[ "${dec_basename}" != *_announce_progress.jsonl ]] || continue
+
+        local existing_title
+        existing_title=$(jq -r '.title // ""' "${existing_decision}" 2>/dev/null)
+        if [[ "${existing_title}" == "${openclaw_title}" ]]; then
+          duplicate_found=true
+          break
+        fi
+      done
+    fi
+
+    if [[ "${duplicate_found}" == "true" ]]; then
+      log "OpenClaw research request duplicate detected, skipping: ${title}"
+      # Mark as duplicate instead of deleting
+      local tmp_dup
+      tmp_dup=$(mktemp)
+      jq --arg st "duplicate" '.status = $st' "${request_file}" > "${tmp_dup}" && mv "${tmp_dup}" "${request_file}"
+      continue
+    fi
+
+    # Generate task ID and register as inbox task
+    local now_epoch ts rand task_id now_ts
+    now_epoch=$(date +%s)
+    ts="${now_epoch}"
+    rand=$((RANDOM % 9000 + 1000))
+    task_id="task_${ts}_${rand}"
+    now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    local task_json
+    task_json=$(jq -n \
+      --arg id "${task_id}" \
+      --arg title "[OpenClaw Research] ${title}" \
+      --arg desc "${description}" \
+      --arg req_type "${req_type}" \
+      --arg created "${now_ts}" \
+      '{
+        id: $id,
+        type: "task",
+        title: $title,
+        description: $desc,
+        priority: "low",
+        source: "openclaw",
+        request_type: $req_type,
+        created_at: $created,
+        status: "pending"
+      }')
+
+    # Write task to inbox atomically
+    local inbox_file="${SHARED_DIR}/inbox/${task_id}.json"
+    local tmp_inbox
+    tmp_inbox=$(mktemp)
+    echo "${task_json}" > "${tmp_inbox}"
+    mv "${tmp_inbox}" "${inbox_file}"
+
+    # Update request file with task_id and submitted status
+    local tmp_req
+    tmp_req=$(mktemp)
+    jq --arg st "submitted" --arg tid "${task_id}" --arg ts "${now_ts}" \
+      '.status = $st | .task_id = $tid | .submitted_at_brain = $ts' \
+      "${request_file}" > "${tmp_req}" && mv "${tmp_req}" "${request_file}"
+
+    log "OpenClaw research request registered as task ${task_id}: [${req_type}] ${title}"
+  done
+
+  # Write back results for completed research tasks
+  for request_file in "${suggestions_dir}"/research_request_*.json; do
+    [[ -f "${request_file}" ]] || continue
+
+    local status task_id
+    status=$(jq -r '.status // ""' "${request_file}" 2>/dev/null)
+    task_id=$(jq -r '.task_id // ""' "${request_file}" 2>/dev/null)
+    [[ "${status}" == "submitted" && -n "${task_id}" ]] || continue
+
+    # Check if result exists
+    local result_file="${SHARED_DIR}/decisions/${task_id}_result.json"
+    [[ -f "${result_file}" ]] || continue
+
+    # Check if we already wrote the result back
+    local result_out="${suggestions_dir}/research_result_${task_id}.json"
+    [[ -f "${result_out}" ]] && continue
+
+    # Read decision and result
+    local decision_file="${SHARED_DIR}/decisions/${task_id}.json"
+    local decision approach result_summary
+    decision=$(jq -r '.decision // "unknown"' "${decision_file}" 2>/dev/null || echo "unknown")
+    approach=$(jq -r '.agreed_approach // ""' "${decision_file}" 2>/dev/null || echo "")
+    result_summary=$(jq -r '.summary // .result // ""' "${result_file}" 2>/dev/null || echo "")
+    local completed_at
+    completed_at=$(jq -r '.completed_at // ""' "${result_file}" 2>/dev/null || echo "")
+
+    # Write result to suggestions dir for OpenClaw to read
+    local tmp_result
+    tmp_result=$(mktemp)
+    jq -n \
+      --arg tid "${task_id}" \
+      --arg decision "${decision}" \
+      --arg approach "${approach}" \
+      --arg summary "${result_summary}" \
+      --arg completed "${completed_at}" \
+      '{
+        task_id: $tid,
+        decision: $decision,
+        approach: $approach,
+        result_summary: $summary,
+        completed_at: $completed
+      }' > "${tmp_result}" && mv "${tmp_result}" "${result_out}"
+
+    # Update request status to completed
+    local tmp_req
+    tmp_req=$(mktemp)
+    jq --arg st "completed" '.status = $st' "${request_file}" > "${tmp_req}" && mv "${tmp_req}" "${request_file}"
+
+    log "OpenClaw research result written back for task ${task_id}"
+
+    # Send LINE notification for completed research
+    _notify_research_result_line "${task_id}" "${request_file}" "${result_summary}"
+  done
+}
+
+# Send LINE notification when a research task completes
+_notify_research_result_line() {
+  local task_id="$1"
+  local request_file="$2"
+  local result_summary="$3"
+
+  local line_token="${LINE_CHANNEL_ACCESS_TOKEN:-}"
+  local owner_line_id="${OWNER_LINE_ID:-Ua78c97ab5f7b6090fc17656bc12f5c99}"
+
+  if [[ -z "${line_token}" ]]; then
+    log "WARN: LINE_CHANNEL_ACCESS_TOKEN not set, skipping research result notification"
+    return 0
+  fi
+
+  # Get task title from request file or discussion
+  local title
+  title=$(jq -r '.title // ""' "${request_file}" 2>/dev/null)
+  if [[ -z "${title}" ]]; then
+    local task_json="${SHARED_DIR}/discussions/${task_id}/task.json"
+    title=$(jq -r '.title // "調査タスク"' "${task_json}" 2>/dev/null || echo "調査タスク")
+  fi
+
+  # Build summary from result or workspace report
+  local summary="${result_summary}"
+  if [[ -z "${summary}" || "${summary}" == "null" || "${summary}" =~ ^不要 ]]; then
+    # Try to read from the full result file
+    local full_result
+    full_result=$(jq -r '.result // ""' "${SHARED_DIR}/decisions/${task_id}_result.json" 2>/dev/null)
+    if [[ -n "${full_result}" && "${full_result}" != "null" ]]; then
+      summary="${full_result}"
+    else
+      summary="調査完了。詳細はWeb UIで確認してください。"
+    fi
+  fi
+
+  # Truncate for LINE (max ~4000 chars for text message, keep to 1500 for readability)
+  if [[ ${#summary} -gt 1500 ]]; then
+    summary="${summary:0:1497}..."
+  fi
+
+  local message="調査完了通知
+
+タスク: ${title}
+ID: ${task_id}
+
+${summary}
+
+詳細はWeb UIの「Decisions」から確認できます。"
+
+  # LINE text message max is 5000 chars
+  if [[ ${#message} -gt 4900 ]]; then
+    message="${message:0:4897}..."
+  fi
+
+  local payload
+  payload=$(jq -n \
+    --arg to "${owner_line_id}" \
+    --arg text "${message}" \
+    '{
+      to: $to,
+      messages: [{
+        type: "text",
+        text: $text
+      }]
+    }')
+
+  local http_code response_body
+  response_body=$(mktemp)
+  http_code=$(curl -s -o "${response_body}" -w "%{http_code}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${line_token}" \
+    -d "${payload}" \
+    "https://api.line.me/v2/bot/message/push" 2>/dev/null) || {
+    log "ERROR: LINE Push API request failed for research notification"
+    rm -f "${response_body}"
+    return 1
+  }
+
+  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
+    log "Research result notification sent via LINE (HTTP ${http_code}) for task ${task_id}"
+    rm -f "${response_body}"
+    return 0
+  else
+    log "ERROR: LINE Push API returned HTTP ${http_code} for research notification: $(cat "${response_body}")"
+    rm -f "${response_body}"
+    return 1
+  fi
+}
+
 check_evaluation_requests() {
   local evaluations_dir="${SHARED_DIR}/evaluations"
   for eval_dir in "${evaluations_dir}"/*/; do
