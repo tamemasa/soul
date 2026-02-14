@@ -133,8 +133,9 @@ main_loop() {
     check_rebuild_approvals || log "WARN: check_rebuild_approvals error"
     check_rebuild_requests || log "WARN: check_rebuild_requests error"
 
-    # 8. Pick up OpenClaw suggestions (triceratops only)
+    # 8. Pick up OpenClaw suggestions and research requests (triceratops only)
     check_openclaw_suggestions || log "WARN: check_openclaw_suggestions error"
+    check_openclaw_research_requests || log "WARN: check_openclaw_research_requests error"
 
     # 9. Proactive suggestion engine (triceratops only, self-throttled to 60s)
     check_proactive_suggestions || log "WARN: check_proactive_suggestions error"

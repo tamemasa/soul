@@ -263,6 +263,40 @@ OpenClawの改善は、bot自身からの提言とユーザーからのタスク
    → 運用結果を記録 → 次の改善サイクルへ
 ```
 
+### 調査依頼機能（Research Request）
+
+OpenClawが現場で発見した課題や検討事項を、Soul Systemに調査・設計依頼として送る機能。
+依頼できることは **調査（research）** と **設計（design）** のみに限定されており、Discord承認不要で自動的にBrainノードの議論に乗る。
+
+```
+OpenClaw → writeツールで /suggestions/research_request_*.json を作成
+       ↓
+Triceratops（check_openclaw_research_requests）が自動検知
+       ↓
+/shared/inbox/ に [OpenClaw Research] プレフィックス付きタスクとして登録
+       ↓
+3つのBrainノードが議論・合意・実行
+       ↓
+結果を /suggestions/research_result_{task_id}.json に書き戻し
+       ↓
+OpenClaw → readツールで結果を取得し、ユーザーに報告
+```
+
+| コンポーネント | ファイル | 役割 |
+|-------------|---------|------|
+| **依頼CLI** | `worker/openclaw/research-request.sh` | コマンドラインから研究依頼を送信 |
+| **結果確認CLI** | `worker/openclaw/check-research-result.sh` | 依頼状態と結果の一覧・詳細確認 |
+| **Brain検知** | `brain/lib/watcher.sh` (`check_openclaw_research_requests`) | 依頼の検知・バリデーション・タスク変換・結果書き戻し |
+| **Agent設定** | `worker/openclaw/personality/AGENTS.md` | OpenClaw Agentの調査依頼使用手順 |
+| **Web UI API** | `web-ui/routes/api-openclaw.js` (`/api/openclaw/research-requests`) | ダッシュボードでの依頼一覧表示 |
+| **Web UIビュー** | `web-ui/public/js/views/openclaw.js` | Research Requestsセクション表示 |
+
+**制約事項:**
+- `type` は `research` または `design` のみ（それ以外はBrainが拒否）
+- `description` は10文字以上必須
+- タイトル200文字、説明2000文字以内に自動トランケート
+- 同名タスクが既にinbox/decisionsにある場合は重複として除外
+
 ### 情報配信システム（プロアクティブ提言）
 
 Triceratopsが運用する自発的情報配信機能（`proactive-suggestions.sh`）。オーナーと家族へ能動的に情報を提供する。
@@ -489,6 +523,8 @@ soul/
 │       ├── entrypoint.sh       # Gateway起動・設定生成
 │       ├── command-watcher.sh  # Brain→Bot制御コマンド監視
 │       ├── suggest.sh          # Bot→Soul提言送信ツール
+│       ├── research-request.sh # Bot→Soul調査依頼送信ツール
+│       ├── check-research-result.sh # 調査依頼の状態・結果確認
 │       ├── write-approval.sh   # オーナー承認/却下記録
 │       ├── network-restrict.sh # コンテナ内ネットワーク制限
 │       └── personality/        # Masaru-kun人格定義

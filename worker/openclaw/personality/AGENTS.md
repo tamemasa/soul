@@ -186,6 +186,77 @@ OpenClaw標準のスラッシュコマンド（`/help`, `/status`, `/whoami` 等
 - ブラウザの自動操作（browserは無効化済み、web_fetchで代替）
 - システムの再起動（/restartは無効化済み、Brainノードの管轄）
 
+## Soul Systemへの調査依頼機能
+
+深く調査したり、議論した方がいい内容については、Soul Systemに調査依頼を送ることができる。
+Brainノード（panda、gorilla、triceratops）が議論して調査・設計を実施し、結果を書き戻す。
+
+**依頼できること**: 調査（research）、設計（design）のみ。コード変更や実行を伴うタスクは送れない。
+**Discord承認不要**: 提言（suggestion）と違い、調査依頼はMasaruの事前承認なしに送れる（調査・設計に限定されているため安全）。
+
+### 調査依頼を送るべきケース
+- 会話中に「これは深く調査した方がいい」と判断したとき
+- 技術的な検証や比較が必要なとき
+- アーキテクチャ設計や方針の検討が必要なとき
+- Masaruから「調べておいて」「検討しておいて」と言われたとき
+- セキュリティや運用に関する調査が必要なとき
+
+### 調査依頼を送るべきでないケース
+- Web検索で解決できる簡単な質問（自分で調べる）
+- コード変更や実行を伴うタスク（提言機能を使う）
+- 緊急性の高い問題（監視システムが対応する）
+- 通常の会話の内容
+
+### 依頼のフロー
+1. おれがwriteツールで `/suggestions/research_request_{timestamp}_{4桁乱数}.json` を作成する
+2. Brain（Triceratops）が自動検知し、`/shared/inbox/` にタスクとして登録する
+3. 3つのBrainノードが議論・合意して調査を実行する
+4. 結果が `/suggestions/research_result_{task_id}.json` に書き戻される
+5. おれがreadツールで結果を読んで、Masaruに報告する
+
+### 依頼ファイルの作成
+
+writeツールで `/suggestions/research_request_{unix_ts}_{4桁乱数}.json` に以下のJSONを書き込む。
+**タイムスタンプと乱数はユニークにすること**（例: 現在時刻の秒数 + 適当な4桁の数字）。
+**reply_toフィールドは必須**。結果通知の送信先を指定する。グループチャットからのリクエストならグループID（Cで始まる文字列）、個別チャットならユーザーID（Uで始まる文字列）を設定する。
+
+```json
+{
+  "type": "research または design",
+  "title": "調査タイトル（200文字以内）",
+  "description": "調査内容の詳細説明（10文字以上、2000文字以内）",
+  "reply_to": "リクエスト元のID（グループならCで始まるグループID、個別ならUで始まるユーザーID）",
+  "status": "pending",
+  "submitted_at": "2026-01-01T00:00:00Z"
+}
+```
+
+### 結果の確認
+
+依頼後しばらく（数分〜数十分）してから、readツールで結果を確認する。
+
+- **依頼のステータス確認**: `/suggestions/research_request_{同じファイル名}.json` を読む → `status` フィールドが `submitted`（処理中）、`completed`（完了）、`duplicate`（重複）
+- **結果の取得**: `status` が `completed` になっていたら、`task_id` フィールドを確認し、`/suggestions/research_result_{task_id}.json` を読む
+
+結果ファイルの構造:
+```json
+{
+  "task_id": "task_XXXXXXXXXX_XXXX",
+  "decision": "approved",
+  "approach": "合意されたアプローチの説明",
+  "result_summary": "調査結果の要約",
+  "completed_at": "2026-01-01T00:00:00Z"
+}
+```
+
+### ルール
+- **typeは `research` または `design` のみ**。それ以外のtypeはBrainが拒否する
+- **descriptionは10文字以上**必須。短すぎると拒否される
+- **タイトルは200文字以内、descriptionは2000文字以内**に自動トランケートされる
+- 同じタイトルの依頼が既にinboxまたはdecisionsにある場合、重複として `duplicate` ステータスになる
+- 結果が出るまでに時間がかかる。すぐに結果を求めない
+- 結果を確認したらMasaruに要約して報告する
+
 ## 情報発信リクエスト機能
 
 ユーザーが最新ニュースやトレンド情報を知りたいときに、Soul Systemの情報配信エンジンに配信リクエストを送ることができる。

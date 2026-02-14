@@ -1,6 +1,6 @@
 const { Router } = require('express');
 const path = require('path');
-const { readJson, listJsonFiles, tailFile } = require('../lib/shared-reader');
+const { readJson, listJsonFiles, listDirs, tailFile } = require('../lib/shared-reader');
 const { writeJsonAtomic } = require('../lib/shared-writer');
 
 module.exports = function (sharedDir) {
@@ -165,6 +165,105 @@ module.exports = function (sharedDir) {
     }
     notifications.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
     res.json(notifications);
+  });
+
+  // ===== Research Requests =====
+
+  // GET /api/openclaw/research-requests - List OpenClaw research requests
+  // Scans inbox, discussions, and decisions for [OpenClaw Research] tasks
+  router.get('/openclaw/research-requests', async (req, res) => {
+    const requests = [];
+    const inboxDir = path.join(sharedDir, 'inbox');
+    const decisionsDir = path.join(sharedDir, 'decisions');
+    const discussionsDir = path.join(sharedDir, 'discussions');
+    const archiveDir = path.join(sharedDir, 'archive');
+
+    const PREFIX = '[OpenClaw Research]';
+
+    // Helper to determine phase of a task
+    async function getTaskPhase(taskId) {
+      // Check decisions first (most progressed)
+      const resultFile = path.join(decisionsDir, `${taskId}_result.json`);
+      const decisionFile = path.join(decisionsDir, `${taskId}.json`);
+      const result = await readJson(resultFile);
+      if (result) return { phase: 'completed', result };
+      const decision = await readJson(decisionFile);
+      if (decision) return { phase: 'decided', decision };
+
+      // Check discussions
+      const statusFile = path.join(discussionsDir, taskId, 'status.json');
+      const status = await readJson(statusFile);
+      if (status) return { phase: 'discussing', discussion_status: status };
+
+      // Check archive
+      const archiveTaskDir = path.join(archiveDir, taskId);
+      const archiveDecision = await readJson(path.join(archiveTaskDir, `${taskId}.json`));
+      if (archiveDecision) return { phase: 'archived', decision: archiveDecision };
+
+      return { phase: 'inbox' };
+    }
+
+    // Scan inbox for pending research requests
+    const inboxFiles = await listJsonFiles(inboxDir);
+    for (const f of inboxFiles) {
+      const task = await readJson(path.join(inboxDir, f));
+      if (!task || !task.title || !task.title.startsWith(PREFIX)) continue;
+      const phaseInfo = await getTaskPhase(task.id);
+      requests.push({ ...task, ...phaseInfo });
+    }
+
+    // Scan decisions for completed/decided research requests
+    const decisionFiles = await listJsonFiles(decisionsDir);
+    const seenIds = new Set(requests.map(r => r.id));
+    for (const f of decisionFiles) {
+      if (f.endsWith('_result.json') || f.endsWith('_progress.jsonl') ||
+          f.endsWith('_history.json') || f.endsWith('_announce_progress.jsonl')) continue;
+      const decision = await readJson(path.join(decisionsDir, f));
+      if (!decision || !decision.title || !decision.title.startsWith(PREFIX)) continue;
+      const taskId = decision.task_id || f.replace('.json', '');
+      if (seenIds.has(taskId)) continue;
+      seenIds.add(taskId);
+      const resultFile = path.join(decisionsDir, `${taskId}_result.json`);
+      const result = await readJson(resultFile);
+      requests.push({
+        id: taskId,
+        title: decision.title,
+        description: decision.description || '',
+        priority: decision.priority || 'low',
+        source: 'openclaw',
+        request_type: decision.request_type || 'research',
+        created_at: decision.created_at || '',
+        phase: result ? 'completed' : 'decided',
+        decision,
+        result: result || undefined
+      });
+    }
+
+    // Scan archive
+    const archiveDirs = await listDirs(archiveDir);
+    for (const dirName of archiveDirs) {
+      if (seenIds.has(dirName)) continue;
+      const archiveDecision = await readJson(path.join(archiveDir, dirName, `${dirName}.json`));
+      if (!archiveDecision || !archiveDecision.title || !archiveDecision.title.startsWith(PREFIX)) continue;
+      seenIds.add(dirName);
+      const archiveResult = await readJson(path.join(archiveDir, dirName, `${dirName}_result.json`));
+      requests.push({
+        id: dirName,
+        title: archiveDecision.title,
+        description: archiveDecision.description || '',
+        priority: archiveDecision.priority || 'low',
+        source: 'openclaw',
+        request_type: archiveDecision.request_type || 'research',
+        created_at: archiveDecision.created_at || '',
+        phase: 'archived',
+        decision: archiveDecision,
+        result: archiveResult || undefined
+      });
+    }
+
+    // Sort by created_at descending
+    requests.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    res.json(requests);
   });
 
   // ===== Legacy Endpoints (kept during parallel operation period) =====

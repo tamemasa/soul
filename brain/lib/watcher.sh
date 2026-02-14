@@ -430,10 +430,11 @@ check_openclaw_research_requests() {
     [[ "${status}" == "pending" ]] || continue
 
     # Read and validate request content
-    local req_type title description
+    local req_type title description reply_to
     req_type=$(jq -r '.type // ""' "${request_file}" 2>/dev/null)
     title=$(jq -r '.title // ""' "${request_file}" 2>/dev/null)
     description=$(jq -r '.description // ""' "${request_file}" 2>/dev/null)
+    reply_to=$(jq -r '.reply_to // ""' "${request_file}" 2>/dev/null)
 
     # Validate type (research/design only)
     case "${req_type}" in
@@ -520,6 +521,7 @@ check_openclaw_research_requests() {
       --arg desc "${description}" \
       --arg req_type "${req_type}" \
       --arg created "${now_ts}" \
+      --arg reply_to "${reply_to}" \
       '{
         id: $id,
         type: "task",
@@ -530,7 +532,7 @@ check_openclaw_research_requests() {
         request_type: $req_type,
         created_at: $created,
         status: "pending"
-      }')
+      } | if $reply_to != "" then . + {reply_to: $reply_to} else . end')
 
     # Write task to inbox atomically
     local inbox_file="${SHARED_DIR}/inbox/${task_id}.json"
@@ -613,6 +615,22 @@ _notify_research_result_line() {
   local line_token="${LINE_CHANNEL_ACCESS_TOKEN:-}"
   local owner_line_id="${OWNER_LINE_ID:-Ua78c97ab5f7b6090fc17656bc12f5c99}"
 
+  # Use reply_to from request file if available (group ID or user ID)
+  local reply_to
+  reply_to=$(jq -r '.reply_to // ""' "${request_file}" 2>/dev/null)
+  if [[ -z "${reply_to}" ]]; then
+    # Fallback: check the inbox task for reply_to
+    local inbox_task="${SHARED_DIR}/inbox/${task_id}.json"
+    reply_to=$(jq -r '.reply_to // ""' "${inbox_task}" 2>/dev/null)
+  fi
+  if [[ -z "${reply_to}" ]]; then
+    # Fallback: check the discussion task.json for reply_to
+    local disc_task="${SHARED_DIR}/discussions/${task_id}/task.json"
+    reply_to=$(jq -r '.reply_to // ""' "${disc_task}" 2>/dev/null)
+  fi
+  # Use reply_to if available, otherwise fall back to owner DM
+  local destination="${reply_to:-${owner_line_id}}"
+
   if [[ -z "${line_token}" ]]; then
     log "WARN: LINE_CHANNEL_ACCESS_TOKEN not set, skipping research result notification"
     return 0
@@ -660,7 +678,7 @@ ${summary}
 
   local payload
   payload=$(jq -n \
-    --arg to "${owner_line_id}" \
+    --arg to "${destination}" \
     --arg text "${message}" \
     '{
       to: $to,
@@ -683,7 +701,7 @@ ${summary}
   }
 
   if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
-    log "Research result notification sent via LINE (HTTP ${http_code}) for task ${task_id}"
+    log "Research result notification sent via LINE (HTTP ${http_code}, dest=${destination}) for task ${task_id}"
     rm -f "${response_body}"
     return 0
   else

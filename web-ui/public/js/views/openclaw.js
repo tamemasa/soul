@@ -6,12 +6,13 @@ let currentFilter = 'all'; // all, policy, security, integrity
 export async function renderOpenClaw(app) {
   app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
-  const [statusData, alerts, pendingActions, remediation, integrity] = await Promise.all([
+  const [statusData, alerts, pendingActions, remediation, integrity, researchRequests] = await Promise.all([
     fetch('/api/openclaw/status').then(r => r.json()),
     fetch('/api/openclaw/alerts?limit=30').then(r => r.json()),
     fetch('/api/openclaw/pending-actions').then(r => r.json()),
     fetch('/api/openclaw/remediation?limit=20').then(r => r.json()),
-    fetch('/api/openclaw/integrity').then(r => r.json()).catch(() => ({ status: 'unknown' }))
+    fetch('/api/openclaw/integrity').then(r => r.json()).catch(() => ({ status: 'unknown' })),
+    fetch('/api/openclaw/research-requests').then(r => r.json()).catch(() => [])
   ]);
 
   const state = statusData.state || {};
@@ -136,6 +137,29 @@ export async function renderOpenClaw(app) {
         </div>
       `).join('')}
     ` : ''}
+
+    <!-- Research Requests -->
+    <div class="section-label">Research Requests (${researchRequests.length})</div>
+    ${researchRequests.length > 0 ? researchRequests.map(r => `
+      <div class="card" style="border-left:3px solid ${researchPhaseBorderColor(r.phase)}; margin-bottom:8px;">
+        <div class="card-header">
+          <span class="card-title">${escapeHtml((r.title || '').replace('[OpenClaw Research] ', ''))}</span>
+          <span class="badge badge-status badge-${researchPhaseBadge(r.phase)}">${r.phase}</span>
+          ${r.request_type ? `<span class="badge badge-status">${r.request_type}</span>` : ''}
+        </div>
+        <div class="text-sm text-dim" style="margin:4px 0;">${escapeHtml(truncate(r.description || '', 150))}</div>
+        <div class="text-sm text-dim" style="display:flex; gap:12px;">
+          <span>${formatTime(r.created_at)}</span>
+          ${r.id ? `<a href="#/discussions/${r.id}" style="color:var(--primary);">詳細</a>` : ''}
+        </div>
+        ${r.result && r.result.summary ? `
+          <div style="margin-top:8px; padding:8px; background:var(--bg-secondary); border-radius:4px;">
+            <div class="text-sm" style="font-weight:600; margin-bottom:4px;">結果</div>
+            <div class="text-sm">${escapeHtml(truncate(r.result.summary || r.result.result || '', 300))}</div>
+          </div>
+        ` : ''}
+      </div>
+    `).join('') : '<div class="empty-state">No research requests</div>'}
   `;
 }
 
@@ -215,4 +239,29 @@ function formatTime(ts) {
 
 function escapeHtml(str) {
   return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function truncate(str, maxLen) {
+  if (!str || str.length <= maxLen) return str || '';
+  return str.slice(0, maxLen) + '...';
+}
+
+function researchPhaseBorderColor(phase) {
+  switch (phase) {
+    case 'completed': case 'archived': return 'var(--success, #22c55e)';
+    case 'decided': return 'var(--primary, #3b82f6)';
+    case 'discussing': return 'var(--warning, #f59e0b)';
+    case 'inbox': return 'var(--text-dim, #6b7280)';
+    default: return 'var(--text-dim)';
+  }
+}
+
+function researchPhaseBadge(phase) {
+  switch (phase) {
+    case 'completed': case 'archived': return 'approved';
+    case 'decided': return 'approved';
+    case 'discussing': return 'discussing';
+    case 'inbox': return 'discussing';
+    default: return 'discussing';
+  }
 }
