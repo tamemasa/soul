@@ -304,6 +304,9 @@ main_loop() {
     check_personality_external_trigger || log "WARN: check_personality_external_trigger error"
     check_personality_freeform_trigger || log "WARN: check_personality_freeform_trigger error"
 
+    # 12. Stuck task recovery (triceratops only)
+    check_stuck_tasks || log "WARN: check_stuck_tasks error"
+
     sleep "${POLL_INTERVAL}"
   done
 }

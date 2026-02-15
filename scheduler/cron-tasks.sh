@@ -14,6 +14,32 @@ log() {
   echo "${msg}" >> "${log_dir}/scheduler.log"
 }
 
+_notify_stuck() {
+  local task_id="$1" status="$2" since="$3" duration="$4" source_file="$5" action="$6"
+  local stuck_dir="${SHARED_DIR}/stuck_tasks"
+  local stuck_file="${stuck_dir}/${task_id}.json"
+
+  # 既に通知済みなら再通知しない
+  [[ -f "${stuck_file}" ]] && return 0
+
+  mkdir -p "${stuck_dir}"
+  local tmp
+  tmp=$(mktemp)
+  cat > "${tmp}" <<STUCK_EOF
+{
+  "task_id": "${task_id}",
+  "current_status": "${status}",
+  "stuck_since": "${since}",
+  "stuck_duration_seconds": ${duration},
+  "detected_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "source_file": "${source_file}",
+  "recommended_action": "${action}"
+}
+STUCK_EOF
+  mv "${tmp}" "${stuck_file}"
+  log "STUCK: ${task_id} stuck in '${status}' for ${duration}s → ${action}"
+}
+
 trigger_evaluation() {
   local cycle_id
   cycle_id="eval_$(date -u +%Y%m%d_%H%M%S)"
@@ -107,6 +133,19 @@ healthcheck() {
         ((alert_count++))
       fi
     fi
+
+    # Discussing > 2h (全体経過時間) → brain にエスカレート
+    local started_at
+    started_at=$(jq -r '.started_at // ""' "${status_file}" 2>/dev/null)
+    if [[ -n "${started_at}" && "${started_at}" != "null" ]]; then
+      local start_epoch
+      start_epoch=$(date -d "${started_at}" +%s 2>/dev/null || echo 0)
+      local total_age=$(( now - start_epoch ))
+      if [[ ${total_age} -gt 7200 ]]; then
+        _notify_stuck "${task_id}" "discussing" "${started_at}" "${total_age}" "${status_file}" "escalate_discussion"
+        ((alert_count++))
+      fi
+    fi
   done
 
   # --- 3. Decision ステータス確認 ---
@@ -173,6 +212,59 @@ healthcheck() {
           log "ALERT: ${task_id} executing for ${age}s, ${container_name} is running"
           ((alert_count++))
         fi
+      fi
+    fi
+
+    # --- 3.1 reviewing/remediating/announced/pending_announcement スタック検出 ---
+
+    # Reviewing > 10min
+    if [[ "${dec_status}" == "reviewing" ]]; then
+      local review_since
+      review_since=$(jq -r '.executed_at // .decided_at' "${decision_file}")
+      local review_epoch
+      review_epoch=$(date -d "${review_since}" +%s 2>/dev/null || echo 0)
+      local age=$(( now - review_epoch ))
+      if [[ ${age} -gt 600 ]]; then
+        _notify_stuck "${task_id}" "reviewing" "${review_since}" "${age}" "${decision_file}" "retry_review"
+        ((alert_count++))
+      fi
+    fi
+
+    # Remediating > 30min
+    if [[ "${dec_status}" == "remediating" ]]; then
+      local remediate_since
+      remediate_since=$(jq -r '.review_completed_at // .executed_at // .decided_at' "${decision_file}")
+      local remediate_epoch
+      remediate_epoch=$(date -d "${remediate_since}" +%s 2>/dev/null || echo 0)
+      local age=$(( now - remediate_epoch ))
+      if [[ ${age} -gt 1800 ]]; then
+        _notify_stuck "${task_id}" "remediating" "${remediate_since}" "${age}" "${decision_file}" "retry_remediation"
+        ((alert_count++))
+      fi
+    fi
+
+    # pending_announcement > 5min
+    if [[ "${dec_status}" == "pending_announcement" ]]; then
+      decided_at=$(jq -r '.decided_at' "${decision_file}")
+      local pa_epoch
+      pa_epoch=$(date -d "${decided_at}" +%s 2>/dev/null || echo 0)
+      local age=$(( now - pa_epoch ))
+      if [[ ${age} -gt 300 ]]; then
+        _notify_stuck "${task_id}" "pending_announcement" "${decided_at}" "${age}" "${decision_file}" "retry_announcement"
+        ((alert_count++))
+      fi
+    fi
+
+    # announced > 5min
+    if [[ "${dec_status}" == "announced" ]]; then
+      local announced_at
+      announced_at=$(jq -r '.announcement.announced_at // .decided_at' "${decision_file}")
+      local announced_epoch
+      announced_epoch=$(date -d "${announced_at}" +%s 2>/dev/null || echo 0)
+      local age=$(( now - announced_epoch ))
+      if [[ ${age} -gt 300 ]]; then
+        _notify_stuck "${task_id}" "announced" "${announced_at}" "${age}" "${decision_file}" "retry_execution"
+        ((alert_count++))
       fi
     fi
   done
@@ -264,6 +356,182 @@ EOF
   log "Personality improvement: Daily 12:30 trigger created"
 }
 
+cleanup_archive_dirs() {
+  local archive_dir="${SHARED_DIR}/archive"
+  local cutoff_epoch
+  cutoff_epoch=$(date -d "90 days ago" +%s)
+  local deleted=0
+
+  # 1. Monthly dirs (YYYY-MM) older than 90 days
+  if [[ -d "${archive_dir}" ]]; then
+    for month_dir in "${archive_dir}"/????-??; do
+      [[ -d "${month_dir}" ]] || continue
+      local dir_name
+      dir_name=$(basename "${month_dir}")
+      local last_day_epoch
+      last_day_epoch=$(date -d "${dir_name}-01 +1 month -1 day" +%s 2>/dev/null) || continue
+      if [[ ${last_day_epoch} -lt ${cutoff_epoch} ]]; then
+        local count
+        count=$(find "${month_dir}" -maxdepth 1 -mindepth 1 -type d | wc -l)
+        rm -rf "${month_dir}"
+        deleted=$((deleted + count))
+        log "[CLEANUP] archive monthly dir removed: ${dir_name} (${count} tasks)"
+      fi
+    done
+  fi
+
+  # 2. Evaluation archives (YYYY-MM monthly dirs under evaluations/)
+  local eval_archive="${archive_dir}/evaluations"
+  if [[ -d "${eval_archive}" ]]; then
+    for month_dir in "${eval_archive}"/????-??; do
+      [[ -d "${month_dir}" ]] || continue
+      local dir_name
+      dir_name=$(basename "${month_dir}")
+      local last_day_epoch
+      last_day_epoch=$(date -d "${dir_name}-01 +1 month -1 day" +%s 2>/dev/null) || continue
+      if [[ ${last_day_epoch} -lt ${cutoff_epoch} ]]; then
+        local count
+        count=$(find "${month_dir}" -maxdepth 1 -mindepth 1 | wc -l)
+        rm -rf "${month_dir}"
+        deleted=$((deleted + count))
+        log "[CLEANUP] archive/evaluations monthly dir removed: ${dir_name} (${count} entries)"
+      fi
+    done
+  fi
+
+  # 3. Trim index.jsonl (remove entries older than 90 days)
+  local index_file="${archive_dir}/index.jsonl"
+  if [[ -f "${index_file}" ]]; then
+    local before_count
+    before_count=$(wc -l < "${index_file}")
+    local tmp
+    tmp=$(mktemp)
+    while IFS= read -r line; do
+      local archived_at
+      archived_at=$(echo "${line}" | jq -r '.archived_at // ""' 2>/dev/null)
+      if [[ -z "${archived_at}" ]]; then
+        echo "${line}" >> "${tmp}"
+        continue
+      fi
+      local entry_epoch
+      entry_epoch=$(date -d "${archived_at}" +%s 2>/dev/null || echo 0)
+      if [[ ${entry_epoch} -ge ${cutoff_epoch} ]]; then
+        echo "${line}" >> "${tmp}"
+      fi
+    done < "${index_file}"
+    mv "${tmp}" "${index_file}"
+    local after_count
+    after_count=$(wc -l < "${index_file}")
+    local trimmed=$((before_count - after_count))
+    if [[ ${trimmed} -gt 0 ]]; then
+      log "[CLEANUP] archive/index.jsonl trimmed: ${trimmed} entries removed (${before_count} -> ${after_count})"
+    fi
+  fi
+
+  log "[CLEANUP] cleanup_archive_dirs completed: ${deleted} items removed"
+}
+
+cleanup_subdirectory_archives() {
+  local deleted=0
+
+  # alerts/archive: 30 days
+  local dir="${SHARED_DIR}/alerts/archive"
+  if [[ -d "${dir}" ]]; then
+    local count
+    count=$(find "${dir}" -maxdepth 1 -type f -name "*.json" -mtime +30 | wc -l)
+    find "${dir}" -maxdepth 1 -type f -name "*.json" -mtime +30 -delete
+    if [[ ${count} -gt 0 ]]; then
+      log "[CLEANUP] alerts/archive: ${count} files deleted (>30 days)"
+      deleted=$((deleted + count))
+    fi
+  fi
+
+  # rebuild_requests/archive: 7 days
+  dir="${SHARED_DIR}/rebuild_requests/archive"
+  if [[ -d "${dir}" ]]; then
+    local count
+    count=$(find "${dir}" -maxdepth 1 -type f -name "*.json" -mtime +7 | wc -l)
+    find "${dir}" -maxdepth 1 -type f -name "*.json" -mtime +7 -delete
+    if [[ ${count} -gt 0 ]]; then
+      log "[CLEANUP] rebuild_requests/archive: ${count} files deleted (>7 days)"
+      deleted=$((deleted + count))
+    fi
+  fi
+
+  # personality_improvement/archive: 30 days
+  dir="${SHARED_DIR}/personality_improvement/archive"
+  if [[ -d "${dir}" ]]; then
+    local count
+    count=$(find "${dir}" -maxdepth 1 -type f -name "*.json" -mtime +30 | wc -l)
+    find "${dir}" -maxdepth 1 -type f -name "*.json" -mtime +30 -delete
+    if [[ ${count} -gt 0 ]]; then
+      log "[CLEANUP] personality_improvement/archive: ${count} files deleted (>30 days)"
+      deleted=$((deleted + count))
+    fi
+  fi
+
+  # workspace/archive: 30 days
+  dir="${SHARED_DIR}/workspace/archive"
+  if [[ -d "${dir}" ]]; then
+    local count
+    count=$(find "${dir}" -maxdepth 1 -type f -mtime +30 | wc -l)
+    find "${dir}" -maxdepth 1 -type f -mtime +30 -delete
+    if [[ ${count} -gt 0 ]]; then
+      log "[CLEANUP] workspace/archive: ${count} files deleted (>30 days)"
+      deleted=$((deleted + count))
+    fi
+  fi
+
+  # monitoring/reports: 90 days
+  dir="${SHARED_DIR}/monitoring/reports"
+  if [[ -d "${dir}" ]]; then
+    local count
+    count=$(find "${dir}" -maxdepth 1 -type f -name "*.json" -mtime +90 | wc -l)
+    find "${dir}" -maxdepth 1 -type f -name "*.json" -mtime +90 -delete
+    if [[ ${count} -gt 0 ]]; then
+      log "[CLEANUP] monitoring/reports: ${count} files deleted (>90 days)"
+      deleted=$((deleted + count))
+    fi
+  fi
+
+  log "[CLEANUP] cleanup_subdirectory_archives completed: ${deleted} items removed"
+}
+
+rotate_jsonl_files() {
+  local max_lines=1000
+  local rotated=0
+
+  # token_usage.jsonl
+  local file="${SHARED_DIR}/host_metrics/token_usage.jsonl"
+  if [[ -f "${file}" ]]; then
+    local lines
+    lines=$(wc -l < "${file}")
+    if [[ ${lines} -gt ${max_lines} ]]; then
+      local tmp
+      tmp=$(mktemp)
+      tail -n "${max_lines}" "${file}" > "${tmp}" && mv "${tmp}" "${file}"
+      log "[CLEANUP] token_usage.jsonl rotated: ${lines} -> ${max_lines} lines"
+      ((rotated++))
+    fi
+  fi
+
+  # monitoring/alerts.jsonl
+  file="${SHARED_DIR}/monitoring/alerts.jsonl"
+  if [[ -f "${file}" ]]; then
+    local lines
+    lines=$(wc -l < "${file}")
+    if [[ ${lines} -gt ${max_lines} ]]; then
+      local tmp
+      tmp=$(mktemp)
+      tail -n "${max_lines}" "${file}" > "${tmp}" && mv "${tmp}" "${file}"
+      log "[CLEANUP] monitoring/alerts.jsonl rotated: ${lines} -> ${max_lines} lines"
+      ((rotated++))
+    fi
+  fi
+
+  log "[CLEANUP] rotate_jsonl_files completed: ${rotated} files rotated"
+}
+
 case "${ACTION}" in
   evaluation)
     trigger_evaluation
@@ -271,6 +539,9 @@ case "${ACTION}" in
   cleanup)
     cleanup_old_logs
     archive_completed_tasks
+    cleanup_archive_dirs
+    cleanup_subdirectory_archives
+    rotate_jsonl_files
     ;;
   healthcheck)
     healthcheck

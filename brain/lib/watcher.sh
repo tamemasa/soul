@@ -722,3 +722,157 @@ check_evaluation_requests() {
     fi
   done
 }
+
+# --- Stuck task recovery (triceratops only) ---
+
+check_stuck_tasks() {
+  # Triceratops only (executor/chairperson)
+  [[ "${NODE_NAME}" == "triceratops" ]] || return 0
+
+  local stuck_dir="${SHARED_DIR}/stuck_tasks"
+  [[ -d "${stuck_dir}" ]] || return 0
+
+  for stuck_file in "${stuck_dir}"/*.json; do
+    [[ -f "${stuck_file}" ]] || continue
+
+    local stuck_data task_id current_status recommended_action source_file
+    stuck_data=$(jq -r '[.task_id, .current_status, .recommended_action, .source_file] | @tsv' "${stuck_file}" 2>/dev/null) || continue
+    task_id=$(echo "${stuck_data}" | cut -f1)
+    current_status=$(echo "${stuck_data}" | cut -f2)
+    recommended_action=$(echo "${stuck_data}" | cut -f3)
+    source_file=$(echo "${stuck_data}" | cut -f4)
+
+    # ソースファイルが存在しない場合は通知を削除
+    if [[ ! -f "${source_file}" ]]; then
+      log "STUCK_RECOVERY: ${task_id} source file gone, removing notification"
+      rm -f "${stuck_file}"
+      continue
+    fi
+
+    # 現在のステータスが変わっていれば既に解決済み
+    local actual_status
+    actual_status=$(jq -r '.status' "${source_file}" 2>/dev/null)
+    if [[ "${actual_status}" != "${current_status}" ]]; then
+      log "STUCK_RECOVERY: ${task_id} status changed (${current_status}→${actual_status}), resolved"
+      rm -f "${stuck_file}"
+      continue
+    fi
+
+    log "STUCK_RECOVERY: Handling ${task_id} (status=${current_status}, action=${recommended_action})"
+
+    case "${recommended_action}" in
+      retry_review)
+        # reviewingステータスのまま → panda次ポーリングで再処理される
+        log "STUCK_RECOVERY: ${task_id} review stuck, panda will retry on next poll"
+        rm -f "${stuck_file}"
+        ;;
+      retry_remediation)
+        # remediatingステータスのまま → executorが再処理
+        log "STUCK_RECOVERY: ${task_id} remediation stuck, retrying"
+        remediate_execution "${source_file}"
+        rm -f "${stuck_file}"
+        ;;
+      retry_announcement)
+        # pending_announcement → announce_decision再実行
+        log "STUCK_RECOVERY: ${task_id} announcement stuck, retrying"
+        announce_decision "${source_file}"
+        rm -f "${stuck_file}"
+        ;;
+      retry_execution)
+        # announced → execute_decision再実行
+        log "STUCK_RECOVERY: ${task_id} execution stuck, retrying"
+        execute_decision "${source_file}"
+        rm -f "${stuck_file}"
+        ;;
+      escalate_discussion)
+        # 2h+膠着 → LLMで打開策判断
+        _escalate_stuck_discussion "${task_id}" "${source_file}" "${stuck_file}"
+        ;;
+      *)
+        log "STUCK_RECOVERY: Unknown action '${recommended_action}' for ${task_id}"
+        rm -f "${stuck_file}"
+        ;;
+    esac
+  done
+}
+
+_escalate_stuck_discussion() {
+  local task_id="$1" status_file="$2" stuck_file="$3"
+  local discussion_dir
+  discussion_dir=$(dirname "${status_file}")
+
+  # 議論履歴を収集
+  local history=""
+  local current_round
+  current_round=$(jq -r '.current_round' "${status_file}" 2>/dev/null)
+  for (( r=0; r<=current_round; r++ )); do
+    local round_dir="${discussion_dir}/round_${r}"
+    [[ -d "${round_dir}" ]] || continue
+    for node_file in "${round_dir}"/*.json; do
+      [[ -f "${node_file}" ]] || continue
+      local node_name
+      node_name=$(basename "${node_file}" .json)
+      local opinion
+      opinion=$(jq -r '.response // .opinion // ""' "${node_file}" 2>/dev/null)
+      history+="[Round ${r}] ${node_name}: ${opinion}
+
+"
+    done
+  done
+
+  local task_title
+  task_title=$(jq -r '.title // ""' "${discussion_dir}/task.json" 2>/dev/null)
+
+  local prompt="以下のタスク議論が2時間以上膠着しています。議長として打開策を決定してください。
+
+タスク: ${task_title} (${task_id})
+現在のラウンド: ${current_round}
+
+議論履歴:
+${history}
+
+以下のいずれかの行動を選び、JSON形式で回答してください:
+1. force_decide: 議長権限で最も合理的なアプローチを採用し決定する
+2. new_round: 新しい論点を提示して追加ラウンドを開始する
+3. reject: このタスクを却下する
+
+回答形式: {\"action\": \"force_decide|new_round|reject\", \"reason\": \"理由\", \"approach\": \"採用するアプローチ(force_decideの場合)\"}"
+
+  local response
+  response=$(invoke_claude "${prompt}" 2>/dev/null) || {
+    log "STUCK_RECOVERY: LLM escalation failed for ${task_id}"
+    rm -f "${stuck_file}"
+    return 1
+  }
+
+  local action
+  action=$(echo "${response}" | jq -r '.action // "unknown"' 2>/dev/null)
+
+  case "${action}" in
+    force_decide)
+      local approach
+      approach=$(echo "${response}" | jq -r '.approach // ""' 2>/dev/null)
+      log "STUCK_RECOVERY: Force deciding ${task_id}: ${approach}"
+      finalize_decision "${task_id}" "approved" "${approach}" "" "triceratops"
+      ;;
+    new_round)
+      local new_round=$(( current_round + 1 ))
+      local tmp
+      tmp=$(mktemp)
+      jq --argjson r "${new_round}" '.current_round = $r' "${status_file}" > "${tmp}" && mv "${tmp}" "${status_file}"
+      mkdir -p "${discussion_dir}/round_${new_round}"
+      log "STUCK_RECOVERY: Starting new round ${new_round} for ${task_id}"
+      ;;
+    reject)
+      local reason
+      reason=$(echo "${response}" | jq -r '.reason // "膠着タイムアウト"' 2>/dev/null)
+      log "STUCK_RECOVERY: Rejected stuck discussion ${task_id}"
+      finalize_decision "${task_id}" "rejected" "" "${reason}" "triceratops"
+      ;;
+    *)
+      log "STUCK_RECOVERY: LLM returned unknown action '${action}' for ${task_id}"
+      ;;
+  esac
+
+  rm -f "${stuck_file}"
+}
