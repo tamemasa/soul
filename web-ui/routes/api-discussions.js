@@ -43,6 +43,7 @@ module.exports = function (sharedDir) {
         : (decision?.status || discussionStatus);
       // Map decision statuses for display
       // pending_announcement, announced, executing, completed all come from decision file
+      const review = await readJson(path.join(sharedDir, 'decisions', `${d}_review.json`));
       discussions.push({
         task_id: d,
         title: task?.title || '(no title)',
@@ -53,7 +54,8 @@ module.exports = function (sharedDir) {
         decision_type: decision?.decision || null,
         executor: decision?.executor || null,
         completed_at: decision?.completed_at || result?.completed_at || null,
-        has_result: !!result?.result
+        has_result: !!result?.result,
+        review_verdict: review?.verdict || decision?.review_verdict || null
       });
     }
 
@@ -250,16 +252,24 @@ module.exports = function (sharedDir) {
       const prevDecision = await readJson(decisionFile);
       const prevResult = await readJson(resultFile);
       if (prevDecision) {
+        const reviewFile = path.join(sharedDir, 'decisions', `${taskId}_review.json`);
+        const reviewHistoryFile = path.join(sharedDir, 'decisions', `${taskId}_review_history.json`);
+        const prevReview = await readJson(reviewFile);
+        const prevReviewHistory = await readJson(reviewHistoryFile) || [];
         const history = await readJson(historyFile) || [];
-        history.push({ decision: prevDecision, result: prevResult || null });
+        history.push({ decision: prevDecision, result: prevResult || null, review: prevReview || null, reviewHistory: prevReviewHistory.length > 0 ? prevReviewHistory : undefined });
         await writeJsonAtomic(historyFile, history);
-        // Remove stale result/progress from previous cycle
+        // Remove stale result/progress/review from previous cycle
         const progressFile = path.join(sharedDir, 'decisions', `${taskId}_progress.jsonl`);
         const announceProgressFile = path.join(sharedDir, 'decisions', `${taskId}_announce_progress.jsonl`);
+        const preremediationFile = path.join(sharedDir, 'decisions', `${taskId}_progress_preremediation.jsonl`);
         await fs.unlink(decisionFile).catch(() => {});
         await fs.unlink(resultFile).catch(() => {});
         await fs.unlink(progressFile).catch(() => {});
         await fs.unlink(announceProgressFile).catch(() => {});
+        await fs.unlink(reviewFile).catch(() => {});
+        await fs.unlink(reviewHistoryFile).catch(() => {});
+        await fs.unlink(preremediationFile).catch(() => {});
       }
 
       const nextRound = (status.current_round || 1) + 1;
@@ -285,8 +295,12 @@ module.exports = function (sharedDir) {
       const prevDecision = await readJson(decisionFile);
       const prevResult = await readJson(resultFile);
       if (prevDecision) {
+        const reviewFile2 = path.join(sharedDir, 'decisions', `${taskId}_review.json`);
+        const reviewHistoryFile2 = path.join(sharedDir, 'decisions', `${taskId}_review_history.json`);
+        const prevReview2 = await readJson(reviewFile2);
+        const prevReviewHistory2 = await readJson(reviewHistoryFile2) || [];
         const history = await readJson(historyFile) || [];
-        history.push({ decision: prevDecision, result: prevResult || null });
+        history.push({ decision: prevDecision, result: prevResult || null, review: prevReview2 || null, reviewHistory: prevReviewHistory2.length > 0 ? prevReviewHistory2 : undefined });
         await writeJsonAtomic(historyFile, history);
       }
 
@@ -308,10 +322,16 @@ module.exports = function (sharedDir) {
       };
       await writeJsonAtomic(decisionFile, newDecision);
 
-      // Remove stale result/progress from previous execution cycle
+      // Remove stale result/progress/review from previous execution cycle
       const progressFile = path.join(sharedDir, 'decisions', `${taskId}_progress.jsonl`);
+      const reviewFileCleanup = path.join(sharedDir, 'decisions', `${taskId}_review.json`);
+      const reviewHistoryCleanup = path.join(sharedDir, 'decisions', `${taskId}_review_history.json`);
+      const preremediationCleanup = path.join(sharedDir, 'decisions', `${taskId}_progress_preremediation.jsonl`);
       await fs.unlink(resultFile).catch(() => {});
       await fs.unlink(progressFile).catch(() => {});
+      await fs.unlink(reviewFileCleanup).catch(() => {});
+      await fs.unlink(reviewHistoryCleanup).catch(() => {});
+      await fs.unlink(preremediationCleanup).catch(() => {});
     }
 
     res.json(comment);

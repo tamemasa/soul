@@ -11,7 +11,7 @@ module.exports = function (sharedDir) {
     const decisions = [];
 
     for (const f of files) {
-      if (f.endsWith('_result.json')) continue;
+      if (f.endsWith('_result.json') || f.endsWith('_review.json') || f.endsWith('_review_history.json') || f.endsWith('_history.json') || f.endsWith('_progress.jsonl') || f.includes('_progress_') || f.includes('_announce_progress')) continue;
       const dec = await readJson(path.join(decDir, f));
       if (dec) decisions.push(dec);
     }
@@ -26,7 +26,9 @@ module.exports = function (sharedDir) {
     if (!decision) return res.status(404).json({ error: 'Decision not found' });
 
     const result = await readJson(path.join(decDir, `${taskId}_result.json`));
-    res.json({ ...decision, result: result?.result || null });
+    const review = await readJson(path.join(decDir, `${taskId}_review.json`));
+    const reviewHistory = await readJson(path.join(decDir, `${taskId}_review_history.json`)) || [];
+    res.json({ ...decision, result: result?.result || null, review: review || null, reviewHistory });
   });
 
   return router;

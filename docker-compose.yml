@@ -122,6 +122,8 @@ services:
     container_name: soul-openclaw
     env_file:
       - ./.env
+    environment:
+      - TZ=Asia/Tokyo
     volumes:
       - openclaw-data:/app/data
       - openclaw-home:/home/openclaw/.openclaw
@@ -148,9 +150,12 @@ services:
     build:
       context: ./worker/webhook-proxy
     container_name: soul-webhook-proxy
+    environment:
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
     volumes:
       - webhook-buffer:/webhook_buffer
       - shared:/shared
+      - openclaw-home:/openclaw:ro
     ports:
       - "${OPENCLAW_WEBHOOK_PORT:-8080}:8080"
     networks:

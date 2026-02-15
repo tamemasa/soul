@@ -4,19 +4,9 @@ import { voteBadge } from './vote-badge.js';
 const ALL_NODES = ['panda', 'gorilla', 'triceratops'];
 
 /**
- * Render a fully unified chronological timeline:
- *   Round 1 discussions → comments → Decision → Announcement → Execution
- *   (or across multiple rounds if consensus was not immediate)
- *
- * @param {Array}  rounds   - Array of { round, responses }
- * @param {Object} options
- * @param {Array}  options.comments
- * @param {boolean} options.isDiscussing
- * @param {number}  options.currentRound
- * @param {Object}  options.decision
- * @param {Object}  options.result
- * @param {boolean} options.isExecuting
- * @param {Array}   options.progress
+ * Render a fully chronological timeline where ALL events
+ * (individual discussion responses, comments, decisions, announcements,
+ * execution results, reviews, remediations) are sorted by timestamp.
  */
 export function renderTimeline(rounds, options = {}) {
   const {
@@ -31,113 +21,239 @@ export function renderTimeline(rounds, options = {}) {
     return '<p class="empty-state">No discussion rounds yet</p>';
   }
 
-  // Determine which history entry belongs to which final_round
-  const historyByRound = {};
-  for (const entry of history) {
-    const fr = entry.decision?.final_round ?? -1;
-    historyByRound[fr] = entry;
-  }
+  // Collect ALL events into a flat list with timestamps for sorting
+  const events = [];
 
-  const finalRound = decision?.final_round ?? Infinity;
-
-  // Build earliest response time for each round (for chronological cutoffs)
-  const roundEarliestTime = {};
+  // 1. Individual discussion responses (each node response is its own event)
   for (const round of (rounds || [])) {
-    const times = round.responses
-      .map(r => new Date(r.timestamp).getTime())
-      .filter(t => !isNaN(t));
-    roundEarliestTime[round.round] = times.length ? Math.min(...times) : 0;
-  }
-
-  // Collect all floating events: comments + unmatched history + unmatched current decision
-  // These are rendered chronologically between rounds
-  const floatingEvents = [];
-
-  for (const c of (comments || [])) {
-    floatingEvents.push({
-      type: 'comment', comment: c,
-      time: new Date(c.created_at).getTime()
-    });
-  }
-
-  for (const entry of history) {
-    const fr = entry.decision?.final_round ?? -1;
-    if (!(rounds || []).some(r => r.round === fr)) {
-      floatingEvents.push({
-        type: 'history', entry,
-        time: new Date(entry.decision?.decided_at || 0).getTime()
+    for (const r of round.responses) {
+      events.push({
+        type: 'response',
+        time: new Date(r.timestamp || 0).getTime(),
+        round: round.round,
+        response: r
       });
     }
   }
 
-  if (decision && finalRound !== Infinity && !(rounds || []).some(r => r.round === finalRound)) {
-    floatingEvents.push({
-      type: 'decision',
-      time: new Date(decision.decided_at || 0).getTime()
+  // 2. Pending nodes for current active round (rendered at the end, after all timed events)
+  // These don't have timestamps - they'll be appended after sorted events
+
+  // 3. Comments
+  for (const c of (comments || [])) {
+    events.push({
+      type: 'comment',
+      time: new Date(c.created_at || 0).getTime(),
+      comment: c
     });
   }
 
-  const typeOrder = { comment: 0, history: 1, decision: 2 };
-  floatingEvents.sort((a, b) => (a.time - b.time) || (typeOrder[a.type] - typeOrder[b.type]));
-
-  let floatingIdx = 0;
-
-  // Render all floating events whose timestamp is before cutoffTime
-  // If cutoffTime is null, render all remaining events
-  function renderFloatingBefore(cutoffTime) {
-    let out = '';
-    while (floatingIdx < floatingEvents.length) {
-      const ev = floatingEvents[floatingIdx];
-      if (cutoffTime && ev.time >= cutoffTime) break;
-      floatingIdx++;
-      if (ev.type === 'comment') {
-        out += renderCommentItems([ev.comment], taskId);
-      } else if (ev.type === 'history') {
-        out += renderDecisionItem(ev.entry.decision);
-        out += renderAnnouncementItem(ev.entry.decision);
-        out += renderExecutionItem(ev.entry.result, false, null, ev.entry.decision);
-      } else if (ev.type === 'decision') {
-        out += renderDecisionItem(decision);
-        out += renderAnnouncementItem(decision, isAnnouncing, announceProgress);
-        out += renderExecutionItem(result, isExecuting, progress, decision, previousAttempts);
-        out += renderReviewCycle(reviewHistory, review, isReviewing, remediationProgress, decision);
+  // 4. History entries (previous cycles: decision + announcement + execution + review)
+  for (const entry of history) {
+    if (entry.decision) {
+      events.push({
+        type: 'history_decision',
+        time: new Date(entry.decision.decided_at || 0).getTime(),
+        decision: entry.decision
+      });
+      if (entry.decision.announcement?.announced_at) {
+        events.push({
+          type: 'history_announcement',
+          time: new Date(entry.decision.announcement.announced_at || 0).getTime(),
+          decision: entry.decision
+        });
       }
     }
-    return out;
+    if (entry.result) {
+      events.push({
+        type: 'history_execution',
+        time: new Date(entry.result.completed_at || entry.decision?.decided_at || 0).getTime(),
+        result: entry.result,
+        decision: entry.decision
+      });
+    }
+    if (entry.review?.verdict) {
+      events.push({
+        type: 'history_review',
+        time: new Date(entry.review.reviewed_at || 0).getTime(),
+        review: entry.review
+      });
+    } else if (entry.decision?.review_verdict) {
+      // Fallback: reconstruct minimal review from decision metadata
+      events.push({
+        type: 'history_review',
+        time: new Date(entry.decision.completed_at || entry.decision.executed_at || 0).getTime(),
+        review: {
+          verdict: entry.decision.review_verdict,
+          reviewer: 'panda',
+          reviewed_at: entry.decision.completed_at || entry.decision.executed_at
+        }
+      });
+    }
   }
+
+  // 5. Current decision
+  if (decision) {
+    events.push({
+      type: 'decision',
+      time: new Date(decision.decided_at || 0).getTime(),
+      decision
+    });
+
+    // 6. Current announcement (completed)
+    if (decision.announcement?.announced_at && !isAnnouncing) {
+      events.push({
+        type: 'announcement',
+        time: new Date(decision.announcement.announced_at || 0).getTime(),
+        decision,
+        announceProgress
+      });
+    }
+  }
+
+  // 7. Previous execution attempts
+  for (const attempt of (previousAttempts || [])) {
+    events.push({
+      type: 'previous_attempt',
+      time: new Date(decision?.decided_at || 0).getTime() + (attempt.attempt + 1),
+      attempt,
+      decision
+    });
+  }
+
+  // 8. Current execution result (completed)
+  if (result?.result) {
+    events.push({
+      type: 'execution_result',
+      time: new Date(result.completed_at || 0).getTime(),
+      result,
+      progress,
+      decision,
+      previousAttempts
+    });
+  }
+
+  // 9. Review history (previous reviews within current cycle)
+  if (reviewHistory && reviewHistory.length > 0) {
+    for (let i = 0; i < reviewHistory.length; i++) {
+      events.push({
+        type: 'review',
+        time: new Date(reviewHistory[i].reviewed_at || 0).getTime(),
+        review: reviewHistory[i],
+        reviewNum: i + 1
+      });
+      // Remediation after each failed review
+      if (decision?.remediation_count || decision?.remediated) {
+        const remProg = (i === reviewHistory.length - 1) ? remediationProgress : null;
+        events.push({
+          type: 'remediation',
+          time: new Date(reviewHistory[i].reviewed_at || 0).getTime() + 1,
+          decision,
+          attempt: i + 1,
+          progress: remProg
+        });
+      }
+    }
+  }
+
+  // 10. Current review (completed)
+  if (review?.verdict) {
+    const reviewNum = (reviewHistory?.length > 0) ? (reviewHistory.length + 1) : 0;
+    events.push({
+      type: 'review',
+      time: new Date(review.reviewed_at || 0).getTime(),
+      review,
+      reviewNum
+    });
+  }
+
+  // Sort all events chronologically (stable sort preserves insertion order for same timestamp)
+  events.sort((a, b) => a.time - b.time);
 
   let html = '<div class="timeline">';
 
-  // Floating events before the first round
-  const firstRoundStart = (rounds || []).length > 0
-    ? (roundEarliestTime[(rounds || [])[0].round] || null)
-    : null;
-  html += renderFloatingBefore(firstRoundStart);
+  // Track which round labels we've already shown
+  const shownRoundLabels = new Set();
 
-  // Render each round + inline matched history/decision, then floating events
-  (rounds || []).forEach((round, i) => {
-    const respondedNodes = round.responses.map(r => r.node);
-    const isActive = round.round === currentRound && isDiscussing;
-    const pendingNodes = isActive
-      ? ALL_NODES.filter(n => !respondedNodes.includes(n))
-      : [];
+  // Render sorted events
+  for (const ev of events) {
+    switch (ev.type) {
+      case 'response': {
+        // Show round label as a separator when we encounter a new round
+        if (!shownRoundLabels.has(ev.round)) {
+          shownRoundLabels.add(ev.round);
+          html += `<div class="timeline-round-separator">Round ${ev.round}</div>`;
+        }
+        html += `<div class="timeline-item">${renderResponse(ev.response)}</div>`;
+        break;
+      }
+      case 'comment':
+        html += renderCommentItems([ev.comment], taskId);
+        break;
+      case 'history_decision':
+        html += renderDecisionItem(ev.decision);
+        break;
+      case 'history_announcement':
+        html += renderAnnouncementItem(ev.decision);
+        break;
+      case 'history_execution':
+        html += renderExecutionItem(ev.result, false, null, ev.decision);
+        break;
+      case 'history_review':
+        html += renderReviewItem(ev.review);
+        break;
+      case 'decision':
+        html += renderDecisionItem(ev.decision);
+        break;
+      case 'announcement':
+        html += renderAnnouncementItem(ev.decision, false, ev.announceProgress);
+        break;
+      case 'previous_attempt':
+        html += renderPreviousAttemptItem(ev.attempt);
+        break;
+      case 'execution_result':
+        html += renderExecutionItem(ev.result, false, ev.progress, ev.decision);
+        break;
+      case 'review':
+        html += renderReviewItem(ev.review, false, ev.reviewNum);
+        break;
+      case 'remediation':
+        html += renderRemediationItem(ev.decision, ev.attempt, ev.progress);
+        break;
+    }
+  }
 
-    html += `
-    <div class="timeline-item">
-      <div class="timeline-round">Round ${round.round}</div>
-      ${round.responses.map(r => renderResponse(r)).join('')}
-      ${pendingNodes.map(node => `
-        <div class="timeline-response timeline-response-pending">
-          <div class="response-header">
-            ${nodeBadge(node)}
-            <span class="pending-indicator">検討中…</span>
+  // Append live/pending states at the end (no timestamp - they're happening now)
+
+  // Pending discussion nodes (currently thinking)
+  if (isDiscussing) {
+    const respondedNodes = [];
+    for (const round of (rounds || [])) {
+      if (round.round === currentRound) {
+        for (const r of round.responses) respondedNodes.push(r.node);
+      }
+    }
+    const pendingNodes = ALL_NODES.filter(n => !respondedNodes.includes(n));
+    if (pendingNodes.length > 0) {
+      if (!shownRoundLabels.has(currentRound)) {
+        shownRoundLabels.add(currentRound);
+        html += `<div class="timeline-round-separator">Round ${currentRound}</div>`;
+      }
+      for (const node of pendingNodes) {
+        html += `
+        <div class="timeline-item">
+          <div class="timeline-response timeline-response-pending">
+            <div class="response-header">
+              ${nodeBadge(node)}
+              <span class="pending-indicator">検討中…</span>
+            </div>
           </div>
-        </div>
-      `).join('')}
-    </div>`;
+        </div>`;
+      }
+    }
 
-    // Show indicator when all nodes responded but decision not yet generated
-    if (isActive && pendingNodes.length === 0 && !decision) {
+    // Consensus check pending (all responded, no decision yet)
+    if (pendingNodes.length === 0 && !decision) {
       const isFinalRound = currentRound >= maxRounds;
       const label = isFinalRound ? '最終決定を生成中…' : '合意を確認中…';
       html += `
@@ -151,29 +267,59 @@ export function renderTimeline(rounds, options = {}) {
         </div>
       </div>`;
     }
+  }
 
-    // Insert history decision+execution if a previous cycle ended at this round
-    if (historyByRound[round.round]) {
-      const h = historyByRound[round.round];
-      html += renderDecisionItem(h.decision);
-      html += renderAnnouncementItem(h.decision);
-      html += renderExecutionItem(h.result, false, null, h.decision);
-      html += renderReviewItem(h.review);
-    }
+  // Live announcement progress
+  if (isAnnouncing) {
+    html += `
+    <div class="timeline-item timeline-announcement-item">
+      <div class="timeline-round">Announcement</div>
+      <div class="execution-progress" id="announce-progress">
+        <div class="execution-progress-header">
+          <span class="execution-progress-title">Announcement Progress</span>
+          ${nodeBadge('triceratops')}
+        </div>
+        <div class="progress-events" id="announce-progress-events">
+          <div class="progress-streaming"><span class="progress-streaming-dot"></span> Waiting for output...</div>
+        </div>
+      </div>
+    </div>`;
+  }
 
-    // Insert current decision + announcement + execution + review after the round where consensus was reached
-    if (round.round === finalRound) {
-      html += renderDecisionItem(decision);
-      html += renderAnnouncementItem(decision, isAnnouncing, announceProgress);
-      html += renderExecutionItem(result, isExecuting, progress, decision, previousAttempts);
-      html += renderReviewCycle(reviewHistory, review, isReviewing, remediationProgress, decision);
-    }
+  // Live execution progress
+  if (isExecuting) {
+    const retryCount = decision?.retry_count || 0;
+    const attemptLabel = retryCount > 0 ? ` (Attempt ${retryCount + 1})` : '';
+    html += `
+    <div class="timeline-item timeline-execution-item">
+      <div class="timeline-round">Execution${attemptLabel}</div>
+      <div class="execution-progress" id="execution-progress">
+        <div class="execution-progress-header">
+          <span class="execution-progress-title">Execution Progress${attemptLabel}</span>
+          ${nodeBadge(decision?.executor || 'panda')}
+        </div>
+        <div class="progress-events" id="progress-events">
+          <div class="progress-streaming"><span class="progress-streaming-dot"></span> Waiting for output...</div>
+        </div>
+      </div>
+    </div>`;
+  }
 
-    // Render floating events between this round and the next
-    const nextRound = (rounds || [])[i + 1];
-    const nextCutoff = nextRound ? (roundEarliestTime[nextRound.round] || null) : null;
-    html += renderFloatingBefore(nextCutoff);
-  });
+  // Live review in progress
+  if (isReviewing && !review?.verdict) {
+    const reviewNum = (reviewHistory?.length > 0) ? (reviewHistory.length + 1) : 0;
+    const reviewLabel = reviewNum > 0 ? `Review #${reviewNum}` : 'Review';
+    html += `
+    <div class="timeline-item timeline-review-item">
+      <div class="timeline-round">${reviewLabel}</div>
+      <div class="timeline-review-card">
+        <div class="response-header">
+          ${nodeBadge('panda')}
+          <span class="pending-indicator">レビュー中…</span>
+        </div>
+      </div>
+    </div>`;
+  }
 
   html += '</div>';
   return html;
@@ -197,25 +343,8 @@ function renderDecisionItem(decision) {
     </div>`;
 }
 
-// --- Announcement timeline item ---
+// --- Announcement timeline item (completed state only) ---
 function renderAnnouncementItem(decision, isAnnouncing = false, announceProgress = null) {
-  // Show progress while announcing
-  if (isAnnouncing) {
-    return `
-    <div class="timeline-item timeline-announcement-item">
-      <div class="timeline-round">Announcement</div>
-      <div class="execution-progress" id="announce-progress">
-        <div class="execution-progress-header">
-          <span class="execution-progress-title">Announcement Progress</span>
-          ${nodeBadge('triceratops')}
-        </div>
-        <div class="progress-events" id="announce-progress-events">
-          <div class="progress-streaming"><span class="progress-streaming-dot"></span> Waiting for output...</div>
-        </div>
-      </div>
-    </div>`;
-  }
-
   if (!decision?.announcement) return '';
   const a = decision.announcement;
 
@@ -284,82 +413,45 @@ function extractAnnouncementFromProgress(events) {
   return {};
 }
 
-// --- Execution timeline item ---
-function renderExecutionItem(result, isExecuting, progress, decision, previousAttempts = []) {
-  const hasPrevAttempts = previousAttempts && previousAttempts.length > 0;
-  if (!isExecuting && !result?.result && !(progress?.length) && !hasPrevAttempts) return '';
+// --- Execution timeline item (completed state only) ---
+function renderExecutionItem(result, isExecuting, progress, decision) {
+  if (!result?.result && !(progress?.length)) return '';
 
-  const retryCount = decision?.retry_count || 0;
-  const attemptLabel = retryCount > 0 ? ` (Attempt ${retryCount + 1})` : '';
   let inner = '';
+  // Show progress snapshot (execution details) if available
+  if (progress?.length) {
+    inner += renderProgressSnapshotInline(progress);
+  }
+  // Show final result summary if available
+  if (result?.result) {
+    inner += `
+    <div class="execution-result-box" style="border-left:none;margin-top:0;">
+      <div class="flex items-center gap-8 mb-4">
+        ${nodeBadge(result.executor || 'panda')}
+        <span class="text-dim text-sm" style="font-family:var(--font-mono)">${formatTime(result.completed_at)}</span>
+      </div>
+      <div class="result-content">${renderMarkdown(result.result)}</div>
+    </div>`;
+  }
 
-  // Show previous attempts as collapsed sections
-  if (hasPrevAttempts) {
-    for (const attempt of previousAttempts) {
-      inner += `
+  return `
+    <div class="timeline-item timeline-execution-item">
+      <div class="timeline-round">Execution</div>
+      ${inner}
+    </div>`;
+}
+
+// --- Previous execution attempt ---
+function renderPreviousAttemptItem(attempt) {
+  return `
+    <div class="timeline-item timeline-execution-item">
       <details class="previous-attempt">
         <summary class="previous-attempt-summary">Previous Attempt ${attempt.attempt + 1} (interrupted)</summary>
         <div class="previous-attempt-content">
           ${renderProgressSnapshotInline(attempt.events)}
         </div>
-      </details>`;
-    }
-  }
-
-  if (isExecuting) {
-    inner += `
-      <div class="execution-progress" id="execution-progress">
-        <div class="execution-progress-header">
-          <span class="execution-progress-title">Execution Progress${attemptLabel}</span>
-          ${nodeBadge(decision?.executor || 'panda')}
-        </div>
-        <div class="progress-events" id="progress-events">
-          <div class="progress-streaming"><span class="progress-streaming-dot"></span> Waiting for output...</div>
-        </div>
-      </div>`;
-  } else {
-    // Show progress snapshot (execution details) if available
-    if (progress?.length) {
-      inner += renderProgressSnapshotInline(progress);
-    }
-    // Show final result summary if available
-    if (result?.result) {
-      inner += `
-      <div class="execution-result-box" style="border-left:none;margin-top:0;">
-        <div class="flex items-center gap-8 mb-4">
-          ${nodeBadge(result.executor || 'panda')}
-          <span class="text-dim text-sm" style="font-family:var(--font-mono)">${formatTime(result.completed_at)}</span>
-        </div>
-        <div class="result-content">${renderMarkdown(result.result)}</div>
-      </div>`;
-    }
-  }
-
-  return `
-    <div class="timeline-item timeline-execution-item">
-      <div class="timeline-round">Execution${attemptLabel}</div>
-      ${inner}
+      </details>
     </div>`;
-}
-
-// --- Review cycle: history reviews → remediation → current review ---
-function renderReviewCycle(reviewHistory, review, isReviewing, remediationProgress, decision) {
-  let html = '';
-
-  // Render past review+remediation cycles from history
-  if (reviewHistory && reviewHistory.length > 0) {
-    for (let i = 0; i < reviewHistory.length; i++) {
-      html += renderReviewItem(reviewHistory[i], false, i + 1);
-      // Show remediation section after each failed review
-      html += renderRemediationItem(decision, i + 1, i === reviewHistory.length - 1 ? remediationProgress : null);
-    }
-  }
-
-  // Render current review (or reviewing state)
-  const reviewNum = (reviewHistory?.length || 0) + 1;
-  html += renderReviewItem(review, isReviewing, reviewHistory?.length > 0 ? reviewNum : 0);
-
-  return html;
 }
 
 // --- Remediation timeline item ---
@@ -384,22 +476,10 @@ function renderRemediationItem(decision, attempt, progress) {
     </div>`;
 }
 
-// --- Review timeline item ---
+// --- Review timeline item (completed state only) ---
 function renderReviewItem(review, isReviewing = false, reviewNum = 0) {
-  const reviewLabel = reviewNum > 0 ? `Review #${reviewNum}` : 'Review';
-  if (isReviewing && !review?.verdict) {
-    return `
-    <div class="timeline-item timeline-review-item">
-      <div class="timeline-round">${reviewLabel}</div>
-      <div class="timeline-review-card">
-        <div class="response-header">
-          ${nodeBadge('panda')}
-          <span class="pending-indicator">レビュー中…</span>
-        </div>
-      </div>
-    </div>`;
-  }
   if (!review?.verdict) return '';
+  const reviewLabel = reviewNum > 0 ? `Review #${reviewNum}` : 'Review';
 
   const isPassed = review.verdict === 'pass';
   const verdictClass = isPassed ? 'review-pass' : 'review-fail';

@@ -104,6 +104,7 @@ function renderMiniPipeline(d) {
     const detail = i === 0 ? `R${d.current_round}`
       : i === 1 && d.decision_type ? d.decision_type
       : i === 2 && d.executor ? d.executor
+      : i === 3 && d.review_verdict ? d.review_verdict
       : i === 3 && d.status === 'remediating' ? 'remediate'
       : '';
 

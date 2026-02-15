@@ -1,4 +1,5 @@
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 
@@ -13,6 +14,8 @@ const GRACE_PERIOD_MS = parseInt(process.env.UPSTREAM_GRACE_PERIOD_MS || "60000"
 const CONV_DIR = "/shared/openclaw/conversations";
 const PROXY_STARTED_AT = Date.now();
 const PROXY_FRESH_THRESHOLD_MS = 30000;
+const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
+const OPENCLAW_SESSIONS_DIR = "/openclaw/agents/main/sessions";
 
 let upstreamState = "UNKNOWN"; // UNKNOWN, DOWN, STARTING, READY
 let firstRespondAt = 0;
@@ -22,6 +25,48 @@ fs.mkdirSync(BUFFER_DIR, { recursive: true });
 
 // Ensure conversation log directory exists
 try { fs.mkdirSync(CONV_DIR, { recursive: true }); } catch { /* ignore */ }
+
+// ─── LINE Profile Cache ───
+
+const profileCache = new Map(); // userId → { displayName, cachedAt }
+const PROFILE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function fetchLineProfile(userId) {
+  return new Promise((resolve) => {
+    if (!LINE_TOKEN || !userId) return resolve(null);
+
+    const cached = profileCache.get(userId);
+    if (cached && Date.now() - cached.cachedAt < PROFILE_CACHE_TTL_MS) {
+      return resolve(cached.displayName);
+    }
+
+    const req = https.get(
+      {
+        hostname: "api.line.me",
+        path: `/v2/bot/profile/${userId}`,
+        headers: { Authorization: `Bearer ${LINE_TOKEN}` },
+        timeout: 5000,
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          try {
+            const data = JSON.parse(Buffer.concat(chunks).toString());
+            if (data.displayName) {
+              profileCache.set(userId, { displayName: data.displayName, cachedAt: Date.now() });
+              log(`Profile resolved: ${userId.slice(-8)} → ${data.displayName}`);
+              return resolve(data.displayName);
+            }
+          } catch {}
+          resolve(null);
+        });
+      }
+    );
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); resolve(null); });
+  });
+}
 
 // ─── LINE Webhook Conversation Logging ───
 
@@ -58,11 +103,6 @@ function extractContentFromEvent(event) {
   }
 }
 
-function extractUserFromSource(source) {
-  if (!source) return "unknown";
-  return source.userId ? source.userId.slice(-8) : "unknown";
-}
-
 function extractChannelFromSource(source) {
   if (!source) return "unknown";
   if (source.groupId) return `group_${source.groupId.slice(-8)}`;
@@ -70,7 +110,7 @@ function extractChannelFromSource(source) {
   return `dm_${(source.userId || "unknown").slice(-8)}`;
 }
 
-function logLineInbound(body) {
+async function logLineInbound(body) {
   try {
     let payload;
     try {
@@ -88,12 +128,21 @@ function logLineInbound(body) {
       const content = extractContentFromEvent(event);
       if (content === null) continue;
 
+      const userId = event.source ? event.source.userId : null;
+      let userName = userId ? userId.slice(-8) : "unknown";
+
+      // Try to resolve display name via LINE Profile API
+      if (userId && LINE_TOKEN) {
+        const displayName = await fetchLineProfile(userId);
+        if (displayName) userName = displayName;
+      }
+
       const entry = {
         timestamp: new Date(event.timestamp || Date.now()).toISOString(),
         platform: "line",
         direction: "inbound",
         channel: extractChannelFromSource(event.source),
-        user: extractUserFromSource(event.source),
+        user: userName,
         content,
         emotion_hint: estimateEmotionFromText(
           event.message && event.message.type === "text" ? event.message.text : null
@@ -111,6 +160,181 @@ function logLineInbound(body) {
     // NEVER let logging errors affect proxy operation
     log(`[warn] LINE log error (non-fatal): ${err.message}`);
   }
+}
+
+// ─── OpenClaw Outbound Message Watcher ───
+// Monitors OpenClaw session JSONL files for assistant responses and logs them
+
+// Map: localPath → { lastSize, channel, platform }
+const watchedSessions = new Map();
+
+function remapSessionPath(originalPath) {
+  // OpenClaw stores paths as /home/openclaw/.openclaw/... but we mount at /openclaw/
+  return originalPath.replace(/^\/home\/openclaw\/\.openclaw\//, "/openclaw/");
+}
+
+function discoverLineSessions() {
+  try {
+    const sessionsJson = path.join(OPENCLAW_SESSIONS_DIR, "sessions.json");
+    if (!fs.existsSync(sessionsJson)) return [];
+    const data = JSON.parse(fs.readFileSync(sessionsJson, "utf8"));
+    const sessions = [];
+    for (const [key, session] of Object.entries(data)) {
+      if (!session.sessionFile) continue;
+      const dc = session.deliveryContext || {};
+      const origin = session.origin || {};
+      const platform = dc.channel || origin.provider || session.lastChannel;
+      if (!platform) continue;
+
+      const localPath = remapSessionPath(session.sessionFile);
+      // Determine channel name from delivery context
+      let channel = "dm";
+      const to = dc.to || "";
+      if (to.includes("group:")) {
+        channel = `group_${to.split(":").pop().slice(-8)}`;
+      } else if (platform === "line" && to.startsWith("line:U")) {
+        channel = `dm_${to.split(":").pop().slice(-8)}`;
+      } else if (platform === "discord") {
+        channel = `channel_${to.split(":").pop().slice(-8)}`;
+      }
+
+      sessions.push({ localPath, platform, channel });
+    }
+    return sessions;
+  } catch {}
+  return [];
+}
+
+function extractOutboundMessages(content, afterTimestamp) {
+  const messages = [];
+  const lines = content.split("\n").filter((l) => l.trim());
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line);
+      const msg = obj.message;
+      if (!msg || msg.role !== "assistant" || msg.stopReason !== "stop") continue;
+      if (!obj.timestamp || obj.timestamp <= afterTimestamp) continue;
+
+      const texts = [];
+      for (const c of msg.content || []) {
+        if (c.type === "text") texts.push(c.text);
+      }
+      if (texts.length === 0) continue;
+
+      messages.push({
+        timestamp: obj.timestamp,
+        content: texts.join("\n"),
+      });
+    } catch {}
+  }
+  return messages;
+}
+
+// Track the latest outbound timestamp per platform to avoid duplicates
+const lastOutboundTs = { line: "", discord: "" };
+
+function pollOutboundMessages() {
+  try {
+    const sessions = discoverLineSessions();
+    for (const { localPath, platform, channel } of sessions) {
+      if (!fs.existsSync(localPath)) continue;
+
+      let currentSize;
+      try {
+        currentSize = fs.statSync(localPath).size;
+      } catch {
+        continue;
+      }
+
+      const watched = watchedSessions.get(localPath);
+      if (!watched) {
+        // First time seeing this session — record baseline, skip
+        watchedSessions.set(localPath, { lastSize: currentSize, channel, platform });
+        continue;
+      }
+
+      if (currentSize <= watched.lastSize) {
+        watched.lastSize = currentSize;
+        continue;
+      }
+
+      // Read only the new portion
+      const fd = fs.openSync(localPath, "r");
+      const newBytes = currentSize - watched.lastSize;
+      const buf = Buffer.alloc(newBytes);
+      fs.readSync(fd, buf, 0, newBytes, watched.lastSize);
+      fs.closeSync(fd);
+      watched.lastSize = currentSize;
+
+      const afterTs = lastOutboundTs[platform] || "";
+      const outboundMsgs = extractOutboundMessages(buf.toString("utf8"), afterTs);
+
+      if (outboundMsgs.length === 0) continue;
+
+      const logFile = path.join(CONV_DIR, `${platform}.jsonl`);
+      const logLines = [];
+      for (const m of outboundMsgs) {
+        const entry = {
+          timestamp: new Date(m.timestamp).toISOString(),
+          platform,
+          direction: "outbound",
+          channel,
+          user: "openclaw",
+          content: m.content,
+          emotion_hint: estimateOutboundEmotion(m.content),
+        };
+        logLines.push(JSON.stringify(entry));
+        lastOutboundTs[platform] = m.timestamp;
+      }
+      fs.appendFileSync(logFile, logLines.join("\n") + "\n");
+      log(`Logged ${outboundMsgs.length} ${platform} outbound message(s)`);
+    }
+  } catch (err) {
+    log(`[warn] Outbound watcher error (non-fatal): ${err.message}`);
+  }
+}
+
+function estimateOutboundEmotion(text) {
+  if (!text) return "neutral";
+  if (/ええやん|嬉しい|楽しい|ありがとう|おめでとう|笑|良い|いい|ナイス/i.test(text)) return "happy";
+  if (/心配|気をつけ|注意|まずい|問題|エラー/i.test(text)) return "concerned";
+  if (/調べ|確認|検討|ちょっと待|調査/i.test(text)) return "thinking";
+  if (/完了|成功|done|ok|できた/i.test(text)) return "satisfied";
+  return "neutral";
+}
+
+function initOutboundWatcher() {
+  // Load last outbound timestamps from existing logs
+  for (const platform of ["line", "discord"]) {
+    try {
+      const filePath = path.join(CONV_DIR, `${platform}.jsonl`);
+      if (!fs.existsSync(filePath)) continue;
+      const content = fs.readFileSync(filePath, "utf8");
+      const lines = content.split("\n").filter((l) => l.trim());
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const entry = JSON.parse(lines[i]);
+          if (entry.direction === "outbound" && entry.timestamp) {
+            lastOutboundTs[platform] = entry.timestamp;
+            break;
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  // Initialize session baselines
+  const sessions = discoverLineSessions();
+  for (const { localPath, platform, channel } of sessions) {
+    let size = 0;
+    try { size = fs.statSync(localPath).size; } catch {}
+    watchedSessions.set(localPath, { lastSize: size, channel, platform });
+    log(`Watching ${platform} session: ${path.basename(localPath)} (channel: ${channel})`);
+  }
+
+  // Poll every 3 seconds
+  setInterval(pollOutboundMessages, 3000);
+  log("Outbound message watcher started");
 }
 
 function log(msg) {
@@ -342,6 +566,11 @@ const server = http.createServer((req, res) => {
 server.listen(PROXY_PORT, () => {
   log(`Webhook proxy listening on :${PROXY_PORT} → ${UPSTREAM_HOST}:${UPSTREAM_PORT}`);
   log(`Upstream grace period: ${GRACE_PERIOD_MS}ms, probe interval: ${PROBE_INTERVAL_MS}ms`);
+  log(`LINE profile resolution: ${LINE_TOKEN ? "enabled" : "disabled (no token)"}`);
+  log(`Outbound watcher: ${fs.existsSync(OPENCLAW_SESSIONS_DIR) ? "enabled" : "disabled (no session dir)"}`);
+  if (fs.existsSync(OPENCLAW_SESSIONS_DIR)) {
+    initOutboundWatcher();
+  }
 });
 
 // Replay timer
