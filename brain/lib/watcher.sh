@@ -32,7 +32,8 @@ check_inbox() {
   done
 }
 
-check_pending_discussions() {
+# Unified: check_pending_discussions + check_consensus_needed in a single directory scan
+check_discussions_unified() {
   local discussions_dir="${SHARED_DIR}/discussions"
   for discussion_dir in "${discussions_dir}"/*/; do
     [[ -d "${discussion_dir}" ]] || continue
@@ -43,9 +44,12 @@ check_pending_discussions() {
 
     [[ -f "${status_file}" ]] || continue
 
+    # Single jq call to read both status and current_round
+    local status_data
+    status_data=$(jq -r '[.status, (.current_round | tostring)] | @tsv' "${status_file}" 2>/dev/null) || continue
     local status current_round
-    status=$(jq -r '.status' "${status_file}")
-    current_round=$(jq -r '.current_round' "${status_file}")
+    status=$(echo "${status_data}" | cut -f1)
+    current_round=$(echo "${status_data}" | cut -f2)
 
     # Skip completed or executing discussions
     if [[ "${status}" == "decided" || "${status}" == "executing" ]]; then
@@ -53,38 +57,19 @@ check_pending_discussions() {
     fi
 
     local round_dir="${discussion_dir}/round_${current_round}"
-    local my_response="${round_dir}/${NODE_NAME}.json"
 
-    # Skip if we already responded this round
-    if [[ -f "${my_response}" ]]; then
+    # Part 1: Check if we need to respond (was check_pending_discussions)
+    local my_response="${round_dir}/${NODE_NAME}.json"
+    if [[ ! -f "${my_response}" ]]; then
+      log "Responding to discussion ${task_id} round ${current_round}"
+      respond_to_discussion "${task_id}" "${current_round}"
+      # After responding, don't check consensus in the same cycle (let next poll pick it up)
       continue
     fi
 
-    log "Responding to discussion ${task_id} round ${current_round}"
-    respond_to_discussion "${task_id}" "${current_round}"
-  done
-}
-
-check_consensus_needed() {
-  local discussions_dir="${SHARED_DIR}/discussions"
-  for discussion_dir in "${discussions_dir}"/*/; do
-    [[ -d "${discussion_dir}" ]] || continue
-
-    local task_id
-    task_id=$(basename "${discussion_dir}")
-    local status_file="${discussion_dir}/status.json"
-
-    [[ -f "${status_file}" ]] || continue
-
-    local status current_round
-    status=$(jq -r '.status' "${status_file}")
-    current_round=$(jq -r '.current_round' "${status_file}")
-
+    # Part 2: Check if consensus is needed (was check_consensus_needed)
     [[ "${status}" == "discussing" ]] || continue
 
-    local round_dir="${discussion_dir}/round_${current_round}"
-
-    # Check if all nodes have responded
     local response_count=0
     for node in "${ALL_NODES[@]}"; do
       if [[ -f "${round_dir}/${node}.json" ]]; then
@@ -94,7 +79,6 @@ check_consensus_needed() {
 
     if [[ ${response_count} -eq ${#ALL_NODES[@]} ]]; then
       # Only triceratops runs consensus (as chairperson who renders final decisions)
-      # This prevents duplicate consensus checks
       if [[ "${NODE_NAME}" == "triceratops" ]]; then
         log "All nodes responded in round ${current_round} for ${task_id}, checking consensus"
         evaluate_consensus "${task_id}" "${current_round}"
@@ -103,10 +87,12 @@ check_consensus_needed() {
   done
 }
 
-check_pending_announcements() {
-  # Only triceratops handles announcements
-  [[ "${NODE_NAME}" == "triceratops" ]] || return 0
+# Legacy wrappers (kept for compatibility, now both delegate to unified)
+check_pending_discussions() { check_discussions_unified; }
+check_consensus_needed() { :; }  # No-op: handled by check_discussions_unified
 
+# Unified: check_pending_announcements + check_pending_decisions in a single directory scan
+check_decisions_unified() {
   local decisions_dir="${SHARED_DIR}/decisions"
   for decision_file in "${decisions_dir}"/*.json; do
     [[ -f "${decision_file}" ]] || continue
@@ -116,21 +102,22 @@ check_pending_announcements() {
     [[ "${decision_file}" != *_progress.jsonl ]] || continue
     [[ "${decision_file}" != *_announce_progress.jsonl ]] || continue
 
-    local decision_status
-    decision_status=$(jq -r '.status' "${decision_file}")
+    # Single jq call to read all needed fields at once
+    local decision_data
+    decision_data=$(jq -r '[.status, .task_id, (.executor // ""), (.execution_started_at // ""), (.announcement.announced_at // "")] | @tsv' "${decision_file}" 2>/dev/null) || continue
+    local decision_status task_id executor execution_started_at announced_at
+    decision_status=$(echo "${decision_data}" | cut -f1)
+    task_id=$(echo "${decision_data}" | cut -f2)
+    executor=$(echo "${decision_data}" | cut -f3)
+    execution_started_at=$(echo "${decision_data}" | cut -f4)
+    announced_at=$(echo "${decision_data}" | cut -f5)
 
-    # Pick up pending announcements
-    if [[ "${decision_status}" == "pending_announcement" ]]; then
-      local task_id
-      task_id=$(jq -r '.task_id' "${decision_file}")
+    # --- Announcement handling (triceratops only) ---
+    if [[ "${decision_status}" == "pending_announcement" && "${NODE_NAME}" == "triceratops" ]]; then
       log "Announcing decision for task: ${task_id}"
       announce_decision "${decision_file}"
-    # Handle stale announcing status (container restart recovery)
-    elif [[ "${decision_status}" == "announcing" ]]; then
-      local task_id announced_at
-      task_id=$(jq -r '.task_id' "${decision_file}")
-      announced_at=$(jq -r '.announcement.announced_at // ""' "${decision_file}")
-
+      continue
+    elif [[ "${decision_status}" == "announcing" && "${NODE_NAME}" == "triceratops" ]]; then
       # Check if already announced (has announced_at timestamp)
       if [[ -n "${announced_at}" ]]; then
         log "Task ${task_id} has announced_at but status is announcing, marking as announced"
@@ -139,42 +126,20 @@ check_pending_announcements() {
         jq '.status = "announced"' "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
         continue
       fi
-
       # Retry announcement if it was interrupted
       log "Retrying interrupted announcement for task: ${task_id}"
       announce_decision "${decision_file}"
+      continue
     fi
-  done
-}
 
-check_pending_decisions() {
-  local decisions_dir="${SHARED_DIR}/decisions"
-  for decision_file in "${decisions_dir}"/*.json; do
-    [[ -f "${decision_file}" ]] || continue
-    # Skip non-decision files
-    [[ "${decision_file}" != *_result.json ]] || continue
-    [[ "${decision_file}" != *_history.json ]] || continue
-    [[ "${decision_file}" != *_progress.jsonl ]] || continue
-    [[ "${decision_file}" != *_announce_progress.jsonl ]] || continue
-
-    local decision_status executor
-    decision_status=$(jq -r '.status' "${decision_file}")
-    executor=$(jq -r '.executor // ""' "${decision_file}")
-
-    # Execute announced decisions
+    # --- Execution handling ---
     if [[ "${decision_status}" == "announced" ]]; then
       if [[ -z "${executor}" || "${executor}" == "${NODE_NAME}" ]]; then
-        local task_id
-        task_id=$(jq -r '.task_id' "${decision_file}")
         log "Executing decision for task: ${task_id}"
         execute_decision "${decision_file}"
       fi
-    # Handle stale executing decisions (container restart recovery)
     elif [[ "${decision_status}" == "executing" ]]; then
       if [[ -z "${executor}" || "${executor}" == "${NODE_NAME}" ]]; then
-        local task_id execution_started_at
-        task_id=$(jq -r '.task_id' "${decision_file}")
-        execution_started_at=$(jq -r '.execution_started_at // ""' "${decision_file}")
 
         # Check if result file already exists (task completed but status not updated)
         local result_file="${decisions_dir}/${task_id}_result.json"
@@ -216,6 +181,10 @@ check_pending_decisions() {
   done
 }
 
+# Legacy wrappers (kept for compatibility, now both delegate to unified)
+check_pending_announcements() { check_decisions_unified; }
+check_pending_decisions() { :; }  # No-op: handled by check_decisions_unified
+
 check_openclaw_suggestions() {
   # Only triceratops picks up OpenClaw suggestions
   [[ "${NODE_NAME}" == "triceratops" ]] || return 0
@@ -234,11 +203,12 @@ check_openclaw_suggestions() {
     local approval_filename
     approval_filename=$(basename "${approval_file}")
 
-    # Read approval response
-    local suggestion_filename decision discord_user_id
-    suggestion_filename=$(jq -r '.suggestion_file // ""' "${approval_file}" 2>/dev/null)
-    decision=$(jq -r '.decision // ""' "${approval_file}" 2>/dev/null)
-    discord_user_id=$(jq -r '.discord_user_id // ""' "${approval_file}" 2>/dev/null)
+    # Read approval response (single jq call for all fields)
+    local approval_data suggestion_filename decision discord_user_id
+    approval_data=$(jq -r '[(.suggestion_file // ""), (.decision // ""), (.discord_user_id // "")] | @tsv' "${approval_file}" 2>/dev/null) || continue
+    suggestion_filename=$(printf '%s' "${approval_data}" | cut -f1)
+    decision=$(printf '%s' "${approval_data}" | cut -f2)
+    discord_user_id=$(printf '%s' "${approval_data}" | cut -f3)
 
     # Validate approval response
     if [[ -z "${suggestion_filename}" || -z "${decision}" || -z "${discord_user_id}" ]]; then
@@ -278,10 +248,15 @@ check_openclaw_suggestions() {
       continue
     fi
 
-    # Read and validate suggestion content
-    local title description
-    title=$(jq -r '.title // ""' "${suggestion_file}" 2>/dev/null)
-    description=$(jq -r '.description // ""' "${suggestion_file}" 2>/dev/null)
+    # Read and validate suggestion content (single jq call)
+    local suggestion_data title description
+    suggestion_data=$(jq -r '[(.title // ""), (.description // "")] | @tsv' "${suggestion_file}" 2>/dev/null) || {
+      log "OpenClaw suggestion ${suggestion_filename}: failed to parse, discarding"
+      rm -f "${approval_file}" "${suggestion_file}"
+      continue
+    }
+    title=$(printf '%s' "${suggestion_data}" | cut -f1)
+    description=$(printf '%s' "${suggestion_data}" | cut -f2)
 
     if [[ -z "${title}" ]]; then
       log "OpenClaw suggestion ${suggestion_filename}: missing title, discarding"
@@ -297,36 +272,25 @@ check_openclaw_suggestions() {
     local openclaw_title="[OpenClaw] ${title}"
     local duplicate_found=false
 
-    # Check inbox tasks
-    for existing_task in "${SHARED_DIR}/inbox"/*.json; do
-      [[ -f "${existing_task}" ]] || continue
-      local existing_title
-      existing_title=$(jq -r '.title // ""' "${existing_task}" 2>/dev/null)
-      if [[ "${existing_title}" == "${openclaw_title}" ]]; then
-        duplicate_found=true
-        break
-      fi
-    done
+    # Batch extract all inbox titles with single jq call, then grep for match
+    local inbox_titles
+    inbox_titles=$(cat "${SHARED_DIR}/inbox"/*.json 2>/dev/null | jq -r '.title // empty' 2>/dev/null || echo '')
+    if echo "${inbox_titles}" | grep -qxF "${openclaw_title}"; then
+      duplicate_found=true
+    fi
 
-    # Check decisions (in-progress, executing, completed, etc.)
+    # Batch extract all decision titles (filter auxiliary files via glob, single jq call)
     if [[ "${duplicate_found}" == "false" ]]; then
-      for existing_decision in "${SHARED_DIR}/decisions"/*.json; do
-        [[ -f "${existing_decision}" ]] || continue
-        # Skip auxiliary files
-        local dec_basename
-        dec_basename=$(basename "${existing_decision}")
-        [[ "${dec_basename}" != *_result.json ]] || continue
-        [[ "${dec_basename}" != *_history.json ]] || continue
-        [[ "${dec_basename}" != *_progress.jsonl ]] || continue
-        [[ "${dec_basename}" != *_announce_progress.jsonl ]] || continue
-
-        local existing_title
-        existing_title=$(jq -r '.title // ""' "${existing_decision}" 2>/dev/null)
-        if [[ "${existing_title}" == "${openclaw_title}" ]]; then
-          duplicate_found=true
-          break
-        fi
-      done
+      local decision_titles _bn
+      decision_titles=$(for f in "${SHARED_DIR}/decisions"/task_*.json; do
+        [[ -f "$f" ]] || continue
+        _bn=$(basename "$f")
+        [[ "$_bn" != *_result.json && "$_bn" != *_history.json ]] || continue
+        cat "$f"
+      done | jq -r '.title // empty' 2>/dev/null || echo '')
+      if echo "${decision_titles}" | grep -qxF "${openclaw_title}"; then
+        duplicate_found=true
+      fi
     fi
 
     if [[ "${duplicate_found}" == "true" ]]; then
@@ -424,17 +388,17 @@ check_openclaw_research_requests() {
     local request_filename
     request_filename=$(basename "${request_file}")
 
-    # Skip already-submitted requests
-    local status
-    status=$(jq -r '.status // ""' "${request_file}" 2>/dev/null)
-    [[ "${status}" == "pending" ]] || continue
+    # Read all fields in single jq call
+    local request_data status req_type title description reply_to
+    request_data=$(jq -r '[(.status // ""), (.type // ""), (.title // ""), (.description // ""), (.reply_to // "")] | @tsv' "${request_file}" 2>/dev/null) || continue
+    status=$(printf '%s' "${request_data}" | cut -f1)
+    req_type=$(printf '%s' "${request_data}" | cut -f2)
+    title=$(printf '%s' "${request_data}" | cut -f3)
+    description=$(printf '%s' "${request_data}" | cut -f4)
+    reply_to=$(printf '%s' "${request_data}" | cut -f5)
 
-    # Read and validate request content
-    local req_type title description reply_to
-    req_type=$(jq -r '.type // ""' "${request_file}" 2>/dev/null)
-    title=$(jq -r '.title // ""' "${request_file}" 2>/dev/null)
-    description=$(jq -r '.description // ""' "${request_file}" 2>/dev/null)
-    reply_to=$(jq -r '.reply_to // ""' "${request_file}" 2>/dev/null)
+    # Skip already-submitted requests
+    [[ "${status}" == "pending" ]] || continue
 
     # Validate type (research/design only)
     case "${req_type}" in
@@ -464,37 +428,29 @@ check_openclaw_research_requests() {
     title="${title:0:200}"
     description="${description:0:2000}"
 
-    # Duplicate check
+    # Duplicate check (batch jq extraction)
     local openclaw_title="[OpenClaw Research] ${title}"
     local duplicate_found=false
 
-    for existing_task in "${SHARED_DIR}/inbox"/*.json; do
-      [[ -f "${existing_task}" ]] || continue
-      local existing_title
-      existing_title=$(jq -r '.title // ""' "${existing_task}" 2>/dev/null)
-      if [[ "${existing_title}" == "${openclaw_title}" ]]; then
-        duplicate_found=true
-        break
-      fi
-    done
+    # Batch extract all inbox titles with single jq call
+    local inbox_titles
+    inbox_titles=$(cat "${SHARED_DIR}/inbox"/*.json 2>/dev/null | jq -r '.title // empty' 2>/dev/null || echo '')
+    if echo "${inbox_titles}" | grep -qxF "${openclaw_title}"; then
+      duplicate_found=true
+    fi
 
+    # Batch extract all decision titles (filter auxiliary files via glob, single jq call)
     if [[ "${duplicate_found}" == "false" ]]; then
-      for existing_decision in "${SHARED_DIR}/decisions"/*.json; do
-        [[ -f "${existing_decision}" ]] || continue
-        local dec_basename
-        dec_basename=$(basename "${existing_decision}")
-        [[ "${dec_basename}" != *_result.json ]] || continue
-        [[ "${dec_basename}" != *_history.json ]] || continue
-        [[ "${dec_basename}" != *_progress.jsonl ]] || continue
-        [[ "${dec_basename}" != *_announce_progress.jsonl ]] || continue
-
-        local existing_title
-        existing_title=$(jq -r '.title // ""' "${existing_decision}" 2>/dev/null)
-        if [[ "${existing_title}" == "${openclaw_title}" ]]; then
-          duplicate_found=true
-          break
-        fi
-      done
+      local decision_titles _bn
+      decision_titles=$(for f in "${SHARED_DIR}/decisions"/task_*.json; do
+        [[ -f "$f" ]] || continue
+        _bn=$(basename "$f")
+        [[ "$_bn" != *_result.json && "$_bn" != *_history.json ]] || continue
+        cat "$f"
+      done | jq -r '.title // empty' 2>/dev/null || echo '')
+      if echo "${decision_titles}" | grep -qxF "${openclaw_title}"; then
+        duplicate_found=true
+      fi
     fi
 
     if [[ "${duplicate_found}" == "true" ]]; then
@@ -555,9 +511,10 @@ check_openclaw_research_requests() {
   for request_file in "${suggestions_dir}"/research_request_*.json; do
     [[ -f "${request_file}" ]] || continue
 
-    local status task_id
-    status=$(jq -r '.status // ""' "${request_file}" 2>/dev/null)
-    task_id=$(jq -r '.task_id // ""' "${request_file}" 2>/dev/null)
+    local req_data2 status task_id
+    req_data2=$(jq -r '[(.status // ""), (.task_id // "")] | @tsv' "${request_file}" 2>/dev/null) || continue
+    status=$(printf '%s' "${req_data2}" | cut -f1)
+    task_id=$(printf '%s' "${req_data2}" | cut -f2)
     [[ "${status}" == "submitted" && -n "${task_id}" ]] || continue
 
     # Check if result exists
@@ -568,14 +525,16 @@ check_openclaw_research_requests() {
     local result_out="${suggestions_dir}/research_result_${task_id}.json"
     [[ -f "${result_out}" ]] && continue
 
-    # Read decision and result
+    # Read decision and result (batch jq calls: 2 files, 1 call each)
     local decision_file="${SHARED_DIR}/decisions/${task_id}.json"
-    local decision approach result_summary
-    decision=$(jq -r '.decision // "unknown"' "${decision_file}" 2>/dev/null || echo "unknown")
-    approach=$(jq -r '.agreed_approach // ""' "${decision_file}" 2>/dev/null || echo "")
-    result_summary=$(jq -r '.summary // .result // ""' "${result_file}" 2>/dev/null || echo "")
-    local completed_at
-    completed_at=$(jq -r '.completed_at // ""' "${result_file}" 2>/dev/null || echo "")
+    local dec_data decision approach
+    dec_data=$(jq -r '[(.decision // "unknown"), (.agreed_approach // "")] | @tsv' "${decision_file}" 2>/dev/null) || dec_data="unknown	"
+    decision=$(printf '%s' "${dec_data}" | cut -f1)
+    approach=$(printf '%s' "${dec_data}" | cut -f2)
+    local res_data result_summary completed_at
+    res_data=$(jq -r '[(.summary // .result // ""), (.completed_at // "")] | @tsv' "${result_file}" 2>/dev/null) || res_data="	"
+    result_summary=$(printf '%s' "${res_data}" | cut -f1)
+    completed_at=$(printf '%s' "${res_data}" | cut -f2)
 
     # Write result to suggestions dir for OpenClaw to read
     local tmp_result
@@ -718,13 +677,16 @@ check_evaluation_requests() {
 
     local cycle_id
     cycle_id=$(basename "${eval_dir}")
+
+    # Early skip: if result.json exists, this cycle is already completed
+    [[ ! -f "${eval_dir}/result.json" ]] || continue
+
     local request_file="${eval_dir}/request.json"
 
     [[ -f "${request_file}" ]] || continue
 
-    local eval_status
-    eval_status=$(jq -r '.status' "${request_file}")
-    [[ "${eval_status}" == "pending" || "${eval_status}" == "in_progress" ]] || continue
+    # Quick status check via grep (avoids jq startup for non-matching cycles)
+    grep -qE '"status"\s*:\s*"(pending|in_progress)"' "${request_file}" || continue
 
     # Check if we already submitted our evaluations
     local other_nodes
