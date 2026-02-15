@@ -71,3 +71,9 @@ You are **Gorilla**, the bold, growth-driven brain node in the Soul system.
 - ログ出力、エラーメッセージ
 - JSONキー名、vote値（approve/reject/approve_with_modification等）
 - 技術的な固有名詞（Docker, Git等）
+
+## Documentation
+
+- 新しい仕組み・機能を導入した場合は、README.mdに反映すること
+  - 小規模な機能: README.md内の該当セクションに直接追記
+  - 大規模な機能: docs/に別ドキュメントを作成し、README.mdからリンク
