@@ -341,7 +341,6 @@ module.exports = function (sharedDir) {
   // GET /api/openclaw/emotion-state - 現在の感情状態取得
   router.get('/openclaw/emotion-state', async (req, res) => {
     const convDir = path.join(sharedDir, 'openclaw', 'conversations');
-    const latest = await readJson(path.join(sharedDir, 'monitoring', 'latest.json'));
 
     // 各プラットフォームの直近outboundメッセージを探す
     let latestOutbound = null;
@@ -359,40 +358,13 @@ module.exports = function (sharedDir) {
       }
     }
 
-    // Also find the latest inbound message (for talking state detection)
-    let latestInbound = null;
-    for (const p of ['line', 'discord']) {
-      const content = await tailFile(path.join(convDir, `${p}.jsonl`), 20);
-      if (!content) continue;
-      const msgs = content.split('\n')
-        .filter(l => l.trim())
-        .map(l => { try { return JSON.parse(l); } catch { return null; } })
-        .filter(m => m && m.direction === 'inbound');
-      for (const m of msgs) {
-        if (!latestInbound || m.timestamp > latestInbound.timestamp) {
-          latestInbound = m;
-        }
-      }
-    }
-
-    let emotion = 'idle';
+    let emotion = 'neutral';
     let source = 'default';
     const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    const oneMinAgo = new Date(Date.now() - 60 * 1000).toISOString();
 
-    // Talking state: inbound within 60s and no outbound after it → bot is processing
-    const isTalking = latestInbound && latestInbound.timestamp > oneMinAgo &&
-      (!latestOutbound || latestOutbound.timestamp < latestInbound.timestamp);
-
-    if (isTalking) {
-      emotion = 'talking';
-      source = 'inbound_detected';
-    } else if (latestOutbound && latestOutbound.timestamp > fiveMinAgo && latestOutbound.emotion_hint) {
+    if (latestOutbound && latestOutbound.timestamp > fiveMinAgo && latestOutbound.emotion_hint) {
       emotion = latestOutbound.emotion_hint;
       source = 'emotion_hint';
-    } else if (latest && latest.status === 'error') {
-      emotion = 'error';
-      source = 'monitor_status';
     } else if (latestOutbound && latestOutbound.timestamp > fiveMinAgo) {
       emotion = estimateEmotion(latestOutbound.content);
       source = 'keyword_fallback';
@@ -401,8 +373,7 @@ module.exports = function (sharedDir) {
     res.json({
       emotion,
       source,
-      last_message_at: latestOutbound ? latestOutbound.timestamp : null,
-      monitor_status: latest ? latest.status : 'unknown'
+      last_message_at: latestOutbound ? latestOutbound.timestamp : null
     });
   });
 
@@ -418,8 +389,10 @@ function estimateEmotion(content) {
     { keywords: ['完了', '成功', 'done', 'ok'], emotion: 'satisfied' },
     { keywords: ['ありがとう', 'thanks', '嬉しい'], emotion: 'happy' },
     { keywords: ['調査', '確認中', '検討', '...'], emotion: 'thinking' },
-    { keywords: ['申し訳', 'エラー', '失敗', 'sorry'], emotion: 'concerned' },
-    { keywords: ['error', 'exception', 'timeout'], emotion: 'error' }
+    { keywords: ['申し訳', 'エラー', '失敗', 'sorry', 'error', 'exception', 'timeout'], emotion: 'concerned' },
+    { keywords: ['マジ', 'えっ', 'びっくり', 'すごい', '驚'], emotion: 'surprised' },
+    { keywords: ['残念', '悲しい', 'つらい', 'ごめん'], emotion: 'sad' },
+    { keywords: ['ふざけ', 'ありえない', '許せ', '怒', 'ダメ'], emotion: 'angry' }
   ];
 
   const matches = [];

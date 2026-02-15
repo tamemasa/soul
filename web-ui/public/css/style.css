@@ -1504,22 +1504,20 @@ body {
   transition: border-color 0.5s ease, box-shadow 0.5s ease;
   flex-shrink: 0;
 }
-.avatar-idle    { border-color: var(--text-dim); }
-.avatar-talking { border-color: var(--accent);  box-shadow: 0 0 16px rgba(96,165,250,0.3); }
+.avatar-neutral { border-color: var(--text-dim); }
 .avatar-thinking { border-color: var(--warning); box-shadow: 0 0 16px rgba(245,158,11,0.3); }
 .avatar-happy   { border-color: var(--success); box-shadow: 0 0 16px rgba(52,211,153,0.3); }
 .avatar-concerned { border-color: var(--vote-modify); box-shadow: 0 0 16px rgba(251,191,36,0.3); }
-.avatar-error   { border-color: var(--error);   box-shadow: 0 0 16px rgba(239,68,68,0.3); }
+.avatar-sad { border-color: var(--accent); box-shadow: 0 0 16px rgba(96,165,250,0.2); }
+.avatar-angry { border-color: var(--error); box-shadow: 0 0 16px rgba(239,68,68,0.3); }
+.avatar-surprised { border-color: var(--node-panda); box-shadow: 0 0 16px rgba(59,130,246,0.3); }
 
-.avatar-talking { animation: talking-pulse 1.5s ease-in-out infinite; }
 .avatar-thinking { animation: thinking-pulse 2s ease-in-out infinite; }
 .avatar-happy { animation: happy-bounce 1s ease-in-out infinite; }
-.avatar-error { animation: error-shake 0.5s ease-in-out; }
+.avatar-sad { animation: sad-fade 3s ease-in-out infinite; }
+.avatar-angry { animation: angry-vibrate 0.3s ease-in-out 3; }
+.avatar-surprised { animation: surprised-pop 0.5s ease-out; }
 
-@keyframes talking-pulse {
-  0%, 100% { box-shadow: 0 0 16px rgba(96,165,250,0.3); }
-  50%      { box-shadow: 0 0 24px rgba(96,165,250,0.5); }
-}
 @keyframes thinking-pulse {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.5; }
@@ -1528,10 +1526,19 @@ body {
   0%, 100% { transform: translateY(0); }
   50%      { transform: translateY(-4px); }
 }
-@keyframes error-shake {
+@keyframes sad-fade {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.6; }
+}
+@keyframes angry-vibrate {
   0%, 100% { transform: translateX(0); }
-  25%      { transform: translateX(-3px); }
-  75%      { transform: translateX(3px); }
+  25%      { transform: translateX(-2px); }
+  75%      { transform: translateX(2px); }
+}
+@keyframes surprised-pop {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.1); }
+  100% { transform: scale(1); }
 }
 
 .avatar-section {

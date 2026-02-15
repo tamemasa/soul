@@ -1,43 +1,38 @@
 // OpenClaw Avatar Component - SVG-based emotion avatar
 
 const EMOTION_LABELS = {
-  idle: '待機中',
-  talking: '会話中',
-  thinking: '考え中...',
   happy: '嬉しい',
+  sad: '悲しい',
+  angry: '怒り',
+  surprised: '驚き',
+  thinking: '考え中...',
   concerned: '心配...',
-  error: 'エラー',
   satisfied: '達成感',
   neutral: '通常'
 };
 
 const EMOTION_TO_STATE = {
-  idle: 'idle',
-  talking: 'talking',
-  thinking: 'thinking',
   happy: 'happy',
+  sad: 'sad',
+  angry: 'angry',
+  surprised: 'surprised',
+  thinking: 'thinking',
   concerned: 'concerned',
-  error: 'error',
   satisfied: 'happy',
-  neutral: 'idle'
+  neutral: 'neutral'
 };
 
 function getSvgFace(emotion) {
-  const state = EMOTION_TO_STATE[emotion] || 'idle';
+  const state = EMOTION_TO_STATE[emotion] || 'neutral';
 
   let eyes = '';
   let mouth = '';
 
   switch (state) {
-    case 'idle':
+    case 'neutral':
       eyes = `<circle cx="30" cy="32" r="4" fill="var(--text-secondary)"/>
               <circle cx="50" cy="32" r="4" fill="var(--text-secondary)"/>`;
       mouth = `<path d="M 30 50 Q 40 50 50 50" stroke="var(--text-secondary)" stroke-width="2" fill="none" class="mouth"/>`;
-      break;
-    case 'talking':
-      eyes = `<circle cx="30" cy="32" r="4" fill="var(--text-secondary)"/>
-              <circle cx="50" cy="32" r="4" fill="var(--text-secondary)"/>`;
-      mouth = `<ellipse cx="40" cy="52" rx="6" ry="4" fill="var(--text-secondary)" class="mouth"/>`;
       break;
     case 'thinking':
       eyes = `<line x1="26" y1="32" x2="34" y2="32" stroke="var(--text-secondary)" stroke-width="3" stroke-linecap="round"/>
@@ -54,12 +49,23 @@ function getSvgFace(emotion) {
               <path d="M 46 30 Q 50 34 54 30" stroke="var(--text-secondary)" stroke-width="3" fill="none" stroke-linecap="round"/>`;
       mouth = `<path d="M 30 56 Q 40 48 50 56" stroke="var(--text-secondary)" stroke-width="2" fill="none" class="mouth"/>`;
       break;
-    case 'error':
-      eyes = `<line x1="27" y1="29" x2="33" y2="35" stroke="var(--error)" stroke-width="3" stroke-linecap="round"/>
-              <line x1="33" y1="29" x2="27" y2="35" stroke="var(--error)" stroke-width="3" stroke-linecap="round"/>
-              <line x1="47" y1="29" x2="53" y2="35" stroke="var(--error)" stroke-width="3" stroke-linecap="round"/>
-              <line x1="53" y1="29" x2="47" y2="35" stroke="var(--error)" stroke-width="3" stroke-linecap="round"/>`;
-      mouth = `<path d="M 30 52 Q 35 48 40 52 Q 45 56 50 52" stroke="var(--error)" stroke-width="2" fill="none" class="mouth"/>`;
+    case 'sad':
+      // 下がった目 + への字口
+      eyes = `<path d="M 26 30 Q 30 34 34 30" stroke="var(--text-secondary)" stroke-width="3" fill="none" stroke-linecap="round"/>
+              <path d="M 46 30 Q 50 34 54 30" stroke="var(--text-secondary)" stroke-width="3" fill="none" stroke-linecap="round"/>`;
+      mouth = `<path d="M 30 55 Q 40 50 50 55" stroke="var(--text-secondary)" stroke-width="2" fill="none" class="mouth"/>`;
+      break;
+    case 'angry':
+      // つり上がった目 + きつい口
+      eyes = `<line x1="26" y1="34" x2="34" y2="30" stroke="var(--text-secondary)" stroke-width="3" stroke-linecap="round"/>
+              <line x1="46" y1="30" x2="54" y2="34" stroke="var(--text-secondary)" stroke-width="3" stroke-linecap="round"/>`;
+      mouth = `<path d="M 30 54 Q 40 50 50 54" stroke="var(--text-secondary)" stroke-width="2.5" fill="none" class="mouth"/>`;
+      break;
+    case 'surprised':
+      // ○○目 + O口
+      eyes = `<circle cx="30" cy="32" r="5" stroke="var(--text-secondary)" stroke-width="2.5" fill="none"/>
+              <circle cx="50" cy="32" r="5" stroke="var(--text-secondary)" stroke-width="2.5" fill="none"/>`;
+      mouth = `<circle cx="40" cy="53" r="4" stroke="var(--text-secondary)" stroke-width="2" fill="none" class="mouth"/>`;
       break;
   }
 
@@ -70,12 +76,12 @@ function getSvgFace(emotion) {
 }
 
 export function renderAvatar(emotion) {
-  const state = EMOTION_TO_STATE[emotion] || 'idle';
+  const state = EMOTION_TO_STATE[emotion] || 'neutral';
   return `<div class="openclaw-avatar avatar-${state}">
     ${getSvgFace(emotion)}
   </div>`;
 }
 
 export function getEmotionLabel(emotion) {
-  return EMOTION_LABELS[emotion] || EMOTION_LABELS.idle;
+  return EMOTION_LABELS[emotion] || EMOTION_LABELS.neutral;
 }

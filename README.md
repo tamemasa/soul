@@ -429,7 +429,7 @@ Web UIのOpenClaw画面に、擬人化アバターと統合会話ビューを搭
 
 #### 機能
 
-- **感情アバター**: OpenClawの現在の感情状態をSVGベースのアバターで表示。6つの感情状態（idle/talking/thinking/happy/concerned/error）に対応し、CSSアニメーションで表現
+- **感情アバター**: OpenClawの現在の感情状態をSVGベースのアバターで表示。8つの会話感情（happy/sad/angry/surprised/thinking/concerned/satisfied/neutral）に対応し、CSSアニメーションで表現。Claudeが応答に`[EMOTION:]`タグを付与し、proxyが抽出する仕組み
 - **会話タイムライン**: LINE・Discordでの全会話をタイムラインで閲覧可能。プラットフォームバッジ（LINE緑/Discord青紫）、方向インジケーター（受信/送信）、感情バッジを表示
 - **フィルタ・検索**: プラットフォーム別・方向別のフィルタ、テキスト検索、ページネーション（100件ずつ読み込み）
 - **リアルタイム更新**: SSE（`conversation:updated`イベント）で会話データ更新時に自動リフレッシュ
@@ -459,7 +459,7 @@ Web UIのOpenClaw画面に、擬人化アバターと統合会話ビューを搭
 }
 ```
 
-`emotion_hint` はOpenClawのoutboundメッセージにのみ付与される感情タグ（`happy`/`thinking`/`concerned`/`neutral`/`satisfied`/`error`）。
+`emotion_hint` はOpenClawのoutboundメッセージにのみ付与される感情タグ（`happy`/`sad`/`angry`/`surprised`/`thinking`/`concerned`/`satisfied`/`neutral`）。Claudeが応答の最終行に`[EMOTION: <tag>]`を付与し、webhook-proxyが正規表現で抽出・除去して記録する。タグがない場合はキーワードベースの推定にフォールバック。
 
 #### リアルタイム感情表現
 
@@ -474,14 +474,7 @@ LINE Webhookを経由するメッセージは、`webhook-proxy`がペイロー�
 5. Web UIがemotion-state APIを再取得し、アバターの感情が更新される
 
 **感情推定（inbound）:**
-- `ありがとう`/`嬉しい`/`やった` → `happy`
-- `困った`/`どうしよう`/`心配` → `concerned`
-- `？`/`?`/`教えて`/`どう` → `thinking`
-- その他 → `idle`
-
-**talking状態検出:**
-- 直近60秒以内にinboundメッセージがあり、かつその後のoutboundメッセージがない場合、botが「処理中」と判断してアバターをtalking状態にする
-- これによりメッセージ受信からBot応答完了までアバターが「考え中」を表現する
+- inboundメッセージの `emotion_hint` は常に `null`（ユーザー発言に感情推定は行わない）
 
 **プラットフォーム別の運用差異:**
 
@@ -517,28 +510,26 @@ LINE Webhookを経由するメッセージは、`webhook-proxy`がペイロー�
 
 **GET `/api/openclaw/emotion-state`**
 
-レスポンス: `{ emotion: string, source: string, last_message_at: string, monitor_status: string }`
+レスポンス: `{ emotion: string, source: string, last_message_at: string }`
 
 感情状態の決定ロジック（優先度順）:
 
-1. 直近60秒以内にinboundメッセージがあり、outbound応答がまだない → `talking`（source: `inbound_detected`）
-2. 直近5分以内のoutboundメッセージに `emotion_hint` がある → その値を使用（source: `emotion_hint`）
-3. `/shared/monitoring/latest.json` の状態が `error` → `error`（source: `monitor_status`）
-4. 直近5分以内のoutboundメッセージにキーワードマッチング → 推定感情（source: `keyword_fallback`）
-5. いずれも該当しない → `idle`（source: `default`）
+1. 直近5分以内のoutboundメッセージに `emotion_hint` がある → その値を使用（source: `emotion_hint`）
+2. 直近5分以内のoutboundメッセージにキーワードマッチング → 推定感情（source: `keyword_fallback`）
+3. いずれも該当しない → `neutral`（source: `default`）
 
 #### 感情状態の定義
 
 | emotion_hint | 表示名 | アニメーション | 使用シーン |
 |-------------|--------|-------------|-----------|
-| `idle` | 待機中 | なし | デフォルト状態 |
-| `talking` | 会話中 | パルスグロー | メッセージ受信後、応答生成中 |
-| `thinking` | 考え中... | 点滅パルス | 複雑な質問への回答中 |
 | `happy` | 嬉しい | バウンス | ポジティブな話題 |
-| `concerned` | 心配... | - | エラー報告、リスク検出 |
-| `error` | エラー | シェイク | 処理失敗 |
+| `sad` | 悲しい | ゆっくりフェード | 落ち込み、残念 |
+| `angry` | 怒り | 振動 | 怒り、苛立ち |
+| `surprised` | 驚き | ポップ | 予想外、驚嘆 |
+| `thinking` | 考え中... | 点滅パルス | 考察、調査中 |
+| `concerned` | 心配... | - | 不安、リスク報告 |
 | `satisfied` | 達成感 | (happy扱い) | タスク完了 |
-| `neutral` | 通常 | (idle扱い) | 一般的な応答 |
+| `neutral` | 通常 | なし | デフォルト状態 |
 
 #### キーワードベース感情推定テーブル
 
@@ -549,8 +540,10 @@ LINE Webhookを経由するメッセージは、`webhook-proxy`がペイロー�
 | `完了`, `成功`, `done`, `ok` | `satisfied` |
 | `ありがとう`, `thanks`, `嬉しい` | `happy` |
 | `調査`, `確認中`, `検討`, `...` | `thinking` |
-| `申し訳`, `エラー`, `失敗`, `sorry` | `concerned` |
-| `error`, `exception`, `timeout` | `error` |
+| `申し訳`, `エラー`, `失敗`, `sorry`, `error`, `exception`, `timeout` | `concerned` |
+| `マジ`, `えっ`, `びっくり`, `すごい`, `驚` | `surprised` |
+| `残念`, `悲しい`, `つらい`, `ごめん` | `sad` |
+| `ふざけ`, `ありえない`, `許せ`, `怒`, `ダメ` | `angry` |
 | (マッチなし or 複数カテゴリ) | `neutral` |
 
 #### SSE イベント

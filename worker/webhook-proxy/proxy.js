@@ -71,11 +71,7 @@ function fetchLineProfile(userId) {
 // ─── LINE Webhook Conversation Logging ───
 
 function estimateEmotionFromText(text) {
-  if (!text) return "idle";
-  if (/ありがとう|嬉しい|やった|thanks|thx/i.test(text)) return "happy";
-  if (/困った|どうしよう|心配|ヤバい|まずい/i.test(text)) return "concerned";
-  if (/？|\?|教えて|どう|なに|いつ|どこ|why|how|what/i.test(text)) return "thinking";
-  return "idle";
+  return null;
 }
 
 function extractContentFromEvent(event) {
@@ -205,6 +201,8 @@ function discoverLineSessions() {
   return [];
 }
 
+const EMOTION_TAG_RE = /\n?\[EMOTION:\s*(happy|sad|angry|surprised|thinking|concerned|satisfied|neutral)\]\s*$/i;
+
 function extractOutboundMessages(content, afterTimestamp) {
   const messages = [];
   const lines = content.split("\n").filter((l) => l.trim());
@@ -221,9 +219,18 @@ function extractOutboundMessages(content, afterTimestamp) {
       }
       if (texts.length === 0) continue;
 
+      let combined = texts.join("\n");
+      let emotion_tag = null;
+      const emotionMatch = combined.match(EMOTION_TAG_RE);
+      if (emotionMatch) {
+        emotion_tag = emotionMatch[1].toLowerCase();
+        combined = combined.replace(EMOTION_TAG_RE, "").trimEnd();
+      }
+
       messages.push({
         timestamp: obj.timestamp,
-        content: texts.join("\n"),
+        content: combined,
+        emotion_tag,
       });
     } catch {}
   }
@@ -281,7 +288,7 @@ function pollOutboundMessages() {
           channel,
           user: "openclaw",
           content: m.content,
-          emotion_hint: estimateOutboundEmotion(m.content),
+          emotion_hint: m.emotion_tag || estimateOutboundEmotion(m.content),
         };
         logLines.push(JSON.stringify(entry));
         lastOutboundTs[platform] = m.timestamp;
@@ -297,9 +304,12 @@ function pollOutboundMessages() {
 function estimateOutboundEmotion(text) {
   if (!text) return "neutral";
   if (/ええやん|嬉しい|楽しい|ありがとう|おめでとう|笑|良い|いい|ナイス/i.test(text)) return "happy";
-  if (/心配|気をつけ|注意|まずい|問題|エラー/i.test(text)) return "concerned";
+  if (/心配|気をつけ|注意|まずい|問題|エラー|error|exception|timeout/i.test(text)) return "concerned";
   if (/調べ|確認|検討|ちょっと待|調査/i.test(text)) return "thinking";
   if (/完了|成功|done|ok|できた/i.test(text)) return "satisfied";
+  if (/マジ|えっ|びっくり|すごい|unexpected|驚/i.test(text)) return "surprised";
+  if (/残念|悲しい|つらい|申し訳|sorry|ごめん/i.test(text)) return "sad";
+  if (/ふざけ|ありえない|許せ|怒|ダメ/i.test(text)) return "angry";
   return "neutral";
 }
 

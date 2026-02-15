@@ -63,18 +63,23 @@ OpenClawの感情状態をアバターアニメーションで可視化する。
 
 ### 2.3 `emotion_hint` 定義
 
-OpenClawが応答を生成する際、自分の感情状態を自己申告するタグ:
+OpenClawが応答を生成する際、自分の感情状態を自己申告するタグ。
+Claudeは応答の最終行に `[EMOTION: <tag>]` を付与し、proxy側で抽出・除去される。
 
 | Tag | Description | 使用シーン例 |
 |-----|-------------|-------------|
 | `happy` | 嬉しい・楽しい | ポジティブな話題、褒められた時 |
+| `sad` | 悲しい・残念 | 落ち込む話題、残念な報告 |
+| `angry` | 怒り・苛立ち | 理不尽な状況、ルール違反 |
+| `surprised` | 驚き・驚嘆 | 予想外の情報、意外な展開 |
 | `thinking` | 考え中・調査中 | 複雑な質問への回答中 |
-| `concerned` | 心配・不安 | エラー報告、リスク検出時 |
-| `neutral` | 通常・平静 | 一般的な応答 |
+| `concerned` | 心配・不安 | リスク検出、注意喚起 |
 | `satisfied` | 満足・達成感 | タスク完了報告 |
-| `error` | エラー・困惑 | 処理失敗、理解不能な入力 |
+| `neutral` | 通常・平静 | 一般的な応答 |
 
-`inbound` メッセージ（ユーザー発言）の `emotion_hint` は常に `null` または省略する。
+**削除済み**: `idle`（待機中）、`talking`（会話中）、`error`（エラー）はシステム状態のため廃止。
+
+`inbound` メッセージ（ユーザー発言）の `emotion_hint` は常に `null`。
 
 ### 2.4 ローテーションポリシー
 
@@ -104,13 +109,13 @@ OpenClaw Workerで会話JSONLを書き出す際の実装指針:
    - 改行区切りで1行1JSON
 ```
 
-Worker側で `emotion_hint` をClaudeに自己申告させるプロンプト例:
+Worker側で `emotion_hint` をClaudeに自己申告させる仕組み:
 
-```
-あなたの応答の最後に、以下の形式で感情タグを付与してください:
-[EMOTION: happy|thinking|concerned|neutral|satisfied|error]
-この行は応答から除去され、メタデータとして記録されます。
-```
+AGENTS.mdの「感情タグ」セクションで、すべての応答に `[EMOTION: <tag>]` を最終行に付与するよう指示。
+proxy（webhook-proxy）が正規表現で抽出・除去し、`emotion_tag` フィールドとしてJSONLに記録する。
+タグが付与されていない場合はキーワードベースの推定にフォールバックする。
+
+対応タグ: `happy|sad|angry|surprised|thinking|concerned|satisfied|neutral`
 
 ---
 
@@ -140,16 +145,20 @@ SVG + CSSで構築するシンプルな顔アバター:
 
 ### 3.2 感情状態マッピング
 
-各感情状態に対応するビジュアル表現:
+各感情状態に対応するビジュアル表現（8種、純粋に会話感情のみ）:
 
 | State | 目の形 | 口の形 | 色（グロー） | CSSクラス | アニメーション |
 |-------|--------|--------|-------------|-----------|---------------|
-| `idle` | 通常 (●) | 直線 (—) | `--text-dim` | `.avatar-idle` | なし |
-| `talking` | 通常 (●) | 開口 (○) | `--accent` | `.avatar-talking` | 口パク (keyframes) |
-| `thinking` | 半目 (−) | 波線 (~) | `--warning` | `.avatar-thinking` | 目の点滅 + パルス |
+| `neutral` | 通常 (●) | 直線 (—) | `--text-dim` | `.avatar-neutral` | なし |
 | `happy` | 笑い目 (＾) | 笑顔 (⌣) | `--success` | `.avatar-happy` | バウンス |
-| `concerned` | 心配目 (⌢) | への字 (⌢) | `--vote-modify` | `.avatar-concerned` | 揺れ |
-| `error` | × 目 (×) | 波線 (~) | `--error` | `.avatar-error` | シェイク |
+| `sad` | 下がった目 (⌢) | への字口 | `--accent` | `.avatar-sad` | ゆっくりフェード |
+| `angry` | つり上がった目 | きつい口 | `--error` | `.avatar-angry` | 振動 |
+| `surprised` | ○○目 | O口 | `--node-panda` | `.avatar-surprised` | ポップ |
+| `thinking` | 半目 (−) | 波線 (~) | `--warning` | `.avatar-thinking` | 目の点滅 + パルス |
+| `concerned` | 心配目 (⌢) | への字 (⌢) | `--vote-modify` | `.avatar-concerned` | - |
+| `satisfied` | (happy表示) | (happy表示) | (happy表示) | (happy表示) | (happy表示) |
+
+**削除済み**: `idle`, `talking`, `error`（システム状態は感情セットから分離）
 
 ### 3.3 CSSアニメーション定義
 
@@ -168,19 +177,13 @@ SVG + CSSで構築するシンプルな顔アバター:
 }
 
 /* 感情別グロー */
-.avatar-idle    { border-color: var(--text-dim); }
-.avatar-talking { border-color: var(--accent);  box-shadow: 0 0 16px rgba(96,165,250,0.3); }
+.avatar-neutral { border-color: var(--text-dim); }
 .avatar-thinking { border-color: var(--warning); box-shadow: 0 0 16px rgba(245,158,11,0.3); }
 .avatar-happy   { border-color: var(--success); box-shadow: 0 0 16px rgba(52,211,153,0.3); }
 .avatar-concerned { border-color: var(--vote-modify); box-shadow: 0 0 16px rgba(251,191,36,0.3); }
-.avatar-error   { border-color: var(--error);   box-shadow: 0 0 16px rgba(239,68,68,0.3); }
-
-/* 口パクアニメーション */
-@keyframes talking-mouth {
-  0%, 100% { d: path("M 30 55 Q 40 55 50 55"); }  /* 閉口 */
-  50%      { d: path("M 30 52 Q 40 60 50 52"); }  /* 開口 */
-}
-.avatar-talking .mouth { animation: talking-mouth 0.4s ease-in-out infinite; }
+.avatar-sad { border-color: var(--accent); box-shadow: 0 0 16px rgba(96,165,250,0.2); }
+.avatar-angry { border-color: var(--error); box-shadow: 0 0 16px rgba(239,68,68,0.3); }
+.avatar-surprised { border-color: var(--node-panda); box-shadow: 0 0 16px rgba(59,130,246,0.3); }
 
 /* 思考パルス */
 @keyframes thinking-pulse {
@@ -196,23 +199,39 @@ SVG + CSSで構築するシンプルな顔アバター:
 }
 .avatar-happy { animation: happy-bounce 1s ease-in-out infinite; }
 
-/* エラーシェイク */
-@keyframes error-shake {
-  0%, 100% { transform: translateX(0); }
-  25%      { transform: translateX(-3px); }
-  75%      { transform: translateX(3px); }
+/* 悲しみフェード */
+@keyframes sad-fade {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.6; }
 }
-.avatar-error { animation: error-shake 0.5s ease-in-out; }
+.avatar-sad { animation: sad-fade 3s ease-in-out infinite; }
+
+/* 怒り振動 */
+@keyframes angry-vibrate {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-2px); }
+  75%      { transform: translateX(2px); }
+}
+.avatar-angry { animation: angry-vibrate 0.3s ease-in-out 3; }
+
+/* 驚きポップ */
+@keyframes surprised-pop {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.1); }
+  100% { transform: scale(1); }
+}
+.avatar-surprised { animation: surprised-pop 0.5s ease-out; }
 ```
 
 ### 3.4 感情データソースと更新ロジック
 
 感情状態の決定ロジック（優先度順）:
 
-1. **直近の `outbound` メッセージの `emotion_hint`** — 直近5分以内の応答がある場合
-2. **`/shared/monitoring/latest.json` の状態** — モニタリングのステータス
-3. **フォールバック: キーワードマッチング** — 直近メッセージの内容分析
-4. **デフォルト: `idle`** — 何もない場合
+1. **直近の `outbound` メッセージの `emotion_hint`** — 直近5分以内の応答がある場合（Claudeの`[EMOTION:]`タグ or キーワード推定）
+2. **フォールバック: キーワードマッチング** — 直近メッセージの内容分析
+3. **デフォルト: `neutral`** — 何もない場合
+
+**削除済み**: monitor_status による error 判定、talking 状態検出（システム状態は感情判定から除外）
 
 ### 3.5 フォールバック感情推定テーブル
 
@@ -223,9 +242,11 @@ SVG + CSSで構築するシンプルな顔アバター:
 | `完了`, `成功`, `done`, `ok` | `satisfied` |
 | `ありがとう`, `thanks`, `嬉しい` | `happy` |
 | `調査`, `確認中`, `検討`, `...` | `thinking` |
-| `申し訳`, `エラー`, `失敗`, `sorry` | `concerned` |
-| `error`, `exception`, `timeout` | `error` |
-| (マッチなし) | `neutral` |
+| `申し訳`, `エラー`, `失敗`, `sorry`, `error`, `exception`, `timeout` | `concerned` |
+| `マジ`, `えっ`, `びっくり`, `すごい`, `驚` | `surprised` |
+| `残念`, `悲しい`, `つらい`, `ごめん` | `sad` |
+| `ふざけ`, `ありえない`, `許せ`, `怒`, `ダメ` | `angry` |
+| (マッチなし or 複数カテゴリ) | `neutral` |
 
 推定に自信がない場合（複数カテゴリにマッチ等）は必ず `neutral` にフォールバックする。
 
@@ -398,56 +419,17 @@ router.get('/openclaw/conversations', async (req, res) => {
 {
   "emotion": "thinking",
   "source": "emotion_hint",
-  "last_message_at": "2026-02-15T06:30:00Z",
-  "monitor_status": "healthy"
+  "last_message_at": "2026-02-15T06:30:00Z"
 }
 ```
 
-**実装方針:**
+`monitor_status` フィールドは廃止（システム状態と感情の分離のため）。
 
-```javascript
-router.get('/openclaw/emotion-state', async (req, res) => {
-  const convDir = path.join(sharedDir, 'openclaw', 'conversations');
-  const latest = await readJson(path.join(sharedDir, 'monitoring', 'latest.json'));
+**感情決定ロジック（優先度順）:**
 
-  // 各プラットフォームの直近outboundメッセージを探す
-  let latestOutbound = null;
-  for (const p of ['line', 'discord']) {
-    const content = await tailFile(path.join(convDir, `${p}.jsonl`), 20);
-    const msgs = content.split('\n')
-      .filter(l => l.trim())
-      .map(l => { try { return JSON.parse(l); } catch { return null; } })
-      .filter(m => m && m.direction === 'outbound');
-    for (const m of msgs) {
-      if (!latestOutbound || m.timestamp > latestOutbound.timestamp) {
-        latestOutbound = m;
-      }
-    }
-  }
-
-  let emotion = 'idle';
-  let source = 'default';
-  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-
-  if (latestOutbound && latestOutbound.timestamp > fiveMinAgo && latestOutbound.emotion_hint) {
-    emotion = latestOutbound.emotion_hint;
-    source = 'emotion_hint';
-  } else if (latest && latest.status === 'error') {
-    emotion = 'error';
-    source = 'monitor_status';
-  } else if (latestOutbound && latestOutbound.timestamp > fiveMinAgo) {
-    emotion = estimateEmotion(latestOutbound.content);
-    source = 'keyword_fallback';
-  }
-
-  res.json({
-    emotion,
-    source,
-    last_message_at: latestOutbound?.timestamp || null,
-    monitor_status: latest?.status || 'unknown'
-  });
-});
-```
+1. 直近5分以内のoutboundメッセージに `emotion_hint` がある → その値（source: `emotion_hint`）
+2. 直近5分以内のoutboundメッセージにキーワードマッチング → 推定感情（source: `keyword_fallback`）
+3. いずれも該当しない → `neutral`（source: `default`）
 
 ### 5.2 SSEイベント追加
 

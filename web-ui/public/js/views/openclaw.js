@@ -5,7 +5,7 @@ import { renderAvatar, getEmotionLabel } from '../components/openclaw-avatar.js'
 
 let currentFilter = 'all'; // all, policy, security, integrity
 let currentTab = 'conversations'; // 'monitoring' | 'conversations'
-let currentEmotion = 'idle';
+let currentEmotion = 'neutral';
 let conversationFilter = { platform: 'all', direction: 'all', search: '' };
 let loadedMessages = [];
 let oldestTimestamp = null;
@@ -22,10 +22,10 @@ export async function renderOpenClaw(app) {
     fetch('/api/openclaw/remediation?limit=20').then(r => r.json()),
     fetch('/api/openclaw/integrity').then(r => r.json()).catch(() => ({ status: 'unknown' })),
     fetch('/api/openclaw/research-requests').then(r => r.json()).catch(() => []),
-    fetch('/api/openclaw/emotion-state').then(r => r.json()).catch(() => ({ emotion: 'idle', source: 'default', last_message_at: null, monitor_status: 'unknown' }))
+    fetch('/api/openclaw/emotion-state').then(r => r.json()).catch(() => ({ emotion: 'neutral', source: 'default', last_message_at: null }))
   ]);
 
-  currentEmotion = emotionData.emotion || 'idle';
+  currentEmotion = emotionData.emotion || 'neutral';
 
   const state = statusData.state || {};
   const summary = statusData.summary || {};
@@ -55,7 +55,6 @@ export async function renderOpenClaw(app) {
       </div>
       <div class="avatar-meta">
         <span>Last active: ${lastActiveAgo}</span>
-        <span>Monitor: ${emotionData.monitor_status || 'unknown'}</span>
       </div>
     </div>
 
@@ -335,7 +334,7 @@ window.__convLoadMore = function() {
 async function refreshAvatarEmotion() {
   try {
     const emotionData = await fetch('/api/openclaw/emotion-state').then(r => r.json());
-    currentEmotion = emotionData.emotion || 'idle';
+    currentEmotion = emotionData.emotion || 'neutral';
     const avatarContainer = document.querySelector('.avatar-section');
     if (avatarContainer) {
       const lastActiveAgo = emotionData.last_message_at ? formatRelativeTime(emotionData.last_message_at) : '-';
@@ -347,7 +346,6 @@ async function refreshAvatarEmotion() {
         </div>
         <div class="avatar-meta">
           <span>Last active: ${lastActiveAgo}</span>
-          <span>Monitor: ${emotionData.monitor_status || 'unknown'}</span>
         </div>
       `;
     }
