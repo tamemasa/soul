@@ -154,7 +154,8 @@ services:
       - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
     volumes:
       - webhook-buffer:/webhook_buffer
-      - shared:/shared
+      - ${PWD}/shared/openclaw/conversations:/shared/openclaw/conversations
+      - ${PWD}/shared/monitoring:/shared/monitoring:ro
       - openclaw-home:/openclaw:ro
     ports:
       - "${OPENCLAW_WEBHOOK_PORT:-8080}:8080"

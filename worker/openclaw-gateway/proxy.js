@@ -648,7 +648,7 @@ probeUpstream();
 
 const STATUS_PORT = parseInt(process.env.STATUS_PORT || "3001", 10);
 const STATUS_PUBLIC = path.join(__dirname, "public");
-const SHARED_DIR = process.env.SHARED_DIR || "/shared";
+const MONITORING_DIR = process.env.MONITORING_DIR || "/shared/monitoring";
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -682,10 +682,9 @@ function handleStatusApi(reqUrl, res) {
   const url = new URL(reqUrl, "http://localhost");
 
   if (url.pathname === "/api/emotion") {
-    const convDir = path.join(SHARED_DIR, "openclaw", "conversations");
     let latestOutbound = null;
     for (const p of ["line", "discord"]) {
-      const content = tailFileSync(path.join(convDir, `${p}.jsonl`), 20);
+      const content = tailFileSync(path.join(CONV_DIR, `${p}.jsonl`), 20);
       if (!content) continue;
       const msgs = content.split("\n")
         .filter((l) => l.trim())
@@ -718,11 +717,9 @@ function handleStatusApi(reqUrl, res) {
   if (url.pathname === "/api/emotion-distribution") {
     const hours = Math.min(parseInt(url.searchParams.get("hours") || "48", 10), 168);
     const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-    const convDir = path.join(SHARED_DIR, "openclaw", "conversations");
-
     const counts = {};
     for (const p of ["line", "discord"]) {
-      const content = tailFileSync(path.join(convDir, `${p}.jsonl`), 2000);
+      const content = tailFileSync(path.join(CONV_DIR, `${p}.jsonl`), 2000);
       if (!content) continue;
       const msgs = content.split("\n")
         .filter((l) => l.trim())
@@ -740,7 +737,7 @@ function handleStatusApi(reqUrl, res) {
   }
 
   if (url.pathname === "/api/status") {
-    const data = readJsonSync(path.join(SHARED_DIR, "monitoring", "latest.json"));
+    const data = readJsonSync(path.join(MONITORING_DIR, "latest.json"));
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(data || { status: "unknown", message: "No monitoring data available" }));
     return true;
