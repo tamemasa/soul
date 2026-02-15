@@ -1370,6 +1370,174 @@ _get_active_chats() {
   ' 2>/dev/null || echo "[]"
 }
 
+# ---- Broadcast Memory for OpenClaw ----
+
+# Save broadcast content summary to OpenClaw's memory so the bot can reference
+# what was delivered when users ask about "さっきのニュース" etc.
+# Writes a Markdown file to OpenClaw's workspace/memory/ directory via docker exec.
+# Also cleans up broadcast memory files older than 7 days.
+_save_broadcast_to_openclaw_memory() {
+  local content_json="$1"
+  local broadcast_id="$2"
+  local trigger_type="$3"  # "scheduled" or "ondemand"
+
+  # Check if OpenClaw container is running
+  if ! docker ps --filter "name=soul-openclaw" --filter "status=running" --format '{{.Names}}' 2>/dev/null | grep -q "soul-openclaw"; then
+    log "WARN: Proactive engine: OpenClaw not running, skipping memory save"
+    return
+  fi
+
+  local today
+  today=$(date -u +%Y-%m-%d)
+  local now_ts
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local memory_file="broadcast-${today}.md"
+  local memory_dir="/home/openclaw/.openclaw/workspace/memory"
+
+  # Build markdown content from the broadcast articles
+  local md_content=""
+  local article_count
+  article_count=$(echo "${content_json}" | jq 'length' 2>/dev/null || echo 0)
+
+  if [[ ${article_count} -eq 0 ]]; then
+    log "WARN: Proactive engine: No articles to save to memory"
+    return
+  fi
+
+  # Build header for this broadcast entry
+  md_content="## ニュース配信 (${now_ts}) [${trigger_type}]
+broadcast_id: ${broadcast_id}
+"
+
+  # Add each article's title and summary
+  local idx=0
+  while [[ ${idx} -lt ${article_count} ]]; do
+    local title summary category
+    title=$(echo "${content_json}" | jq -r ".[${idx}].title // \"\"" 2>/dev/null)
+    summary=$(echo "${content_json}" | jq -r ".[${idx}].summary // \"\"" 2>/dev/null)
+    category=$(echo "${content_json}" | jq -r ".[${idx}].category // \"\"" 2>/dev/null)
+
+    if [[ -n "${title}" ]]; then
+      md_content="${md_content}
+### ${title}"
+      [[ -n "${category}" ]] && md_content="${md_content}
+カテゴリ: ${category}"
+      [[ -n "${summary}" ]] && md_content="${md_content}
+${summary}"
+      md_content="${md_content}
+"
+    fi
+    idx=$((idx + 1))
+  done
+
+  # Check if today's broadcast memory file already exists; if so, append
+  local existing=""
+  existing=$(docker exec soul-openclaw cat "${memory_dir}/${memory_file}" 2>/dev/null || echo "")
+
+  local full_content
+  if [[ -n "${existing}" ]]; then
+    full_content="${existing}
+
+${md_content}"
+  else
+    full_content="# ${today} ニュース配信記録
+
+${md_content}"
+  fi
+
+  # Write via docker exec with stdin pipe (safe for special characters)
+  if printf '%s' "${full_content}" | docker exec -i soul-openclaw tee "${memory_dir}/${memory_file}" > /dev/null 2>&1; then
+    # Fix ownership to match other memory files
+    docker exec soul-openclaw chown openclaw:openclaw "${memory_dir}/${memory_file}" 2>/dev/null || true
+    log "Proactive engine: Saved broadcast summary to OpenClaw memory: ${memory_file}"
+  else
+    log "WARN: Proactive engine: Failed to write broadcast memory to OpenClaw"
+    return
+  fi
+
+  # Cleanup: remove broadcast memory files older than 7 days
+  local cutoff_date
+  cutoff_date=$(date -u -d "7 days ago" +%Y-%m-%d 2>/dev/null || date -u -v-7d +%Y-%m-%d 2>/dev/null || echo "")
+  if [[ -n "${cutoff_date}" ]]; then
+    local old_files
+    old_files=$(docker exec soul-openclaw ls "${memory_dir}/" 2>/dev/null | grep '^broadcast-' || echo "")
+    while IFS= read -r fname; do
+      [[ -z "${fname}" ]] && continue
+      # Extract date from filename: broadcast-YYYY-MM-DD.md
+      local fdate
+      fdate=$(echo "${fname}" | sed -n 's/^broadcast-\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)\.md$/\1/p')
+      if [[ -n "${fdate}" && "${fdate}" < "${cutoff_date}" ]]; then
+        docker exec soul-openclaw rm -f "${memory_dir}/${fname}" 2>/dev/null
+        log "Proactive engine: Cleaned up old broadcast memory: ${fname}"
+      fi
+    done <<< "${old_files}"
+  fi
+
+  # Also write to MCP server-memory's memory.jsonl for Knowledge Graph access
+  local memory_jsonl="/home/openclaw/.openclaw/memory/memory.jsonl"
+  local entity_name="broadcast_${now_ts//[:T-]/_}"
+  entity_name="${entity_name//./_}"  # sanitize dots
+
+  # Build observations array: each article as an observation
+  local observations="[]"
+  idx=0
+  while [[ ${idx} -lt ${article_count} ]]; do
+    local obs_title obs_summary obs_category obs_text
+    obs_title=$(echo "${content_json}" | jq -r ".[${idx}].title // \"\"" 2>/dev/null)
+    obs_summary=$(echo "${content_json}" | jq -r ".[${idx}].summary // \"\"" 2>/dev/null)
+    obs_category=$(echo "${content_json}" | jq -r ".[${idx}].category // \"\"" 2>/dev/null)
+    obs_text="${obs_title}"
+    [[ -n "${obs_category}" ]] && obs_text="${obs_text} [${obs_category}]"
+    [[ -n "${obs_summary}" ]] && obs_text="${obs_text}: ${obs_summary}"
+    observations=$(echo "${observations}" | jq --arg o "${obs_text}" '. + [$o]')
+    idx=$((idx + 1))
+  done
+
+  local entity_json
+  entity_json=$(jq -c -n \
+    --arg name "${entity_name}" \
+    --arg type "news_broadcast" \
+    --argjson obs "${observations}" \
+    '{type: "entity", name: $name, entityType: $type, observations: $obs}')
+
+  if printf '%s\n' "${entity_json}" | docker exec -i soul-openclaw tee -a "${memory_jsonl}" > /dev/null 2>&1; then
+    docker exec soul-openclaw chown openclaw:openclaw "${memory_jsonl}" 2>/dev/null || true
+    log "Proactive engine: Saved broadcast entity to memory.jsonl: ${entity_name}"
+  else
+    log "WARN: Proactive engine: Failed to write broadcast entity to memory.jsonl"
+  fi
+
+  # Cleanup: remove old news_broadcast entities from memory.jsonl (older than 7 days)
+  if [[ -n "${cutoff_date}" ]]; then
+    local cutoff_ts="${cutoff_date}T00:00:00Z"
+    cutoff_ts="${cutoff_ts//[:T-]/_}"
+    cutoff_ts="${cutoff_ts//./_}"
+    # Filter out old broadcast entities by comparing entity names
+    local cleanup_script="import sys, json
+lines = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+        if obj.get('entityType') == 'news_broadcast':
+            name = obj.get('name', '')
+            if name.startswith('broadcast_') and name < 'broadcast_${cutoff_ts}':
+                continue
+        lines.append(line)
+    except:
+        lines.append(line)
+print('\\n'.join(lines))"
+    local cleaned
+    cleaned=$(docker exec soul-openclaw cat "${memory_jsonl}" 2>/dev/null | python3 -c "${cleanup_script}" 2>/dev/null)
+    if [[ -n "${cleaned}" ]]; then
+      printf '%s\n' "${cleaned}" | docker exec -i soul-openclaw tee "${memory_jsonl}" > /dev/null 2>&1
+      docker exec soul-openclaw chown openclaw:openclaw "${memory_jsonl}" 2>/dev/null || true
+    fi
+  fi
+}
+
 # ---- Trending News Broadcast ----
 
 # Get recent conversation topic hints from a session file (last few messages)
@@ -1875,6 +2043,10 @@ ${trends_hint:-なし}
     }' > "${tmp}" && mv "${tmp}" "${state_file}"
 
   log "Proactive engine: Broadcast ${broadcast_id} completed (${dest_count} destinations)"
+
+  # Save broadcast content to OpenClaw memory for later reference
+  _save_broadcast_to_openclaw_memory "${content_json}" "${broadcast_id}" "scheduled"
+
   set_activity "idle"
   return 0
 }
@@ -2270,6 +2442,9 @@ ${trends_hint:-なし}
     > "${tmp}" && mv "${tmp}" "${state_file}"
 
   log "Proactive engine: On-demand broadcast ${broadcast_id} completed"
+
+  # Save broadcast content to OpenClaw memory for later reference
+  _save_broadcast_to_openclaw_memory "${selected_content}" "${broadcast_id}" "ondemand"
 
   # Write marker so OpenClaw knows a broadcast was recently served
   # Write per-target marker so OpenClaw knows when each target was last served
