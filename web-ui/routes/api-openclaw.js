@@ -299,5 +299,136 @@ module.exports = function (sharedDir) {
     res.json(reports);
   });
 
+  // ===== Conversation Log Endpoints =====
+
+  // GET /api/openclaw/conversations - 会話ログ取得
+  router.get('/openclaw/conversations', async (req, res) => {
+    const platform = req.query.platform; // "line" | "discord" | undefined
+    const limit = Math.min(parseInt(req.query.limit || '100', 10), 100);
+    const before = req.query.before || null;
+
+    const convDir = path.join(sharedDir, 'openclaw', 'conversations');
+    const platforms = platform ? [platform] : ['line', 'discord'];
+    let allMessages = [];
+
+    for (const p of platforms) {
+      const filePath = path.join(convDir, `${p}.jsonl`);
+      const content = await tailFile(filePath, 500);
+      if (!content) continue;
+      const msgs = content.split('\n')
+        .filter(l => l.trim())
+        .map(l => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(Boolean);
+      allMessages.push(...msgs);
+    }
+
+    // timestamp降順ソート
+    allMessages.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+
+    // beforeフィルタ
+    if (before) {
+      allMessages = allMessages.filter(m => m.timestamp < before);
+    }
+
+    const limited = allMessages.slice(0, limit);
+    res.json({
+      messages: limited,
+      has_more: allMessages.length > limit,
+      oldest_timestamp: limited.length > 0 ? limited[limited.length - 1].timestamp : null
+    });
+  });
+
+  // GET /api/openclaw/emotion-state - 現在の感情状態取得
+  router.get('/openclaw/emotion-state', async (req, res) => {
+    const convDir = path.join(sharedDir, 'openclaw', 'conversations');
+    const latest = await readJson(path.join(sharedDir, 'monitoring', 'latest.json'));
+
+    // 各プラットフォームの直近outboundメッセージを探す
+    let latestOutbound = null;
+    for (const p of ['line', 'discord']) {
+      const content = await tailFile(path.join(convDir, `${p}.jsonl`), 20);
+      if (!content) continue;
+      const msgs = content.split('\n')
+        .filter(l => l.trim())
+        .map(l => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(m => m && m.direction === 'outbound');
+      for (const m of msgs) {
+        if (!latestOutbound || m.timestamp > latestOutbound.timestamp) {
+          latestOutbound = m;
+        }
+      }
+    }
+
+    // Also find the latest inbound message (for talking state detection)
+    let latestInbound = null;
+    for (const p of ['line', 'discord']) {
+      const content = await tailFile(path.join(convDir, `${p}.jsonl`), 20);
+      if (!content) continue;
+      const msgs = content.split('\n')
+        .filter(l => l.trim())
+        .map(l => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(m => m && m.direction === 'inbound');
+      for (const m of msgs) {
+        if (!latestInbound || m.timestamp > latestInbound.timestamp) {
+          latestInbound = m;
+        }
+      }
+    }
+
+    let emotion = 'idle';
+    let source = 'default';
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const oneMinAgo = new Date(Date.now() - 60 * 1000).toISOString();
+
+    // Talking state: inbound within 60s and no outbound after it → bot is processing
+    const isTalking = latestInbound && latestInbound.timestamp > oneMinAgo &&
+      (!latestOutbound || latestOutbound.timestamp < latestInbound.timestamp);
+
+    if (isTalking) {
+      emotion = 'talking';
+      source = 'inbound_detected';
+    } else if (latestOutbound && latestOutbound.timestamp > fiveMinAgo && latestOutbound.emotion_hint) {
+      emotion = latestOutbound.emotion_hint;
+      source = 'emotion_hint';
+    } else if (latest && latest.status === 'error') {
+      emotion = 'error';
+      source = 'monitor_status';
+    } else if (latestOutbound && latestOutbound.timestamp > fiveMinAgo) {
+      emotion = estimateEmotion(latestOutbound.content);
+      source = 'keyword_fallback';
+    }
+
+    res.json({
+      emotion,
+      source,
+      last_message_at: latestOutbound ? latestOutbound.timestamp : null,
+      monitor_status: latest ? latest.status : 'unknown'
+    });
+  });
+
   return router;
 };
+
+// キーワードベースの感情推定
+function estimateEmotion(content) {
+  if (!content) return 'neutral';
+  const text = content.toLowerCase();
+
+  const patterns = [
+    { keywords: ['完了', '成功', 'done', 'ok'], emotion: 'satisfied' },
+    { keywords: ['ありがとう', 'thanks', '嬉しい'], emotion: 'happy' },
+    { keywords: ['調査', '確認中', '検討', '...'], emotion: 'thinking' },
+    { keywords: ['申し訳', 'エラー', '失敗', 'sorry'], emotion: 'concerned' },
+    { keywords: ['error', 'exception', 'timeout'], emotion: 'error' }
+  ];
+
+  const matches = [];
+  for (const p of patterns) {
+    if (p.keywords.some(kw => text.includes(kw))) {
+      matches.push(p.emotion);
+    }
+  }
+
+  if (matches.length === 1) return matches[0];
+  return 'neutral';
+}

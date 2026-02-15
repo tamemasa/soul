@@ -23,6 +23,7 @@ services:
     networks:
       - soul-net
     restart: unless-stopped
+    cpus: 1.0
 
   brain-gorilla:
     build:
@@ -47,6 +48,7 @@ services:
     networks:
       - soul-net
     restart: unless-stopped
+    cpus: 1.0
 
   brain-triceratops:
     build:
@@ -77,6 +79,7 @@ services:
     networks:
       - soul-net
     restart: unless-stopped
+    cpus: 1.0
 
   scheduler:
     build:
@@ -94,6 +97,7 @@ services:
     networks:
       - soul-net
     restart: unless-stopped
+    cpus: 0.5
 
   web-ui:
     build:
@@ -110,6 +114,7 @@ services:
     networks:
       - soul-net
     restart: unless-stopped
+    cpus: 0.5
 
   openclaw:
     build:
@@ -137,6 +142,7 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:size=64m
+    cpus: 1.0
 
   webhook-proxy:
     build:
@@ -144,11 +150,13 @@ services:
     container_name: soul-webhook-proxy
     volumes:
       - webhook-buffer:/webhook_buffer
+      - shared:/shared
     ports:
       - "${OPENCLAW_WEBHOOK_PORT:-8080}:8080"
     networks:
       - openclaw-net
     restart: unless-stopped
+    cpus: 0.3
 
 networks:
   soul-net:

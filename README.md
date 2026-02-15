@@ -423,6 +423,83 @@ Triceratopsが運用する自発的情報配信機能（`proactive-suggestions.s
 
 詳細設計は [`docs/proactive-suggestion-system.md`](docs/proactive-suggestion-system.md) を参照。
 
+### 擬人化インターフェイス（会話ビュー）
+
+Web UIのOpenClaw画面に、擬人化アバターと統合会話ビューを搭載。
+
+#### 機能
+
+- **感情アバター**: OpenClawの現在の感情状態をSVGベースのアバターで表示。6つの感情状態（idle/talking/thinking/happy/concerned/error）に対応し、CSSアニメーションで表現
+- **会話タイムライン**: LINE・Discordでの全会話をタイムラインで閲覧可能。プラットフォームバッジ（LINE緑/Discord青紫）、方向インジケーター（受信/送信）、感情バッジを表示
+- **フィルタ・検索**: プラットフォーム別・方向別のフィルタ、テキスト検索、ページネーション（100件ずつ読み込み）
+- **リアルタイム更新**: SSE（`conversation:updated`イベント）で会話データ更新時に自動リフレッシュ
+- **タブUI**: 既存のモニタリング画面と会話ログ画面をタブで切り替え
+
+#### 会話データ
+
+会話データは `/shared/openclaw/conversations/` にJSONL形式で配置:
+
+```
+/shared/openclaw/conversations/
+  line.jsonl          # LINE会話ログ
+  discord.jsonl       # Discord会話ログ
+  archive/            # アーカイブ用ディレクトリ
+```
+
+各行のスキーマ:
+```json
+{
+  "timestamp": "2026-02-15T06:30:00Z",
+  "platform": "line",
+  "channel": "group_abc123",
+  "user": "masaru",
+  "direction": "inbound",
+  "content": "メッセージ内容",
+  "emotion_hint": null
+}
+```
+
+`emotion_hint` はOpenClawのoutboundメッセージにのみ付与される感情タグ（`happy`/`thinking`/`concerned`/`neutral`/`satisfied`/`error`）。
+
+#### リアルタイム感情表現
+
+LINE Webhookを経由するメッセージは、`webhook-proxy`がペイロードをパースしてリアルタイムに会話ログへ記録する。
+
+**動作の仕組み:**
+
+1. LINEからのWebhookが`webhook-proxy`に到着
+2. proxyは即座に200を返却し、OpenClawへ転送（既存動作を維持）
+3. 転送と並行して、`events[].type === 'message'`のイベントをパースし`/shared/openclaw/conversations/line.jsonl`へappend
+4. chokidarがファイル変更を検知し、SSE(`conversation:updated`)で Web UIに通知
+5. Web UIがemotion-state APIを再取得し、アバターの感情が更新される
+
+**感情推定（inbound）:**
+- `ありがとう`/`嬉しい`/`やった` → `happy`
+- `困った`/`どうしよう`/`心配` → `concerned`
+- `？`/`?`/`教えて`/`どう` → `thinking`
+- その他 → `idle`
+
+**talking状態検出:**
+- 直近60秒以内にinboundメッセージがあり、かつその後のoutboundメッセージがない場合、botが「処理中」と判断してアバターをtalking状態にする
+- これによりメッセージ受信からBot応答完了までアバターが「考え中」を表現する
+
+**プラットフォーム別の運用差異:**
+
+| プラットフォーム | inbound捕捉 | outbound捕捉 |
+|----------------|-------------|--------------|
+| **LINE** | 自動（webhook-proxy経由） | 手動配置（※） |
+| **Discord** | 手動配置 | 手動配置 |
+
+※ OpenClawのログファイルには応答テキストが含まれないため、outboundの自動捕捉は現時点で実装不可。LINE/Discord共にoutbound会話データは手動でJSONLに配置する運用。
+
+#### 安全性
+
+- webhook-proxyでのパース・ログ書き出しはtry-catchで完全に分離されており、エラーが発生してもproxy本来の動作（200返却・OpenClawへの転送）は絶対に阻害されない
+- 非テキストメッセージ（画像・スタンプ等）は`[image]`/`[sticker]`等の簡略表記で記録
+- ユーザーIDは末尾8文字のみ記録（プライバシー配慮）
+
+- 設計ドキュメント: [`docs/design-openclaw-persona.md`](docs/design-openclaw-persona.md)
+
 ### パーソナリティ改善システム
 
 Triceratopsが運用するOpenClawの人格改善機能（`personality-improvement.sh`）。3つの入力経路でSOUL.md/AGENTS.mdを更新できる。

@@ -1360,3 +1360,216 @@ body {
   padding: 2px 0;
   font-size: 0.9rem;
 }
+
+/* ─── OpenClaw Avatar ─── */
+.openclaw-avatar {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 2px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.5s ease, box-shadow 0.5s ease;
+  flex-shrink: 0;
+}
+.avatar-idle    { border-color: var(--text-dim); }
+.avatar-talking { border-color: var(--accent);  box-shadow: 0 0 16px rgba(96,165,250,0.3); }
+.avatar-thinking { border-color: var(--warning); box-shadow: 0 0 16px rgba(245,158,11,0.3); }
+.avatar-happy   { border-color: var(--success); box-shadow: 0 0 16px rgba(52,211,153,0.3); }
+.avatar-concerned { border-color: var(--vote-modify); box-shadow: 0 0 16px rgba(251,191,36,0.3); }
+.avatar-error   { border-color: var(--error);   box-shadow: 0 0 16px rgba(239,68,68,0.3); }
+
+.avatar-talking { animation: talking-pulse 1.5s ease-in-out infinite; }
+.avatar-thinking { animation: thinking-pulse 2s ease-in-out infinite; }
+.avatar-happy { animation: happy-bounce 1s ease-in-out infinite; }
+.avatar-error { animation: error-shake 0.5s ease-in-out; }
+
+@keyframes talking-pulse {
+  0%, 100% { box-shadow: 0 0 16px rgba(96,165,250,0.3); }
+  50%      { box-shadow: 0 0 24px rgba(96,165,250,0.5); }
+}
+@keyframes thinking-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+@keyframes happy-bounce {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-4px); }
+}
+@keyframes error-shake {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-3px); }
+  75%      { transform: translateX(3px); }
+}
+
+.avatar-section {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 16px 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  margin-bottom: 16px;
+}
+.avatar-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.avatar-emotion-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.avatar-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: auto;
+}
+
+/* ─── Platform Badges ─── */
+.badge-line {
+  background: rgba(6, 199, 85, 0.15);
+  color: #06c755;
+  border: 1px solid rgba(6, 199, 85, 0.3);
+}
+.badge-discord {
+  background: rgba(88, 101, 242, 0.15);
+  color: #5865f2;
+  border: 1px solid rgba(88, 101, 242, 0.3);
+}
+
+/* ─── Conversation Messages ─── */
+.conv-message {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin-bottom: 6px;
+}
+.conv-message.outbound {
+  border-left: 3px solid var(--accent);
+  background: rgba(96, 165, 250, 0.05);
+}
+.conv-message.inbound {
+  border-left: 3px solid var(--text-dim);
+}
+.conv-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.conv-user {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.conv-direction {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.conv-time {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+.conv-body {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.conv-emotion {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(52, 211, 153, 0.1);
+  color: var(--success);
+}
+
+/* ─── Conversation Filter Bar ─── */
+.conv-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.conv-filter-group {
+  display: flex;
+  gap: 4px;
+}
+.conv-filter-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.conv-filter-btn:hover { color: var(--text-secondary); border-color: var(--text-dim); }
+.conv-filter-btn.active {
+  background: var(--accent-glow);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.conv-search {
+  flex: 1;
+  min-width: 120px;
+  padding: 4px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+}
+.conv-search:focus { outline: none; border-color: var(--accent); }
+.conv-search::placeholder { color: var(--text-dim); }
+
+.conv-load-more {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  margin-top: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.conv-load-more:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ─── OpenClaw Mobile ─── */
+@media (max-width: 768px) {
+  .openclaw-avatar { width: 60px; height: 60px; }
+  .openclaw-avatar svg { width: 60px; height: 60px; }
+  .avatar-section { flex-direction: column; text-align: center; gap: 10px; }
+  .avatar-meta { margin-left: 0; align-items: center; }
+  .conv-filter-bar { flex-direction: column; align-items: stretch; }
+  .conv-filter-group { justify-content: center; }
+  .conv-message { padding: 8px 10px; }
+  .conv-load-more { padding: 14px; }
+}

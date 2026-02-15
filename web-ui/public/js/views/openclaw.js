@@ -1,19 +1,31 @@
 // Unified OpenClaw Monitor Dashboard
-// Consolidates policy, security, and integrity monitoring into a single view
+// Consolidates policy, security, and integrity monitoring + conversation log + avatar
+
+import { renderAvatar, getEmotionLabel } from '../components/openclaw-avatar.js';
 
 let currentFilter = 'all'; // all, policy, security, integrity
+let currentTab = 'monitoring'; // 'monitoring' | 'conversations'
+let currentEmotion = 'idle';
+let conversationFilter = { platform: 'all', direction: 'all', search: '' };
+let loadedMessages = [];
+let oldestTimestamp = null;
+let hasMore = false;
 
 export async function renderOpenClaw(app) {
   app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
-  const [statusData, alerts, pendingActions, remediation, integrity, researchRequests] = await Promise.all([
+  // Fetch emotion state alongside other data
+  const [statusData, alerts, pendingActions, remediation, integrity, researchRequests, emotionData] = await Promise.all([
     fetch('/api/openclaw/status').then(r => r.json()),
     fetch('/api/openclaw/alerts?limit=30').then(r => r.json()),
     fetch('/api/openclaw/pending-actions').then(r => r.json()),
     fetch('/api/openclaw/remediation?limit=20').then(r => r.json()),
     fetch('/api/openclaw/integrity').then(r => r.json()).catch(() => ({ status: 'unknown' })),
-    fetch('/api/openclaw/research-requests').then(r => r.json()).catch(() => [])
+    fetch('/api/openclaw/research-requests').then(r => r.json()).catch(() => []),
+    fetch('/api/openclaw/emotion-state').then(r => r.json()).catch(() => ({ emotion: 'idle', source: 'default', last_message_at: null, monitor_status: 'unknown' }))
   ]);
+
+  currentEmotion = emotionData.emotion || 'idle';
 
   const state = statusData.state || {};
   const summary = statusData.summary || {};
@@ -26,14 +38,51 @@ export async function renderOpenClaw(app) {
     ? alerts
     : alerts.filter(a => (a.category || 'policy') === currentFilter);
 
+  const lastActiveAgo = emotionData.last_message_at ? formatRelativeTime(emotionData.last_message_at) : '-';
+
   app.innerHTML = `
     <div class="page-header">
       <h1 class="page-title">OpenClaw Monitor</h1>
       <span class="badge badge-status badge-${statusBadge(state.status)}">${state.status || 'unknown'}</span>
     </div>
 
+    <!-- Avatar Section -->
+    <div class="avatar-section">
+      ${renderAvatar(currentEmotion)}
+      <div class="avatar-status">
+        <div class="avatar-emotion-label">${getEmotionLabel(currentEmotion)}</div>
+        <div class="text-sm text-dim">Source: ${emotionData.source || 'default'}</div>
+      </div>
+      <div class="avatar-meta">
+        <span>Last active: ${lastActiveAgo}</span>
+        <span>Monitor: ${emotionData.monitor_status || 'unknown'}</span>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab ${currentTab === 'monitoring' ? 'active' : ''}" onclick="window.__switchOpenClawTab('monitoring')">モニタリング</button>
+      <button class="tab ${currentTab === 'conversations' ? 'active' : ''}" onclick="window.__switchOpenClawTab('conversations')">会話ログ</button>
+    </div>
+
+    <!-- Tab Content -->
+    <div id="openclaw-tab-content">
+      ${currentTab === 'monitoring'
+        ? renderMonitoringTab(state, summary, bySeverity, byCategory, pendingCount, pendingActions, filteredAlerts, remediation, researchRequests, integrity)
+        : '<div class="loading"><div class="spinner"></div></div>'}
+    </div>
+  `;
+
+  // Load conversations if on conversations tab
+  if (currentTab === 'conversations') {
+    await loadConversations();
+  }
+}
+
+function renderMonitoringTab(state, summary, bySeverity, byCategory, pendingCount, pendingActions, filteredAlerts, remediation, researchRequests, integrity) {
+  return `
     <!-- Monitor Summary -->
-    <div class="text-sm text-dim" style="margin-top:8px; display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+    <div class="text-sm text-dim" style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
       <span>Last: ${formatTime(state.last_check_at)}</span>
       <span>ポリシー: 5min / フル: 10min</span>
       <span>Checks: ${state.check_count || 0}</span>
@@ -163,6 +212,158 @@ export async function renderOpenClaw(app) {
   `;
 }
 
+async function loadConversations(append) {
+  if (!append) {
+    loadedMessages = [];
+    oldestTimestamp = null;
+    hasMore = false;
+  }
+
+  const params = new URLSearchParams({ limit: '100' });
+  if (conversationFilter.platform !== 'all') params.set('platform', conversationFilter.platform);
+  if (oldestTimestamp && append) params.set('before', oldestTimestamp);
+
+  try {
+    const data = await fetch(`/api/openclaw/conversations?${params}`).then(r => r.json());
+    if (append) {
+      loadedMessages.push(...data.messages);
+    } else {
+      loadedMessages = data.messages;
+    }
+    hasMore = data.has_more;
+    oldestTimestamp = data.oldest_timestamp;
+  } catch {
+    loadedMessages = [];
+    hasMore = false;
+  }
+
+  renderConversationTab();
+}
+
+function renderConversationTab() {
+  const container = document.getElementById('openclaw-tab-content');
+  if (!container) return;
+
+  // Apply client-side filters
+  let filtered = loadedMessages;
+  if (conversationFilter.direction !== 'all') {
+    filtered = filtered.filter(m => m.direction === conversationFilter.direction);
+  }
+  if (conversationFilter.search) {
+    const q = conversationFilter.search.toLowerCase();
+    filtered = filtered.filter(m => (m.content || '').toLowerCase().includes(q));
+  }
+
+  container.innerHTML = `
+    <!-- Filter Bar -->
+    <div class="conv-filter-bar">
+      <div class="conv-filter-group">
+        ${['all', 'line', 'discord'].map(p => `
+          <button class="conv-filter-btn ${conversationFilter.platform === p ? 'active' : ''}"
+                  onclick="window.__convFilterPlatform('${p}')">${p === 'all' ? 'All' : p.charAt(0).toUpperCase() + p.slice(1)}</button>
+        `).join('')}
+      </div>
+      <div class="conv-filter-group">
+        ${[['all', 'All'], ['inbound', '受信'], ['outbound', '送信']].map(([v, l]) => `
+          <button class="conv-filter-btn ${conversationFilter.direction === v ? 'active' : ''}"
+                  onclick="window.__convFilterDirection('${v}')">${l}</button>
+        `).join('')}
+      </div>
+      <input type="text" class="conv-search" placeholder="検索..."
+             value="${escapeHtml(conversationFilter.search)}"
+             oninput="window.__convFilterSearch(this.value)" />
+    </div>
+
+    <!-- Messages -->
+    ${filtered.length > 0 ? filtered.map(m => renderMessageCard(m)).join('') : '<div class="empty-state">会話データがまだありません</div>'}
+
+    ${hasMore ? '<button class="conv-load-more" onclick="window.__convLoadMore()">さらに読み込む</button>' : ''}
+  `;
+}
+
+function renderMessageCard(m) {
+  const platformBadge = m.platform === 'line'
+    ? '<span class="badge badge-line">LINE</span>'
+    : '<span class="badge badge-discord">Discord</span>';
+  const dirLabel = m.direction === 'inbound' ? '受信' : '送信';
+  const emotionBadge = m.direction === 'outbound' && m.emotion_hint
+    ? `<span class="conv-emotion">${escapeHtml(m.emotion_hint)}</span>`
+    : '';
+
+  return `
+    <div class="conv-message ${m.direction}">
+      <div class="conv-header">
+        ${platformBadge}
+        <span class="conv-user">${escapeHtml(m.user || 'unknown')}</span>
+        <span class="conv-direction">(${dirLabel})</span>
+        ${emotionBadge}
+        <span class="conv-time">${formatMessageTime(m.timestamp)}</span>
+      </div>
+      <div class="conv-body">${escapeHtml(m.content || '')}</div>
+    </div>
+  `;
+}
+
+// Tab switch handler
+window.__switchOpenClawTab = function(tab) {
+  currentTab = tab;
+  const app = document.getElementById('app');
+  renderOpenClaw(app);
+};
+
+// Conversation filter handlers
+window.__convFilterPlatform = function(platform) {
+  conversationFilter.platform = platform;
+  loadConversations();
+};
+
+window.__convFilterDirection = function(direction) {
+  conversationFilter.direction = direction;
+  renderConversationTab();
+};
+
+window.__convFilterSearch = function(search) {
+  conversationFilter.search = search;
+  renderConversationTab();
+};
+
+window.__convLoadMore = function() {
+  loadConversations(true);
+};
+
+// Refresh avatar emotion state (works regardless of active tab)
+async function refreshAvatarEmotion() {
+  try {
+    const emotionData = await fetch('/api/openclaw/emotion-state').then(r => r.json());
+    currentEmotion = emotionData.emotion || 'idle';
+    const avatarContainer = document.querySelector('.avatar-section');
+    if (avatarContainer) {
+      const lastActiveAgo = emotionData.last_message_at ? formatRelativeTime(emotionData.last_message_at) : '-';
+      avatarContainer.innerHTML = `
+        ${renderAvatar(currentEmotion)}
+        <div class="avatar-status">
+          <div class="avatar-emotion-label">${getEmotionLabel(currentEmotion)}</div>
+          <div class="text-sm text-dim">Source: ${emotionData.source || 'default'}</div>
+        </div>
+        <div class="avatar-meta">
+          <span>Last active: ${lastActiveAgo}</span>
+          <span>Monitor: ${emotionData.monitor_status || 'unknown'}</span>
+        </div>
+      `;
+    }
+  } catch { /* ignore */ }
+}
+
+// Refresh conversations (called from SSE handler)
+window.__refreshOpenClawConversations = async function() {
+  // Always refresh avatar emotion, even when on monitoring tab
+  await refreshAvatarEmotion();
+
+  if (currentTab === 'conversations') {
+    await loadConversations();
+  }
+};
+
 // 手動チェックトリガーハンドラー (60秒クールダウン)
 let __forceCheckCooldown = false;
 window.__triggerManualCheck = async function() {
@@ -235,6 +436,32 @@ function severityColor(severity) {
 function formatTime(ts) {
   if (!ts) return '-';
   try { return new Date(ts).toLocaleString('ja-JP', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return ts; }
+}
+
+function formatMessageTime(ts) {
+  if (!ts) return '-';
+  try {
+    const d = new Date(ts);
+    const now = new Date();
+    if (d.toDateString() === now.toDateString()) {
+      return d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+    }
+    return d.toLocaleString('ja-JP', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  } catch { return ts; }
+}
+
+function formatRelativeTime(ts) {
+  if (!ts) return '-';
+  try {
+    const diff = Date.now() - new Date(ts).getTime();
+    const minutes = Math.floor(diff / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  } catch { return ts; }
 }
 
 function escapeHtml(str) {

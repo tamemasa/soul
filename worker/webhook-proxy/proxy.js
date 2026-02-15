@@ -10,6 +10,7 @@ const REPLAY_INTERVAL_MS = 5000;
 const PROBE_INTERVAL_MS = 3000;
 const PROBE_TIMEOUT_MS = 3000;
 const GRACE_PERIOD_MS = parseInt(process.env.UPSTREAM_GRACE_PERIOD_MS || "60000", 10);
+const CONV_DIR = "/shared/openclaw/conversations";
 const PROXY_STARTED_AT = Date.now();
 const PROXY_FRESH_THRESHOLD_MS = 30000;
 
@@ -18,6 +19,99 @@ let firstRespondAt = 0;
 
 // Ensure buffer directory exists
 fs.mkdirSync(BUFFER_DIR, { recursive: true });
+
+// Ensure conversation log directory exists
+try { fs.mkdirSync(CONV_DIR, { recursive: true }); } catch { /* ignore */ }
+
+// ─── LINE Webhook Conversation Logging ───
+
+function estimateEmotionFromText(text) {
+  if (!text) return "idle";
+  if (/ありがとう|嬉しい|やった|thanks|thx/i.test(text)) return "happy";
+  if (/困った|どうしよう|心配|ヤバい|まずい/i.test(text)) return "concerned";
+  if (/？|\?|教えて|どう|なに|いつ|どこ|why|how|what/i.test(text)) return "thinking";
+  return "idle";
+}
+
+function extractContentFromEvent(event) {
+  if (!event || event.type !== "message") return null;
+  const msg = event.message;
+  if (!msg) return null;
+
+  switch (msg.type) {
+    case "text":
+      return msg.text || "";
+    case "image":
+      return "[image]";
+    case "video":
+      return "[video]";
+    case "audio":
+      return "[audio]";
+    case "file":
+      return `[file: ${msg.fileName || "unknown"}]`;
+    case "location":
+      return `[location: ${msg.title || msg.address || "unknown"}]`;
+    case "sticker":
+      return "[sticker]";
+    default:
+      return `[${msg.type || "unknown"}]`;
+  }
+}
+
+function extractUserFromSource(source) {
+  if (!source) return "unknown";
+  return source.userId ? source.userId.slice(-8) : "unknown";
+}
+
+function extractChannelFromSource(source) {
+  if (!source) return "unknown";
+  if (source.groupId) return `group_${source.groupId.slice(-8)}`;
+  if (source.roomId) return `room_${source.roomId.slice(-8)}`;
+  return `dm_${(source.userId || "unknown").slice(-8)}`;
+}
+
+function logLineInbound(body) {
+  try {
+    let payload;
+    try {
+      payload = JSON.parse(body.toString("utf8"));
+    } catch {
+      return; // not JSON, skip
+    }
+
+    if (!payload.events || !Array.isArray(payload.events)) return;
+
+    const lines = [];
+    for (const event of payload.events) {
+      if (event.type !== "message") continue;
+
+      const content = extractContentFromEvent(event);
+      if (content === null) continue;
+
+      const entry = {
+        timestamp: new Date(event.timestamp || Date.now()).toISOString(),
+        platform: "line",
+        direction: "inbound",
+        channel: extractChannelFromSource(event.source),
+        user: extractUserFromSource(event.source),
+        content,
+        emotion_hint: estimateEmotionFromText(
+          event.message && event.message.type === "text" ? event.message.text : null
+        ),
+      };
+      lines.push(JSON.stringify(entry));
+    }
+
+    if (lines.length === 0) return;
+
+    const filePath = path.join(CONV_DIR, "line.jsonl");
+    fs.appendFileSync(filePath, lines.join("\n") + "\n");
+    log(`Logged ${lines.length} LINE inbound message(s)`);
+  } catch (err) {
+    // NEVER let logging errors affect proxy operation
+    log(`[warn] LINE log error (non-fatal): ${err.message}`);
+  }
+}
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -218,6 +312,9 @@ const server = http.createServer((req, res) => {
     // Always return 200 to LINE immediately
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end("{}");
+
+    // Log LINE inbound messages (fire-and-forget, never blocks proxy)
+    logLineInbound(body);
 
     // If upstream is not ready, buffer immediately
     if (upstreamState !== "READY") {
