@@ -190,9 +190,11 @@ export async function renderDiscussionDetail(app, taskId) {
         decision: data.decision,
         result: data.result,
         review: data.review,
+        reviewHistory: data.reviewHistory || [],
         isExecuting,
         isReviewing,
         progress: data.progress,
+        remediationProgress: data.remediationProgress,
         history: data.history || [],
         isAnnouncing,
         announceProgress: data.announceProgress,
@@ -345,7 +347,8 @@ function buildFingerprint(data, status) {
   const hasAnnouncement = data.decision?.announcement?.summary ? 1 : 0;
   const hasResult = data.result?.result ? 1 : 0;
   const hasReview = data.review?.verdict ? 1 : 0;
-  return `${status}_r${currentRound}_n${totalResponses}_c${commentCount}_d${hasDecision}_a${hasAnnouncement}_x${hasResult}_rv${hasReview}`;
+  const reviewHistoryCount = (data.reviewHistory || []).length;
+  return `${status}_r${currentRound}_n${totalResponses}_c${commentCount}_d${hasDecision}_a${hasAnnouncement}_x${hasResult}_rv${hasReview}_rh${reviewHistoryCount}`;
 }
 
 function startStatusPolling(taskId, app, lastFingerprint) {

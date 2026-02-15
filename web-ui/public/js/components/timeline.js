@@ -21,7 +21,8 @@ const ALL_NODES = ['panda', 'gorilla', 'triceratops'];
 export function renderTimeline(rounds, options = {}) {
   const {
     comments = [], isDiscussing = false, currentRound = 0, maxRounds = 3,
-    decision = null, result = null, review = null, isExecuting = false, isReviewing = false, progress = null,
+    decision = null, result = null, review = null, reviewHistory = [], isExecuting = false, isReviewing = false, progress = null,
+    remediationProgress = null,
     history = [], isAnnouncing = false, announceProgress = null,
     taskId = null, previousAttempts = []
   } = options;
@@ -99,7 +100,7 @@ export function renderTimeline(rounds, options = {}) {
         out += renderDecisionItem(decision);
         out += renderAnnouncementItem(decision, isAnnouncing, announceProgress);
         out += renderExecutionItem(result, isExecuting, progress, decision, previousAttempts);
-        out += renderReviewItem(review, isReviewing);
+        out += renderReviewCycle(reviewHistory, review, isReviewing, remediationProgress, decision);
       }
     }
     return out;
@@ -165,7 +166,7 @@ export function renderTimeline(rounds, options = {}) {
       html += renderDecisionItem(decision);
       html += renderAnnouncementItem(decision, isAnnouncing, announceProgress);
       html += renderExecutionItem(result, isExecuting, progress, decision, previousAttempts);
-      html += renderReviewItem(review, isReviewing);
+      html += renderReviewCycle(reviewHistory, review, isReviewing, remediationProgress, decision);
     }
 
     // Render floating events between this round and the next
@@ -341,12 +342,55 @@ function renderExecutionItem(result, isExecuting, progress, decision, previousAt
     </div>`;
 }
 
+// --- Review cycle: history reviews → remediation → current review ---
+function renderReviewCycle(reviewHistory, review, isReviewing, remediationProgress, decision) {
+  let html = '';
+
+  // Render past review+remediation cycles from history
+  if (reviewHistory && reviewHistory.length > 0) {
+    for (let i = 0; i < reviewHistory.length; i++) {
+      html += renderReviewItem(reviewHistory[i], false, i + 1);
+      // Show remediation section after each failed review
+      html += renderRemediationItem(decision, i + 1, i === reviewHistory.length - 1 ? remediationProgress : null);
+    }
+  }
+
+  // Render current review (or reviewing state)
+  const reviewNum = (reviewHistory?.length || 0) + 1;
+  html += renderReviewItem(review, isReviewing, reviewHistory?.length > 0 ? reviewNum : 0);
+
+  return html;
+}
+
+// --- Remediation timeline item ---
+function renderRemediationItem(decision, attempt, progress) {
+  if (!decision?.remediation_count && !decision?.remediated) return '';
+
+  let inner = '';
+  if (progress?.length) {
+    inner = renderProgressSnapshotInline(progress);
+  }
+
+  return `
+    <div class="timeline-item timeline-remediation-item">
+      <div class="timeline-round">Remediation${attempt > 0 ? ' #' + attempt : ''}</div>
+      <div class="timeline-remediation-card">
+        <div class="flex items-center gap-8 mb-4">
+          ${nodeBadge(decision?.executor || 'triceratops')}
+          <span class="badge" style="background:rgba(251,191,36,0.15);color:#fbbf24">REMEDIATION</span>
+        </div>
+        ${inner || '<div class="text-sm text-secondary">修正を実行しました</div>'}
+      </div>
+    </div>`;
+}
+
 // --- Review timeline item ---
-function renderReviewItem(review, isReviewing = false) {
+function renderReviewItem(review, isReviewing = false, reviewNum = 0) {
+  const reviewLabel = reviewNum > 0 ? `Review #${reviewNum}` : 'Review';
   if (isReviewing && !review?.verdict) {
     return `
     <div class="timeline-item timeline-review-item">
-      <div class="timeline-round">Review</div>
+      <div class="timeline-round">${reviewLabel}</div>
       <div class="timeline-review-card">
         <div class="response-header">
           ${nodeBadge('panda')}
@@ -364,7 +408,7 @@ function renderReviewItem(review, isReviewing = false) {
 
   return `
     <div class="timeline-item timeline-review-item">
-      <div class="timeline-round">Review</div>
+      <div class="timeline-round">${reviewLabel}</div>
       <div class="timeline-review-card ${verdictClass}">
         <div class="flex items-center gap-8 mb-4">
           ${nodeBadge(review.reviewer || 'panda')}

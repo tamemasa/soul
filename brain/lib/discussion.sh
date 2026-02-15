@@ -818,10 +818,23 @@ summaryとviolationsとremediation_instructionsは日本語で記述すること
       "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
     _archive_task "${task_id}"
   else
-    log "Review FAILED for task ${task_id}, transitioning to remediating"
-    tmp=$(mktemp)
-    jq '.status = "remediating" | .review_verdict = "fail" | .remediation_started_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
-      "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+    # Check remediation count to prevent infinite loop (max 2 remediation cycles)
+    local remediation_count
+    remediation_count=$(jq -r '.remediation_count // 0' "${decision_file}")
+    local max_remediation=2
+
+    if [[ ${remediation_count} -ge ${max_remediation} ]]; then
+      log "Review FAILED for task ${task_id}, but max remediation count (${max_remediation}) reached, completing"
+      tmp=$(mktemp)
+      jq '.status = "completed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .review_verdict = "fail" | .remediation_exhausted = true' \
+        "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+      _archive_task "${task_id}"
+    else
+      log "Review FAILED for task ${task_id}, transitioning to remediating (attempt $((remediation_count + 1))/${max_remediation})"
+      tmp=$(mktemp)
+      jq '.status = "remediating" | .review_verdict = "fail" | .remediation_started_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+        "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+    fi
   fi
 
   set_activity "idle"
@@ -965,12 +978,26 @@ ${remediation_instructions}
 }
 EOF
 
-  # Complete directly (no re-review to prevent infinite loop)
+  # Save current review to history before re-review
+  local review_file="${SHARED_DIR}/decisions/${task_id}_review.json"
+  local review_history_file="${SHARED_DIR}/decisions/${task_id}_review_history.json"
+  if [[ -f "${review_file}" ]]; then
+    local history_arr="[]"
+    if [[ -f "${review_history_file}" ]]; then
+      history_arr=$(cat "${review_history_file}")
+    fi
+    tmp=$(mktemp)
+    jq --slurpfile rev "${review_file}" '. + $rev' <<< "${history_arr}" > "${tmp}" && mv "${tmp}" "${review_history_file}"
+    rm -f "${review_file}"
+  fi
+
+  # Increment remediation count and transition to reviewing for re-review
+  local current_count
+  current_count=$(jq -r '.remediation_count // 0' "${decision_file}")
   tmp=$(mktemp)
-  jq '.status = "completed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .remediated = true' \
+  jq '.status = "reviewing" | .executed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .remediated = true | .remediation_count = '"$((current_count + 1))"'' \
     "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
-  _archive_task "${task_id}"
 
   set_activity "idle"
-  log "Task ${task_id} remediation completed"
+  log "Task ${task_id} remediation completed, pending re-review (attempt $((current_count + 1)))"
 }

@@ -100,6 +100,9 @@ module.exports = function (sharedDir) {
     // Include execution history (previous cycles)
     const history = await readJson(path.join(sharedDir, 'decisions', `${taskId}_history.json`)) || [];
 
+    // Include review history (previous reviews within current cycle, for remediation tracking)
+    const reviewHistory = await readJson(path.join(sharedDir, 'decisions', `${taskId}_review_history.json`)) || [];
+
     // Include comments
     const comments = await readJson(path.join(dDir, 'comments.json')) || [];
 
@@ -130,7 +133,13 @@ module.exports = function (sharedDir) {
       }
     }
 
-    res.json({ task_id: taskId, task, status, rounds, decision, result, review, comments, progress, announceProgress, history, previousAttempts });
+    // Load remediation progress (pre-remediation execution progress backup)
+    let remediationProgress = null;
+    if (decision?.remediation_count > 0 || effectiveStatus === 'remediating') {
+      remediationProgress = await readProgressFile(path.join(sharedDir, 'decisions', `${taskId}_progress_preremediation.jsonl`));
+    }
+
+    res.json({ task_id: taskId, task, status, rounds, decision, result, review, reviewHistory, comments, progress, announceProgress, history, previousAttempts, remediationProgress });
   });
 
   // Progress endpoint for real-time execution monitoring
@@ -363,6 +372,7 @@ module.exports = function (sharedDir) {
     const decision = await readJson(path.join(taskDir, `${taskId}.json`));
     const result = await readJson(path.join(taskDir, `${taskId}_result.json`));
     const review = await readJson(path.join(taskDir, `${taskId}_review.json`));
+    const reviewHistory = await readJson(path.join(taskDir, `${taskId}_review_history.json`)) || [];
 
     // Read rounds
     const roundDirs = await listDirs(discPath);
@@ -393,9 +403,11 @@ module.exports = function (sharedDir) {
       decision,
       result,
       review,
+      reviewHistory,
       comments,
       progress: null,
       announceProgress: null,
+      remediationProgress: null,
       history: [],
       previousAttempts: []
     });

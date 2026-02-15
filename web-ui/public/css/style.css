@@ -328,6 +328,15 @@ body {
 }
 .review-remediation { font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
 
+/* ─── Timeline: Remediation ─── */
+.timeline-remediation-item::before { background: #fbbf24; box-shadow: 0 0 8px rgba(251,191,36,0.4); }
+.timeline-remediation-card {
+  background: var(--bg-secondary);
+  border: 1px solid rgba(251,191,36,0.3);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
 /* ─── Timeline: User Comments ─── */
 .timeline-comment-item::before {
   background: var(--accent);
