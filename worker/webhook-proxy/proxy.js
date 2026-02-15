@@ -201,8 +201,6 @@ function discoverLineSessions() {
   return [];
 }
 
-const EMOTION_TAG_RE = /\n?\[EMOTION:\s*(happy|sad|angry|surprised|thinking|concerned|satisfied|neutral)\]\s*$/i;
-
 function extractOutboundMessages(content, afterTimestamp) {
   const messages = [];
   const lines = content.split("\n").filter((l) => l.trim());
@@ -219,18 +217,9 @@ function extractOutboundMessages(content, afterTimestamp) {
       }
       if (texts.length === 0) continue;
 
-      let combined = texts.join("\n");
-      let emotion_tag = null;
-      const emotionMatch = combined.match(EMOTION_TAG_RE);
-      if (emotionMatch) {
-        emotion_tag = emotionMatch[1].toLowerCase();
-        combined = combined.replace(EMOTION_TAG_RE, "").trimEnd();
-      }
-
       messages.push({
         timestamp: obj.timestamp,
-        content: combined,
-        emotion_tag,
+        content: texts.join("\n"),
       });
     } catch {}
   }
@@ -288,7 +277,7 @@ function pollOutboundMessages() {
           channel,
           user: "openclaw",
           content: m.content,
-          emotion_hint: m.emotion_tag || estimateOutboundEmotion(m.content),
+          emotion_hint: estimateOutboundEmotion(m.content),
         };
         logLines.push(JSON.stringify(entry));
         lastOutboundTs[platform] = m.timestamp;
