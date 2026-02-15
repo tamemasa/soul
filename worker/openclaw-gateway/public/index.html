@@ -89,14 +89,33 @@ async function fetchJson(url) {
   }
 }
 
+let currentEmotion = '';
+
 async function updateEmotion() {
   const data = await fetchJson('/api/emotion');
   if (!data) return;
 
   const emotion = VALID_EMOTIONS.includes(data.emotion) ? data.emotion : 'neutral';
-  document.getElementById('emotion-avatar').src = `/img/emotions/${emotion}.png`;
-  document.getElementById('emotion-label').textContent = emotion;
+  const avatar = document.getElementById('emotion-avatar');
+  const label = document.getElementById('emotion-label');
+
+  avatar.src = `/img/emotions/${emotion}.png`;
+  label.textContent = emotion;
   document.getElementById('last-active').textContent = relativeTime(data.last_message_at);
+
+  if (emotion !== currentEmotion) {
+    // Update CSS classes
+    VALID_EMOTIONS.forEach(e => { avatar.classList.remove(e); label.classList.remove(e); });
+    avatar.classList.add(emotion);
+    label.classList.add(emotion);
+
+    // Re-trigger animation on emotion change
+    avatar.style.animation = 'none';
+    avatar.offsetHeight; // force reflow
+    avatar.style.animation = '';
+
+    currentEmotion = emotion;
+  }
 }
 
 async function updateChart() {
