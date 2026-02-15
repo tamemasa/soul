@@ -12,14 +12,15 @@ export async function renderDashboard(app) {
     app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
   }
 
-  const [status, discussions, monitorStatus, broadcastStatus, personalityData, metrics, tokenUsage] = await Promise.all([
+  const [status, discussions, monitorStatus, broadcastStatus, personalityData, metrics, tokenUsage, latestEval] = await Promise.all([
     fetch('/api/status').then(r => r.json()),
     fetch('/api/discussions').then(r => r.json()),
     fetch('/api/openclaw/status').then(r => r.json()).catch(() => ({ state: { status: 'unknown', check_count: 0 }, summary: {} })),
     fetch('/api/broadcast/status').then(r => r.json()).catch(() => ({ broadcast: { status: 'not_started' }, engine: {}, trigger: null })),
     fetch('/api/personality/history').then(r => r.json()).catch(() => ({ trigger: null, cycles: [] })),
     fetch('/api/metrics').then(r => r.json()).catch(() => []),
-    fetch('/api/token-usage').then(r => r.json()).catch(() => ({ today: { total_input: 0, total_output: 0, total_cost: 0, by_node: {} }, daily: [], budget: null }))
+    fetch('/api/token-usage').then(r => r.json()).catch(() => ({ today: { total_input: 0, total_output: 0, total_cost: 0, by_node: {} }, daily: [], budget: null })),
+    fetch('/api/evaluations/latest').then(r => r.json()).catch(() => null)
   ]);
 
   const monitorState = monitorStatus.state || { status: 'unknown', check_count: 0 };
@@ -92,6 +93,8 @@ export async function renderDashboard(app) {
 
     ${renderPersonalityCard(personalityData)}
 
+    ${renderEvaluationCard(latestEval)}
+
     ${renderBroadcastSection(broadcastStatus)}
 
     ${renderTokenUsageSection(tokenUsage)}
@@ -117,6 +120,7 @@ export async function renderDashboard(app) {
   }
 
   attachBroadcastTrigger();
+  attachPlanSelect();
   renderMetricsCharts(metrics);
   renderTokenCostChart(tokenUsage);
 }
@@ -143,6 +147,55 @@ function renderPersonalityCard(pd) {
         <div class="text-sm"><span class="text-dim">By</span> ${trigger ? trigger.triggered_by || '--' : '--'}</div>
       </div>
       ${latest ? `<div class="text-sm text-secondary" style="margin-top:8px;">${escapeHtml(truncateSummary(latest.summary, 100))}</div>` : ''}
+    </div>`;
+}
+
+function renderEvaluationCard(ev) {
+  if (!ev) return '';
+
+  const statusBadge = ev.status === 'completed' ? 'approved'
+    : ev.status === 'pending' ? 'discussing'
+    : ev.status === 'in_progress' ? 'discussing'
+    : 'rejected';
+
+  const nodeColors = { panda: '#3B82F6', gorilla: '#EF4444', triceratops: '#A855F7' };
+  const nodeNames = Object.keys(ev.summary || {});
+
+  const scoreRows = nodeNames.map(node => {
+    const s = ev.summary[node];
+    const overall = s.overall != null ? s.overall.toFixed(2) : '--';
+    const color = nodeColors[node] || '#8B99B0';
+    return `
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+        <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${color};"></span>
+        <span class="text-sm" style="width:80px;">${node}</span>
+        <span style="font-family:var(--font-mono); font-size:0.9rem; font-weight:600;">${overall}</span>
+        <div style="flex:1; height:4px; background:var(--bg-elevated); border-radius:2px; overflow:hidden;">
+          <div style="height:100%; width:${s.overall != null ? (s.overall * 100) : 0}%; background:${color}; border-radius:2px;"></div>
+        </div>
+      </div>`;
+  }).join('');
+
+  const hasRetune = ev.retune_targets && ev.retune_targets.some(t => t && t.length > 0);
+
+  return `
+    <div class="card clickable" onclick="location.hash='#/evaluations/${ev.cycle_id}'" style="margin-bottom:16px;">
+      <div class="card-header">
+        <span class="card-title">Evaluation</span>
+        <span class="badge badge-status badge-${statusBadge}">${ev.status}</span>
+        <span class="badge">${ev.evaluation_count || 0} reviews</span>
+        ${hasRetune ? '<span class="badge badge-reject">Retuned</span>' : ''}
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:12px;">
+        <div class="text-sm"><span class="text-dim">Triggered</span> ${formatTime(ev.triggered_at)}</div>
+        <div class="text-sm"><span class="text-dim">Completed</span> ${formatTime(ev.completed_at)}</div>
+      </div>
+      ${nodeNames.length > 0 ? `
+        <div style="margin-top:12px;">
+          <div class="text-sm text-dim" style="margin-bottom:6px;">Average Scores</div>
+          ${scoreRows}
+        </div>
+      ` : ''}
     </div>`;
 }
 
@@ -257,9 +310,94 @@ function formatCost(usd) {
   return '$' + usd.toFixed(4);
 }
 
+function renderSubscriptionGauges(sub) {
+  if (!sub) return '';
+
+  const planOptions = [
+    { key: 'pro', label: 'Pro ($20/mo)' },
+    { key: 'max_5x', label: 'Max 5x ($100/mo)' },
+    { key: 'max_20x', label: 'Max 20x ($200/mo)' }
+  ];
+
+  const weeklyPct = Math.min(sub.weekly.pct, 100);
+  const dailyPct = Math.min(sub.daily.pct, 100);
+  const gaugeColor = pct => pct > 85 ? 'var(--error)' : pct > 60 ? 'var(--warning)' : 'var(--success)';
+
+  let recommendHtml = '';
+  if (sub.recommended) {
+    const r = sub.recommended;
+    recommendHtml = `
+      <div class="plan-recommendation">
+        <span class="text-sm" style="color:var(--success); font-weight:600;">Recommended: ${r.label} ($${r.price_usd}/mo)</span>
+        <span class="text-sm text-secondary" style="margin-left:8px;">${escapeHtml(r.reason)}</span>
+      </div>`;
+  }
+
+  return `
+    <div class="subscription-header">
+      <span class="text-sm text-dim">Subscription Plan</span>
+      <select class="plan-select" id="plan-select">
+        ${planOptions.map(p => `<option value="${p.key}" ${p.key === sub.plan ? 'selected' : ''}>${p.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="subscription-gauges">
+      <div class="gauge-card">
+        <div class="text-sm" style="display:flex; justify-content:space-between; margin-bottom:6px;">
+          <span class="text-dim">Weekly Remaining</span>
+          <span style="font-family:var(--font-mono); font-size:12px;">${formatTokenCount(sub.weekly.used)} / ${formatTokenCount(sub.weekly.limit)}</span>
+        </div>
+        <div class="gauge-bar">
+          <div class="gauge-bar-fill" style="width:${weeklyPct.toFixed(1)}%; background:${gaugeColor(weeklyPct)};"></div>
+        </div>
+        <div class="text-sm text-dim" style="margin-top:4px; text-align:right;">
+          ${formatTokenCount(sub.weekly.remaining)} remaining (${weeklyPct.toFixed(1)}% used)
+        </div>
+      </div>
+      <div class="gauge-card">
+        <div class="text-sm" style="display:flex; justify-content:space-between; margin-bottom:6px;">
+          <span class="text-dim">Daily Remaining</span>
+          <span style="font-family:var(--font-mono); font-size:12px;">${formatTokenCount(sub.daily.used)} / ${formatTokenCount(sub.daily.limit)}</span>
+        </div>
+        <div class="gauge-bar">
+          <div class="gauge-bar-fill" style="width:${dailyPct.toFixed(1)}%; background:${gaugeColor(dailyPct)};"></div>
+        </div>
+        <div class="text-sm text-dim" style="margin-top:4px; text-align:right;">
+          ${formatTokenCount(sub.daily.remaining)} remaining (${dailyPct.toFixed(1)}% used)
+        </div>
+      </div>
+    </div>
+    ${recommendHtml}`;
+}
+
+function attachPlanSelect() {
+  const sel = document.getElementById('plan-select');
+  if (!sel) return;
+  sel.addEventListener('change', async () => {
+    const plan = sel.value;
+    sel.disabled = true;
+    try {
+      const res = await fetch('/api/subscription', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan })
+      });
+      if (!res.ok) throw new Error('Failed');
+      // Re-render dashboard
+      const app = document.getElementById('app');
+      if (app) {
+        const { renderDashboard } = await import('./dashboard.js');
+        renderDashboard(app);
+      }
+    } catch {
+      sel.disabled = false;
+    }
+  });
+}
+
 function renderTokenUsageSection(tu) {
   const today = tu.today || {};
   const budget = tu.budget;
+  const sub = tu.subscription;
   const totalTokens = (today.total_input || 0) + (today.total_output || 0);
 
   let budgetHtml = '';
@@ -299,6 +437,7 @@ function renderTokenUsageSection(tu) {
 
   return `
     <div class="section-label">Token Usage</div>
+    ${renderSubscriptionGauges(sub)}
     <div class="stats-row">
       <div class="stat-box">
         <div class="stat-value" style="color:#60A5FA">${formatTokenCount(totalTokens)}</div>
