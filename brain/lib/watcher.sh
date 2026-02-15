@@ -186,17 +186,6 @@ check_decisions_unified() {
 
     # --- Remediation handling (executor only) ---
     elif [[ "${decision_status}" == "remediating" ]]; then
-      # Guard: if remediated=true but status stuck in remediating, auto-transition to reviewing
-      local remediated
-      remediated=$(jq -r '.remediated // false' "${decision_file}")
-      if [[ "${remediated}" == "true" ]]; then
-        log "WARN: Task ${task_id} has remediated=true but status=remediating, auto-transitioning to reviewing"
-        local tmp
-        tmp=$(mktemp)
-        jq '.status = "reviewing"' "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
-        continue
-      fi
-
       if [[ -z "${executor}" || "${executor}" == "${NODE_NAME}" ]]; then
         log "Remediating task: ${task_id}"
         remediate_execution "${decision_file}"

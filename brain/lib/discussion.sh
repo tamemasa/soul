@@ -832,7 +832,7 @@ summaryとviolationsとremediation_instructionsは日本語で記述すること
     else
       log "Review FAILED for task ${task_id}, transitioning to remediating (attempt $((remediation_count + 1))/${max_remediation})"
       tmp=$(mktemp)
-      jq '.status = "remediating" | .review_verdict = "fail" | .remediation_started_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+      jq '.status = "remediating" | .review_verdict = "fail" | .remediation_count = '"$((remediation_count + 1))"' | .remediation_started_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
         "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
     fi
   fi
@@ -851,6 +851,17 @@ remediate_execution() {
   executor=$(jq -r '.executor // ""' "${decision_file}")
   if [[ -n "${executor}" && "${executor}" != "${NODE_NAME}" ]]; then
     return
+  fi
+
+  # Prevent duplicate execution: if already remediating with timestamp, skip
+  local current_status
+  current_status=$(jq -r '.status' "${decision_file}")
+  if [[ "${current_status}" == "remediating" ]]; then
+    local remediation_started_at
+    remediation_started_at=$(jq -r '.remediation_started_at // ""' "${decision_file}")
+    if [[ -n "${remediation_started_at}" ]]; then
+      return
+    fi
   fi
 
   # Mark as remediating (in progress)
@@ -991,13 +1002,13 @@ EOF
     rm -f "${review_file}"
   fi
 
-  # Increment remediation count and transition to reviewing for re-review
+  # Transition to reviewing for re-review (count already incremented by review_execution)
   local current_count
   current_count=$(jq -r '.remediation_count // 0' "${decision_file}")
   tmp=$(mktemp)
-  jq '.status = "reviewing" | .executed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .remediated = true | .remediation_count = '"$((current_count + 1))"'' \
+  jq '.status = "reviewing" | .executed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .remediated = true' \
     "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
 
   set_activity "idle"
-  log "Task ${task_id} remediation completed, pending re-review (attempt $((current_count + 1)))"
+  log "Task ${task_id} remediation completed, pending re-review (attempt ${current_count})"
 }
