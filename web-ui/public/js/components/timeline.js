@@ -21,7 +21,7 @@ const ALL_NODES = ['panda', 'gorilla', 'triceratops'];
 export function renderTimeline(rounds, options = {}) {
   const {
     comments = [], isDiscussing = false, currentRound = 0, maxRounds = 3,
-    decision = null, result = null, isExecuting = false, progress = null,
+    decision = null, result = null, review = null, isExecuting = false, isReviewing = false, progress = null,
     history = [], isAnnouncing = false, announceProgress = null,
     taskId = null, previousAttempts = []
   } = options;
@@ -99,6 +99,7 @@ export function renderTimeline(rounds, options = {}) {
         out += renderDecisionItem(decision);
         out += renderAnnouncementItem(decision, isAnnouncing, announceProgress);
         out += renderExecutionItem(result, isExecuting, progress, decision, previousAttempts);
+        out += renderReviewItem(review, isReviewing);
       }
     }
     return out;
@@ -156,13 +157,15 @@ export function renderTimeline(rounds, options = {}) {
       html += renderDecisionItem(h.decision);
       html += renderAnnouncementItem(h.decision);
       html += renderExecutionItem(h.result, false, null, h.decision);
+      html += renderReviewItem(h.review);
     }
 
-    // Insert current decision + announcement + execution after the round where consensus was reached
+    // Insert current decision + announcement + execution + review after the round where consensus was reached
     if (round.round === finalRound) {
       html += renderDecisionItem(decision);
       html += renderAnnouncementItem(decision, isAnnouncing, announceProgress);
       html += renderExecutionItem(result, isExecuting, progress, decision, previousAttempts);
+      html += renderReviewItem(review, isReviewing);
     }
 
     // Render floating events between this round and the next
@@ -335,6 +338,53 @@ function renderExecutionItem(result, isExecuting, progress, decision, previousAt
     <div class="timeline-item timeline-execution-item">
       <div class="timeline-round">Execution${attemptLabel}</div>
       ${inner}
+    </div>`;
+}
+
+// --- Review timeline item ---
+function renderReviewItem(review, isReviewing = false) {
+  if (isReviewing && !review?.verdict) {
+    return `
+    <div class="timeline-item timeline-review-item">
+      <div class="timeline-round">Review</div>
+      <div class="timeline-review-card">
+        <div class="response-header">
+          ${nodeBadge('panda')}
+          <span class="pending-indicator">レビュー中…</span>
+        </div>
+      </div>
+    </div>`;
+  }
+  if (!review?.verdict) return '';
+
+  const isPassed = review.verdict === 'pass';
+  const verdictClass = isPassed ? 'review-pass' : 'review-fail';
+  const verdictLabel = isPassed ? 'PASS' : 'FAIL';
+  const violations = review.violations || [];
+
+  return `
+    <div class="timeline-item timeline-review-item">
+      <div class="timeline-round">Review</div>
+      <div class="timeline-review-card ${verdictClass}">
+        <div class="flex items-center gap-8 mb-4">
+          ${nodeBadge(review.reviewer || 'panda')}
+          <span class="badge badge-review badge-review-${review.verdict}">${verdictLabel}</span>
+          <span class="text-dim text-sm" style="font-family:var(--font-mono)">${formatTime(review.reviewed_at)}</span>
+        </div>
+        ${review.summary ? `<div class="review-summary">${escapeHtml(review.summary)}</div>` : ''}
+        ${violations.length ? `
+          <div class="review-violations mt-4">
+            <div class="section-label">Violations</div>
+            ${violations.map(v => `<div class="violation-item">${escapeHtml(v)}</div>`).join('')}
+          </div>
+        ` : ''}
+        ${review.remediation_instructions ? `
+          <details class="mt-2">
+            <summary class="text-sm text-secondary" style="cursor:pointer">Remediation instructions</summary>
+            <div class="review-remediation mt-2">${escapeHtml(review.remediation_instructions)}</div>
+          </details>
+        ` : ''}
+      </div>
     </div>`;
 }
 

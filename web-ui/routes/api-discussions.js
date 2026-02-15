@@ -362,6 +362,7 @@ module.exports = function (sharedDir) {
     const status = await readJson(path.join(discPath, 'status.json'));
     const decision = await readJson(path.join(taskDir, `${taskId}.json`));
     const result = await readJson(path.join(taskDir, `${taskId}_result.json`));
+    const review = await readJson(path.join(taskDir, `${taskId}_review.json`));
 
     // Read rounds
     const roundDirs = await listDirs(discPath);
@@ -391,6 +392,7 @@ module.exports = function (sharedDir) {
       rounds,
       decision,
       result,
+      review,
       comments,
       progress: null,
       announceProgress: null,

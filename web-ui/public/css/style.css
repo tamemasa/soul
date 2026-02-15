@@ -303,6 +303,31 @@ body {
 /* ─── Timeline: Execution ─── */
 .timeline-execution-item::before { background: var(--accent); box-shadow: 0 0 8px rgba(96,165,250,0.4); }
 
+/* ─── Timeline: Review ─── */
+.timeline-review-item::before { background: var(--node-panda); box-shadow: 0 0 8px rgba(59,130,246,0.4); }
+.timeline-review-card {
+  background: var(--bg-secondary);
+  border: 1px solid rgba(59,130,246,0.3);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.timeline-review-card.review-pass { border-color: rgba(52,211,153,0.4); }
+.timeline-review-card.review-fail { border-color: rgba(248,113,113,0.4); }
+.badge-review { font-weight: 700; font-size: 11px; letter-spacing: 0.5px; }
+.badge-review-pass { background: rgba(52,211,153,0.15); color: var(--status-completed); }
+.badge-review-fail { background: rgba(248,113,113,0.15); color: var(--status-rejected); }
+.review-summary { font-size: 13px; line-height: 1.7; color: var(--text-secondary); }
+.review-violations { margin-top: 8px; }
+.violation-item {
+  font-size: 12px;
+  color: var(--status-rejected);
+  padding: 4px 8px;
+  background: rgba(248,113,113,0.08);
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+.review-remediation { font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
+
 /* ─── Timeline: User Comments ─── */
 .timeline-comment-item::before {
   background: var(--accent);
@@ -1216,6 +1241,7 @@ body {
   .response-opinion { font-size: 12px; line-height: 1.6; }
   .timeline-decision-card { padding: 10px 12px; }
   .timeline-announcement-card { padding: 10px 12px; }
+  .timeline-review-card { padding: 10px 12px; }
   .timeline-comment { padding: 10px 12px; }
   .timeline-comment .comment-body { font-size: 12px; }
   .timeline-comment-item::before { left: -20px; }

@@ -146,6 +146,7 @@ export async function renderDiscussionDetail(app, taskId) {
   const currentRound = data.status?.current_round || 0;
   const isExecuting = (data.decision?.status === 'executing') && !data.result?.result;
   const isAnnouncing = data.decision?.status === 'announcing';
+  const isReviewing = data.decision?.status === 'reviewing';
 
   // Determine effective status for pipeline
   // When discussion is reopened (new round requested), status.json takes priority over stale decision
@@ -188,7 +189,9 @@ export async function renderDiscussionDetail(app, taskId) {
         maxRounds: data.status?.max_rounds || 3,
         decision: data.decision,
         result: data.result,
+        review: data.review,
         isExecuting,
+        isReviewing,
         progress: data.progress,
         history: data.history || [],
         isAnnouncing,
