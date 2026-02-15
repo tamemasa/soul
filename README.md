@@ -429,7 +429,7 @@ Web UIのOpenClaw画面に、擬人化アバターと統合会話ビューを搭
 
 #### 機能
 
-- **感情アバター**: OpenClawの現在の感情状態をSVGベースのアバターで表示。8つの会話感情（happy/sad/angry/surprised/thinking/concerned/satisfied/neutral）に対応し、CSSアニメーションで表現。Claudeが応答に`[EMOTION:]`タグを付与し、proxyが抽出する仕組み
+- **感情アバター**: OpenClawの現在の感情状態をSVGベースのアバターで表示。8つの会話感情（happy/sad/angry/surprised/thinking/concerned/satisfied/neutral）に対応し、CSSアニメーションで表現。キーワードベースの推定で感情を判定
 - **会話タイムライン**: LINE・Discordでの全会話をタイムラインで閲覧可能。プラットフォームバッジ（LINE緑/Discord青紫）、方向インジケーター（受信/送信）、感情バッジを表示
 - **フィルタ・検索**: プラットフォーム別・方向別のフィルタ、テキスト検索、ページネーション（100件ずつ読み込み）
 - **リアルタイム更新**: SSE（`conversation:updated`イベント）で会話データ更新時に自動リフレッシュ
@@ -459,7 +459,7 @@ Web UIのOpenClaw画面に、擬人化アバターと統合会話ビューを搭
 }
 ```
 
-`emotion_hint` はOpenClawのoutboundメッセージにのみ付与される感情タグ（`happy`/`sad`/`angry`/`surprised`/`thinking`/`concerned`/`satisfied`/`neutral`）。Claudeが応答の最終行に`[EMOTION: <tag>]`を付与し、webhook-proxyが正規表現で抽出・除去して記録する。タグがない場合はキーワードベースの推定にフォールバック。
+`emotion_hint` はOpenClawのoutboundメッセージにのみ付与される感情タグ（`happy`/`sad`/`angry`/`surprised`/`thinking`/`concerned`/`satisfied`/`neutral`）。webhook-proxyがキーワードベースで推定して記録する。Claudeの応答に`[EMOTION: <tag>]`タグが含まれる場合はproxyが抽出・除去して優先使用する。
 
 #### リアルタイム感情表現
 
