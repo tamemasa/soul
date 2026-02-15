@@ -1503,6 +1503,12 @@ body {
   justify-content: center;
   transition: border-color 0.5s ease, box-shadow 0.5s ease;
   flex-shrink: 0;
+  overflow: hidden;
+}
+.openclaw-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .avatar-neutral { border-color: var(--text-dim); }
 .avatar-thinking { border-color: var(--warning); box-shadow: 0 0 16px rgba(245,158,11,0.3); }
@@ -1511,6 +1517,7 @@ body {
 .avatar-sad { border-color: var(--accent); box-shadow: 0 0 16px rgba(96,165,250,0.2); }
 .avatar-angry { border-color: var(--error); box-shadow: 0 0 16px rgba(239,68,68,0.3); }
 .avatar-surprised { border-color: var(--node-panda); box-shadow: 0 0 16px rgba(59,130,246,0.3); }
+.avatar-satisfied { border-color: var(--success); box-shadow: 0 0 16px rgba(52,211,153,0.3); }
 
 .avatar-thinking { animation: thinking-pulse 2s ease-in-out infinite; }
 .avatar-happy { animation: happy-bounce 1s ease-in-out infinite; }
@@ -1706,7 +1713,6 @@ body {
 /* ─── OpenClaw Mobile ─── */
 @media (max-width: 768px) {
   .openclaw-avatar { width: 60px; height: 60px; }
-  .openclaw-avatar svg { width: 60px; height: 60px; }
   .avatar-section { flex-direction: column; text-align: center; gap: 10px; }
   .avatar-meta { margin-left: 0; align-items: center; }
   .emotion-chart-wrap { margin-left: 0; }
