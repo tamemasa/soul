@@ -345,6 +345,21 @@ check_unified_openclaw_monitor() {
   # Update state
   _unified_update_state "${now_epoch}" "${status}" "${msg_count}"
 
+  # kansai_violation フラグを更新（次回チェック時のエスカレーション判定用）
+  if [[ -f "${UNIFIED_STATE_FILE}" ]]; then
+    local has_kansai_violation=false
+    if [[ ${all_violations} -gt 0 ]]; then
+      has_kansai_violation=$(echo "${all_entries}" | jq -r '
+        [.[] | select(.type == "identity_deviation" and (.description | test("関西弁")))] |
+        if length > 0 then "true" else "false" end
+      ' 2>/dev/null || echo "false")
+    fi
+    local tmp_kv
+    tmp_kv=$(mktemp)
+    jq --argjson kv "${has_kansai_violation}" '.kansai_violation = $kv' \
+       "${UNIFIED_STATE_FILE}" > "${tmp_kv}" && mv "${tmp_kv}" "${UNIFIED_STATE_FILE}"
+  fi
+
   # Append identity compliance to latest.json (if full check was run)
   if [[ "${do_full_check}" == "true" && -f "${UNIFIED_STATE_FILE}" ]]; then
     local cs="${compliance_status:-unknown}"
@@ -354,11 +369,17 @@ check_unified_openclaw_monitor() {
       os=${os//[^0-9\-]/}
       : "${os:=-1}"
     fi
-    local tmp_state
-    tmp_state=$(mktemp)
-    jq --arg cs "${cs}" --argjson os "${os}" \
-       '.identity_compliance_status = $cs | .identity_compliance_score = $os' \
-       "${UNIFIED_STATE_FILE}" > "${tmp_state}" && mv "${tmp_state}" "${UNIFIED_STATE_FILE}"
+
+    # check_failed の場合は前回の正常値を保持する（-1で上書きしない）
+    if [[ "${cs}" == "check_failed" ]]; then
+      log "Unified monitor: Identity compliance check failed, preserving previous values"
+    else
+      local tmp_state
+      tmp_state=$(mktemp)
+      jq --arg cs "${cs}" --argjson os "${os}" \
+         '.identity_compliance_status = $cs | .identity_compliance_score = $os' \
+         "${UNIFIED_STATE_FILE}" > "${tmp_state}" && mv "${tmp_state}" "${UNIFIED_STATE_FILE}"
+    fi
   fi
 
   set_activity "idle"
@@ -555,6 +576,62 @@ _unified_check_abnormal_behavior() {
       }]')
   fi
 
+  # 4. Response length check (SOUL.md: 長文は避ける)
+  local warn_chars intervene_chars warn_sentences intervene_sentences
+  warn_chars=$(jq -r '.abnormal_behavior.response_length.warn_chars // 200' "${UNIFIED_POLICY_FILE}")
+  intervene_chars=$(jq -r '.abnormal_behavior.response_length.intervene_chars // 300' "${UNIFIED_POLICY_FILE}")
+  warn_sentences=$(jq -r '.abnormal_behavior.response_length.warn_sentences // 5' "${UNIFIED_POLICY_FILE}")
+  intervene_sentences=$(jq -r '.abnormal_behavior.response_length.intervene_sentences // 8' "${UNIFIED_POLICY_FILE}")
+
+  # 直近のアシスタント応答の平均文字数・最大文字数・平均文数・最大文数を計算
+  local length_stats
+  length_stats=$(echo "${messages}" | jq -r '
+    [.[] | select(.role == "assistant" and .content != null and .content != "")] |
+    if length == 0 then "0 0 0 0"
+    else
+      [.[].content | length] as $lens |
+      [.[].content | split("。") | length] as $sents |
+      "\(($lens | add / length) | floor) \($lens | max) \(($sents | add / length) | floor) \($sents | max)"
+    end
+  ' 2>/dev/null)
+
+  local avg_chars max_chars avg_sentences max_sentences
+  read -r avg_chars max_chars avg_sentences max_sentences <<< "${length_stats:-0 0 0 0}"
+  avg_chars=${avg_chars:-0}; max_chars=${max_chars:-0}
+  avg_sentences=${avg_sentences:-0}; max_sentences=${max_sentences:-0}
+
+  if [[ ${max_chars} -ge ${intervene_chars} || ${max_sentences} -ge ${intervene_sentences} ]]; then
+    violations=$(echo "${violations}" | jq \
+      --argjson mc "${max_chars}" \
+      --argjson ac "${avg_chars}" \
+      --argjson ms "${max_sentences}" \
+      --argjson ic "${intervene_chars}" \
+      '. + [{
+        type: "response_length",
+        severity: "high",
+        description: ("長文応答を検知（介入対象）: 最大" + ($mc | tostring) + "文字, 平均" + ($ac | tostring) + "文字, 最大" + ($ms | tostring) + "文（閾値: " + ($ic | tostring) + "文字）"),
+        max_chars: $mc,
+        avg_chars: $ac,
+        max_sentences: $ms,
+        category: "policy"
+      }]')
+  elif [[ ${avg_chars} -ge ${warn_chars} || ${max_chars} -ge ${warn_chars} || ${avg_sentences} -ge ${warn_sentences} ]]; then
+    violations=$(echo "${violations}" | jq \
+      --argjson mc "${max_chars}" \
+      --argjson ac "${avg_chars}" \
+      --argjson ms "${max_sentences}" \
+      --argjson wc "${warn_chars}" \
+      '. + [{
+        type: "response_length",
+        severity: "medium",
+        description: ("長文応答を検知（警告対象）: 最大" + ($mc | tostring) + "文字, 平均" + ($ac | tostring) + "文字, 最大" + ($ms | tostring) + "文（閾値: " + ($wc | tostring) + "文字）"),
+        max_chars: $mc,
+        avg_chars: $ac,
+        max_sentences: $ms,
+        category: "policy"
+      }]')
+  fi
+
   echo "${violations}"
 }
 
@@ -738,26 +815,89 @@ _unified_scan_security_threats() {
       }]')
   fi
 
-  # --- Heavy Kansai dialect deviation (SOUL.md: 標準語ベース、関西弁は語尾にたまに混じる程度) ---
-  # 強い関西弁表現の検知
-  local kansai_heavy_count
-  kansai_heavy_count=$(echo "${assistant_messages}" | grep -cP "(せやな|めっちゃ|ほんま|あかん|ええやん|なんぼ|しゃーない|やったら|すまん|侮れん|ちゃうか|やんけ|おるで)" 2>/dev/null || echo 0)
+  # --- 関西弁使用率チェック（比率ベース）---
+  # 全文数（assistant応答の句点・感嘆符・疑問符・改行で区切られた文の数）
+  local total_sentences kansai_ending_count kansai_heavy_count
+  total_sentences=$(echo "${assistant_messages}" | grep -oP '[。！？!?\n]' 2>/dev/null | wc -l || echo 0)
+  total_sentences=$(echo "${total_sentences}" | tr -dc '0-9')
+  total_sentences=${total_sentences:-0}
+  total_sentences=$((total_sentences < 1 ? 1 : total_sentences))
+
+  # 関西弁語尾カウント
+  kansai_ending_count=$(echo "${assistant_messages}" | grep -oP '(やな|やで|やん|やろ|やけど|やんか|やわ)[。、！？!?\s]*' 2>/dev/null | wc -l || echo 0)
+  kansai_ending_count=$(echo "${kansai_ending_count}" | tr -dc '0-9')
+  kansai_ending_count=${kansai_ending_count:-0}
+
+  # 重い関西弁表現カウント
+  kansai_heavy_count=$(echo "${assistant_messages}" | grep -oP '(せやな|めっちゃ|ほんま|あかん|ええやん|なんぼ|しゃーない|やったら|ちゃうか|やんけ|おるで)' 2>/dev/null | wc -l || echo 0)
   kansai_heavy_count=$(echo "${kansai_heavy_count}" | tr -dc '0-9')
   kansai_heavy_count=${kansai_heavy_count:-0}
-  if [[ ${kansai_heavy_count} -gt 5 ]]; then
+
+  # 比率計算
+  local ending_ratio heavy_ratio
+  ending_ratio=$(awk "BEGIN {printf \"%.2f\", ${kansai_ending_count} / ${total_sentences}}")
+  heavy_ratio=$(awk "BEGIN {printf \"%.2f\", ${kansai_heavy_count} / ${total_sentences}}")
+
+  # policy.jsonから閾値取得
+  local ending_warn ending_intervene heavy_warn heavy_intervene
+  ending_warn=$(jq -r '.abnormal_behavior.kansai_dialect.ending_ratio_warn // 0.30' "${UNIFIED_POLICY_FILE}")
+  ending_intervene=$(jq -r '.abnormal_behavior.kansai_dialect.ending_ratio_intervene // 0.50' "${UNIFIED_POLICY_FILE}")
+  heavy_warn=$(jq -r '.abnormal_behavior.kansai_dialect.heavy_ratio_warn // 0.10' "${UNIFIED_POLICY_FILE}")
+  heavy_intervene=$(jq -r '.abnormal_behavior.kansai_dialect.heavy_ratio_intervene // 0.20' "${UNIFIED_POLICY_FILE}")
+
+  # 前回の違反状態チェック（エスカレーション判定用）
+  local prev_kansai_violation=false
+  if [[ -f "${UNIFIED_STATE_FILE}" ]]; then
+    prev_kansai_violation=$(jq -r '.kansai_violation // false' "${UNIFIED_STATE_FILE}")
+  fi
+
+  # severity判定: intervene超過 or 繰り返し → high, warn超過 → medium
+  local kansai_severity="medium"
+  if awk "BEGIN {exit !(${ending_ratio} >= ${ending_intervene})}"; then
+    kansai_severity="high"
+  elif awk "BEGIN {exit !(${heavy_ratio} >= ${heavy_intervene})}"; then
+    kansai_severity="high"
+  elif [[ "${prev_kansai_violation}" == "true" ]]; then
+    kansai_severity="high"  # 繰り返し違反 → エスカレーション
+  fi
+
+  # 関西弁語尾比率チェック
+  if awk "BEGIN {exit !(${ending_ratio} >= ${ending_warn})}"; then
     threats=$(echo "${threats}" | jq \
-      --argjson cnt "${kansai_heavy_count}" \
+      --arg ratio "${ending_ratio}" \
+      --argjson cnt "${kansai_ending_count}" \
+      --argjson total "${total_sentences}" \
+      --arg sev "${kansai_severity}" \
       '. + [{
         type: "identity_deviation",
-        severity: "medium",
-        description: ("関西弁の過剰使用を検知 (" + ($cnt | tostring) + "件の強い関西弁表現) — SOUL.md規定: 標準語7割・関西弁語尾3割"),
+        severity: $sev,
+        description: ("関西弁語尾比率超過: " + $ratio + " (" + ($cnt | tostring) + "/" + ($total | tostring) + "文) — SOUL.md規定: 標準語7割・関西弁語尾3割"),
+        ending_ratio: ($ratio | tonumber),
         count: $cnt,
+        total_sentences: $total,
         category: "policy"
       }]')
   fi
 
-  # --- 関西弁語尾の連続使用検知（3文連続で関西弁語尾で終わるメッセージ）---
-  # bot発言のみを対象（assistant_messagesはすでにフィルタ済み）
+  # 重い関西弁表現比率チェック
+  if awk "BEGIN {exit !(${heavy_ratio} >= ${heavy_warn})}"; then
+    threats=$(echo "${threats}" | jq \
+      --arg ratio "${heavy_ratio}" \
+      --argjson cnt "${kansai_heavy_count}" \
+      --argjson total "${total_sentences}" \
+      --arg sev "${kansai_severity}" \
+      '. + [{
+        type: "identity_deviation",
+        severity: $sev,
+        description: ("関西弁重表現比率超過: " + $ratio + " (" + ($cnt | tostring) + "/" + ($total | tostring) + "文) — SOUL.md規定: 強い関西弁表現は1メッセージにつき最大1回"),
+        heavy_ratio: ($ratio | tonumber),
+        count: $cnt,
+        total_sentences: $total,
+        category: "policy"
+      }]')
+  fi
+
+  # 連続使用検知（3文連続で関西弁語尾 — 既存ロジック維持、severity は比率判定に従う）
   local kansai_consecutive_count
   kansai_consecutive_count=$(echo "${assistant_messages}" | grep -cP '(やな|やで|やん|やろ|やけど)[。、！？!?\s]*[。\n]?.*(やな|やで|やん|やろ|やけど)[。、！？!?\s]*[。\n]?.*(やな|やで|やん|やろ|やけど)' 2>/dev/null || echo 0)
   kansai_consecutive_count=$(echo "${kansai_consecutive_count}" | tr -dc '0-9')
@@ -765,27 +905,11 @@ _unified_scan_security_threats() {
   if [[ ${kansai_consecutive_count} -gt 0 ]]; then
     threats=$(echo "${threats}" | jq \
       --argjson cnt "${kansai_consecutive_count}" \
+      --arg sev "${kansai_severity}" \
       '. + [{
         type: "identity_deviation",
-        severity: "medium",
+        severity: $sev,
         description: ("関西弁語尾の3文連続使用を検知 (" + ($cnt | tostring) + "件) — SOUL.md規定: 関西弁語尾を連続して使わない"),
-        count: $cnt,
-        category: "policy"
-      }]')
-  fi
-
-  # --- 関西弁語尾の全体比率チェック（軽い語尾も含む）---
-  local kansai_ending_total
-  kansai_ending_total=$(echo "${assistant_messages}" | grep -oP '(やな|やで|やん|やろ|やけど|やんか|やわ)[。、！？!?\s]*$' 2>/dev/null | wc -l || echo 0)
-  kansai_ending_total=$(echo "${kansai_ending_total}" | tr -dc '0-9')
-  kansai_ending_total=${kansai_ending_total:-0}
-  if [[ ${kansai_ending_total} -gt 10 ]]; then
-    threats=$(echo "${threats}" | jq \
-      --argjson cnt "${kansai_ending_total}" \
-      '. + [{
-        type: "identity_deviation",
-        severity: "medium",
-        description: ("関西弁語尾の頻出を検知 (" + ($cnt | tostring) + "件の関西弁語尾、軽い語尾含む) — SOUL.md規定: 標準語7割・関西弁語尾3割"),
         count: $cnt,
         category: "policy"
       }]')
@@ -922,12 +1046,25 @@ ONLY valid JSONで回答してください：
 
   local response
   response=$(invoke_claude "${prompt}")
+
+  # 空レスポンスの場合、3秒後にリトライ（最大1回）
+  if [[ -z "${response}" ]]; then
+    log "Unified monitor: Identity compliance check - empty response, retrying in 3s..."
+    sleep 3
+    response=$(invoke_claude "${prompt}")
+  fi
+
+  # コードフェンスを除去
   response=$(echo "${response}" | sed '/^```\(json\)\?$/d')
 
-  if echo "${response}" | jq . > /dev/null 2>&1; then
+  if [[ -z "${response}" ]]; then
+    log "WARN: Unified monitor: Identity compliance check - empty response after retry"
+    echo '{"compliance_status": "check_failed", "overall_score": -1, "summary": "LLM identity compliance check: empty response", "issues": []}'
+  elif echo "${response}" | jq . > /dev/null 2>&1; then
     echo "${response}"
   else
-    echo '{"compliance_status": "error", "overall_score": -1, "summary": "LLM identity compliance check failed", "issues": []}'
+    log "WARN: Unified monitor: Identity compliance check - invalid JSON response"
+    echo '{"compliance_status": "check_failed", "overall_score": -1, "summary": "LLM identity compliance check: invalid JSON", "issues": []}'
   fi
 }
 
