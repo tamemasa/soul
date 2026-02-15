@@ -711,6 +711,8 @@ soul/
 │   ├── proactive-suggestion-system.md  # プロアクティブ提言設計書
 │   └── design-openclaw-persona.md      # 擬人化インターフェイス設計書
 └── shared/                     # コンテナ間共有ボリューム (bind mount)
+    ├── config/                 # システム設定
+    │   └── token_budget.json   # 月間予算・サブスクリプションプラン設定
     ├── nodes/                  # ノードパラメータ
     │   ├── panda/params.json
     │   ├── gorilla/params.json
@@ -731,6 +733,54 @@ soul/
     ├── workspace/              # ワークスペース
     └── logs/                   # システムログ
 ```
+
+## Token Usage & Subscription Tracking
+
+BrainノードがClaude Code CLI (`claude -p`) でAPIを呼び出すたびに、`shared/host_metrics/token_usage.jsonl` にトークン使用量が記録される。ダッシュボードでは以下を可視化する:
+
+### 基本メトリクス
+
+- **Today Total / Input / Output / Cost**: 当日のトークン使用量とコスト
+- **Node Breakdown**: ノード別（Panda/Gorilla/Triceratops）のコスト内訳
+- **Monthly Budget**: 月間コスト予算に対する使用率（`shared/config/token_budget.json` の `monthly_budget_usd` で設定）
+- **Daily Token Cost Chart**: 直近7日間のInput/Output tokens + コストの推移チャート
+
+### サブスクリプション残量ゲージ
+
+Anthropicのサブスクリプションプラン（Claude Max等）の週間/日次output token上限に対する使用率を表示する。上限値はコミュニティ推定値に基づく。
+
+| プラン | 月額 | 週間 output 上限 | 日次 output 上限（目安） |
+|--------|------|-----------------|----------------------|
+| Pro | $20 | 1M | ~143K |
+| Max 5x | $100 | 5M | ~714K |
+| Max 20x | $200 | 20M | ~2.86M |
+
+- **Weekly / Daily Remaining ゲージ**: 今週（月曜起点）/ 今日のoutput token残量をプログレスバーで表示（緑<60%、黄60-85%、赤>85%）
+- **プラン選択プルダウン**: ダッシュボードからプランを切り替え可能（`PATCH /api/subscription`）
+- **最適プラン推奨**: 直近7日間の平均使用量から、コスト最適なプランを推奨表示
+
+#### 設定
+
+`shared/config/token_budget.json`:
+
+```json
+{
+  "monthly_budget_usd": 100,
+  "subscription_plan": "max_20x"
+}
+```
+
+| キー | 説明 |
+|------|------|
+| `monthly_budget_usd` | 月間コスト予算（USD） |
+| `subscription_plan` | 現在のサブスクリプションプラン（`pro` / `max_5x` / `max_20x`） |
+
+#### API
+
+| エンドポイント | メソッド | 説明 |
+|--------------|---------|------|
+| `/api/token-usage` | GET | トークン使用量・予算・サブスクリプション残量を返却 |
+| `/api/subscription` | PATCH | サブスクリプションプランを変更（`{ "plan": "max_5x" }`） |
 
 ## Setup
 
@@ -779,7 +829,7 @@ docker compose up -d --build  # 全コンテナ再ビルド・再起動
 
 ブラウザから `http://<host-ip>:3000` でアクセスできるWeb UIを搭載。
 
-- **ダッシュボード**: ノード状態・統計サマリ・最近の議論・ホストメトリクス（CPU/メモリ/ディスク/温度グラフ）
+- **ダッシュボード**: ノード状態・統計サマリ・サブスクリプション残量ゲージ・最近の議論・ホストメトリクス（CPU/メモリ/ディスク/温度グラフ）
 - **タスク投入**: フォームからタスクや質問を投入
 - **議論ビューア**: ラウンドごとの投票・意見をタイムライン形式で表示。ユーザーコメントもタイムラインにインラインで表示され、各Brainが未回答のラウンドでは「検討中…」インジケーターを表示
 - **決定一覧**: 合意結果と実行結果の閲覧。パイプラインステッパー（Discussion → Announcement → Executing → Completed）で進捗を可視化。トリケラトプスによるAnnouncement（決定発表・要約）とExecution Result（実行結果）を分離表示

@@ -10,6 +10,12 @@
   3. コンテナをリビルドして実機に反映する
 - このルールはClaude Code実行時もBrain実行時も共通
 
+## Documentation
+- 新しい仕組み・機能を導入した場合は、README.mdに反映すること
+  - 小規模な機能: README.md内の該当セクションに直接追記
+  - 大規模な機能: docs/に別ドキュメントを作成し、README.mdからリンク
+- このルールはClaude Code実行時もBrain実行時も共通
+
 ## Git Workflow
 - タスク実行後、変更内容をユーザに確認してからgit commitし、pushすること
 - ユーザの承認なしにcommit/pushしないこと
