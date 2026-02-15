@@ -297,6 +297,10 @@ export async function renderDiscussionDetail(app, taskId) {
 
   // Skip all polling for archived tasks
   if (!isArchived) {
+  const isTerminal = !!data.result?.result || effectiveStatus === 'completed';
+  const isReviewing = effectiveStatus === 'reviewing';
+  const isRemediating = effectiveStatus === 'remediating';
+
   // Start progress polling if executing or remediating
   // But skip if progress already has a result (avoids infinite re-render loop when decision status is stale)
   const execAlreadyDone = data.progress && data.progress.some(e => e.type === 'result');
@@ -313,9 +317,6 @@ export async function renderDiscussionDetail(app, taskId) {
 
   // Status polling handles lightweight in-place updates (badge, pipeline)
   // and does full re-render when status, round responses, or comments change
-  const isTerminal = !!data.result?.result || effectiveStatus === 'completed';
-  const isReviewing = effectiveStatus === 'reviewing';
-  const isRemediating = effectiveStatus === 'remediating';
   if (!isTerminal && !isExecuting && !isAnnouncing && !isRemediating) {
     const initialFingerprint = buildFingerprint(data, effectiveStatus);
     startStatusPolling(taskId, app, initialFingerprint);
