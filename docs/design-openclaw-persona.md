@@ -112,7 +112,7 @@ OpenClaw Workerで会話JSONLを書き出す際の実装指針:
 Worker側で `emotion_hint` をClaudeに自己申告させる仕組み:
 
 AGENTS.mdの「感情タグ」セクションで、すべての応答に `[EMOTION: <tag>]` を最終行に付与するよう指示。
-proxy（webhook-proxy）が正規表現で抽出・除去し、`emotion_tag` フィールドとしてJSONLに記録する。
+proxy（openclaw-gateway）が正規表現で抽出・除去し、`emotion_tag` フィールドとしてJSONLに記録する。
 タグが付与されていない場合はキーワードベースの推定にフォールバックする。
 
 対応タグ: `happy|sad|angry|surprised|thinking|concerned|satisfied|neutral`

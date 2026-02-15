@@ -68,8 +68,8 @@ header .subtitle {
   gap: 12px;
 }
 .emotion-avatar {
-  width: 120px;
-  height: 120px;
+  width: 200px;
+  height: 200px;
   border-radius: 50%;
   object-fit: cover;
   border: 3px solid var(--border);
@@ -150,6 +150,6 @@ footer {
 /* Responsive */
 @media (max-width: 480px) {
   .container { padding: 16px 12px; }
-  .emotion-avatar { width: 96px; height: 96px; }
+  .emotion-avatar { width: 160px; height: 160px; }
   .card { padding: 16px; }
 }

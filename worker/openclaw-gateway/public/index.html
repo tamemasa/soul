@@ -14,6 +14,19 @@
       <div class="subtitle">Public status page</div>
     </header>
 
+    <!-- Monitoring Status Card -->
+    <div class="card">
+      <div class="card-title">Monitoring Status</div>
+      <div class="status-row">
+        <div id="status-badge" class="status-badge unknown">
+          <span class="dot"></span>
+          <span id="status-text">unknown</span>
+        </div>
+        <span id="status-time" style="font-size:0.75rem;color:var(--text-dim)"></span>
+      </div>
+      <div id="status-detail" class="status-detail"></div>
+    </div>
+
     <!-- Emotion Card -->
     <div class="card">
       <div class="card-title">Current Emotion</div>
@@ -32,19 +45,6 @@
       <div class="chart-container">
         <canvas id="emotion-chart"></canvas>
       </div>
-    </div>
-
-    <!-- Monitoring Status Card -->
-    <div class="card">
-      <div class="card-title">Monitoring Status</div>
-      <div class="status-row">
-        <div id="status-badge" class="status-badge unknown">
-          <span class="dot"></span>
-          <span id="status-text">unknown</span>
-        </div>
-        <span id="status-time" style="font-size:0.75rem;color:var(--text-dim)"></span>
-      </div>
-      <div id="status-detail" class="status-detail"></div>
     </div>
 
     <footer>Auto-refreshes every 30s</footer>

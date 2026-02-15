@@ -146,10 +146,10 @@ services:
       - /tmp:size=64m
     cpus: 1.0
 
-  webhook-proxy:
+  openclaw-gateway:
     build:
-      context: ./worker/webhook-proxy
-    container_name: soul-webhook-proxy
+      context: ./worker/openclaw-gateway
+    container_name: soul-openclaw-gateway
     environment:
       - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
     volumes:

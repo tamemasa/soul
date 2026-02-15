@@ -41,12 +41,12 @@
 │                        │                                    │
 │  ┌─────────────────────▼────────────────────────────────┐   │
 │  │                 Worker Nodes                          │   │
-│  │  ┌───────────────┐    ┌──────────┐                   │   │
-│  │  │ webhook-proxy │───▶│ OpenClaw │                   │   │
-│  │  │   (:8080)     │    │ (:18789) │                   │   │
-│  │  │ バッファ付き   │    │ Discord/ │                   │   │
-│  │  │ リバースプロキシ│    │ LINE bot │                   │   │
-│  │  └───────────────┘    └──────────┘                   │   │
+│  │  ┌─────────────────┐  ┌──────────┐                   │   │
+│  │  │openclaw-gateway │─▶│ OpenClaw │                   │   │
+│  │  │ (:8080/:3001)   │  │ (:18789) │                   │   │
+│  │  │ Webhook proxy   │  │ Discord/ │                   │   │
+│  │  │ + Status page   │  │ LINE bot │                   │   │
+│  │  └─────────────────┘  └──────────┘                   │   │
 │  └──────────────────────────────────────────────────────┘   │
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐   │
@@ -91,7 +91,7 @@ OpenClawはSoul Systemの最初のWorkerノードとして稼働するDiscord bo
 Soul Systemのミッション（家族の幸福化・資産拡大）に沿い、情報提供・提言・日常会話を通じてオーナーをサポートする。
 
 OpenClawは独自のDockerコンテナ（`soul-openclaw`）で稼働し、専用ネットワーク（`br-openclaw`）に隔離されている。
-外部からのWebhook（LINE等）は `webhook-proxy` コンテナが受信し、OpenClawへ転送する。OpenClawリビルド中のメッセージロストを防ぐため、転送失敗時はリクエストをバッファし、復旧後に自動リプレイする。
+外部からのWebhook（LINE等）は `openclaw-gateway` コンテナが受信し、OpenClawへ転送する。OpenClawリビルド中のメッセージロストを防ぐため、転送失敗時はリクエストをバッファし、復旧後に自動リプレイする。
 Brainノードとの通信は共有ボリューム（`bot-commands`、`openclaw-suggestions`）を介したファイルベースで行われる。
 
 ### アーキテクチャ
@@ -105,7 +105,7 @@ graph TB
     end
 
     subgraph Webhook Proxy
-        Proxy["webhook-proxy<br/>(:8080)"]
+        Proxy["openclaw-gateway<br/>(:8080/:3001)"]
         Buffer[("webhook_buffer<br/>volume")]
     end
 
@@ -144,7 +144,7 @@ graph TB
 | **Suggestion Tool** | `suggest.sh` | botからSoul Systemへの提言を送信（1時間に1回制限） |
 | **Write Approval** | `write-approval.sh` | オーナーによる提言の承認/却下を記録 |
 | **Network Restrictor** | `network-restrict.sh` | コンテナ内iptablesでLAN・プライベートネットワークへのアクセスを遮断 |
-| **Webhook Proxy** | `webhook-proxy/proxy.js` | LINE Webhook等の前段プロキシ。OpenClaw停止時はリクエストをバッファし復旧後にリプレイ |
+| **OpenClaw Gateway** | `openclaw-gateway/proxy.js` | LINE Webhook前段プロキシ（バッファ/リプレイ）+ 公開ステータスページ配信 |
 | **Personality Files** | `personality/` | Masaru-kunの人格・話し方・行動ルールを定義（SOUL.md, IDENTITY.md, AGENTS.md） |
 
 ### 監視の仕組み（Panda統合監視）
@@ -459,15 +459,15 @@ Web UIのOpenClaw画面に、擬人化アバターと統合会話ビューを搭
 }
 ```
 
-`emotion_hint` はOpenClawのoutboundメッセージにのみ付与される感情タグ（`happy`/`sad`/`angry`/`surprised`/`thinking`/`concerned`/`satisfied`/`neutral`）。webhook-proxyがキーワードベースで推定して記録する。Claudeの応答に`[EMOTION: <tag>]`タグが含まれる場合はproxyが抽出・除去して優先使用する。
+`emotion_hint` はOpenClawのoutboundメッセージにのみ付与される感情タグ（`happy`/`sad`/`angry`/`surprised`/`thinking`/`concerned`/`satisfied`/`neutral`）。openclaw-gatewayがキーワードベースで推定して記録する。Claudeの応答に`[EMOTION: <tag>]`タグが含まれる場合はproxyが抽出・除去して優先使用する。
 
 #### リアルタイム感情表現
 
-LINE Webhookを経由するメッセージは、`webhook-proxy`がペイロードをパースしてリアルタイムに会話ログへ記録する。
+LINE Webhookを経由するメッセージは、`openclaw-gateway`がペイロードをパースしてリアルタイムに会話ログへ記録する。
 
 **動作の仕組み:**
 
-1. LINEからのWebhookが`webhook-proxy`に到着
+1. LINEからのWebhookが`openclaw-gateway`に到着
 2. proxyは即座に200を返却し、OpenClawへ転送（既存動作を維持）
 3. 転送と並行して、`events[].type === 'message'`のイベントをパースし`/shared/openclaw/conversations/line.jsonl`へappend
 4. chokidarがファイル変更を検知し、SSE(`conversation:updated`)で Web UIに通知
@@ -480,14 +480,14 @@ LINE Webhookを経由するメッセージは、`webhook-proxy`がペイロー�
 
 | プラットフォーム | inbound捕捉 | outbound捕捉 |
 |----------------|-------------|--------------|
-| **LINE** | 自動（webhook-proxy経由） | 手動配置（※） |
+| **LINE** | 自動（openclaw-gateway経由） | 手動配置（※） |
 | **Discord** | 手動配置 | 手動配置 |
 
 ※ OpenClawのログファイルには応答テキストが含まれないため、outboundの自動捕捉は現時点で実装不可。LINE/Discord共にoutbound会話データは手動でJSONLに配置する運用。
 
 #### 安全性
 
-- webhook-proxyでのパース・ログ書き出しはtry-catchで完全に分離されており、エラーが発生してもproxy本来の動作（200返却・OpenClawへの転送）は絶対に阻害されない
+- openclaw-gatewayでのパース・ログ書き出しはtry-catchで完全に分離されており、エラーが発生してもproxy本来の動作（200返却・OpenClawへの転送）は絶対に阻害されない
 - 非テキストメッセージ（画像・スタンプ等）は`[image]`/`[sticker]`等の簡略表記で記録
 - ユーザーIDは末尾8文字のみ記録（プライバシー配慮）
 
@@ -655,7 +655,7 @@ soul/
 │   ├── entrypoint.sh           # Workerエントリーポイント
 │   ├── templates/
 │   │   └── openclaw/           # OpenClaw用テンプレート
-│   ├── webhook-proxy/          # Webhook バッファリングプロキシ + ステータスページ
+│   ├── openclaw-gateway/       # Webhookプロキシ + 公開ステータスページ
 │   │   ├── Dockerfile          # node:22-slim ベース
 │   │   ├── proxy.js            # リバースプロキシ + バッファ/リプレイ + ステータスAPI
 │   │   └── public/             # ステータスページ静的ファイル (感情アバター等)
@@ -838,7 +838,7 @@ SSE（Server-Sent Events）によりファイル変更を自動検知して画�
 ### OpenClaw Status Page
 
 OpenClawの感情状態とモニタリングステータスを公開表示するページ（ポート3001）。
-webhook-proxyコンテナに統合されており、同プロセス内で第2 HTTPサーバーとして稼働する。
+openclaw-gatewayコンテナに統合されており、同プロセス内で第2 HTTPサーバーとして稼働する。
 Tailscale経由でインターネット公開可能。管理機能を含まない読み取り専用ページ。
 
 - **感情アバター**: 現在の感情状態をPNG画像で表示（8種類）+ 感情ラベル + 最終アクティブ時刻
