@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenClaw Status</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>OpenClaw Status</h1>
+      <div class="subtitle">Public status page</div>
+    </header>
+
+    <!-- Emotion Card -->
+    <div class="card">
+      <div class="card-title">Current Emotion</div>
+      <div class="emotion-section">
+        <img id="emotion-avatar" class="emotion-avatar" src="/img/emotions/neutral.png" alt="emotion">
+        <div id="emotion-label" class="emotion-label">neutral</div>
+        <div class="last-active">
+          Last active: <span id="last-active" class="time">--</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Emotion Distribution Card -->
+    <div class="card">
+      <div class="card-title">Emotion Distribution (48h)</div>
+      <div class="chart-container">
+        <canvas id="emotion-chart"></canvas>
+      </div>
+    </div>
+
+    <!-- Monitoring Status Card -->
+    <div class="card">
+      <div class="card-title">Monitoring Status</div>
+      <div class="status-row">
+        <div id="status-badge" class="status-badge unknown">
+          <span class="dot"></span>
+          <span id="status-text">unknown</span>
+        </div>
+        <span id="status-time" style="font-size:0.75rem;color:var(--text-dim)"></span>
+      </div>
+      <div id="status-detail" class="status-detail"></div>
+    </div>
+
+    <footer>Auto-refreshes every 30s</footer>
+  </div>
+
+<script>
+const EMOTION_COLORS = {
+  happy:     '#facc15',
+  sad:       '#60a5fa',
+  angry:     '#f87171',
+  surprised: '#c084fc',
+  thinking:  '#38bdf8',
+  concerned: '#fb923c',
+  satisfied: '#4ade80',
+  neutral:   '#9ca3af',
+};
+
+const VALID_EMOTIONS = Object.keys(EMOTION_COLORS);
+
+let chart = null;
+
+function relativeTime(iso) {
+  if (!iso) return '--';
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 0) return 'just now';
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const d = Math.floor(hr / 24);
+  return `${d}d ago`;
+}
+
+async function fetchJson(url) {
+  try {
+    const res = await fetch(url);
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function updateEmotion() {
+  const data = await fetchJson('/api/emotion');
+  if (!data) return;
+
+  const emotion = VALID_EMOTIONS.includes(data.emotion) ? data.emotion : 'neutral';
+  document.getElementById('emotion-avatar').src = `/img/emotions/${emotion}.png`;
+  document.getElementById('emotion-label').textContent = emotion;
+  document.getElementById('last-active').textContent = relativeTime(data.last_message_at);
+}
+
+async function updateChart() {
+  const data = await fetchJson('/api/emotion-distribution');
+  if (!data || !data.counts) return;
+
+  const labels = [];
+  const values = [];
+  const colors = [];
+
+  for (const e of VALID_EMOTIONS) {
+    if (data.counts[e]) {
+      labels.push(e);
+      values.push(data.counts[e]);
+      colors.push(EMOTION_COLORS[e]);
+    }
+  }
+
+  if (values.length === 0) {
+    labels.push('neutral');
+    values.push(1);
+    colors.push(EMOTION_COLORS.neutral);
+  }
+
+  if (chart) {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = values;
+    chart.data.datasets[0].backgroundColor = colors;
+    chart.update();
+  } else {
+    const ctx = document.getElementById('emotion-chart').getContext('2d');
+    chart = new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels,
+        datasets: [{
+          data: values,
+          backgroundColor: colors,
+          borderWidth: 0,
+        }],
+      },
+      options: {
+        responsive: true,
+        cutout: '60%',
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: { color: '#8B99B0', padding: 12, font: { size: 12 } },
+          },
+        },
+      },
+    });
+  }
+}
+
+async function updateStatus() {
+  const data = await fetchJson('/api/status');
+  if (!data) return;
+
+  const badge = document.getElementById('status-badge');
+  const text = document.getElementById('status-text');
+  const time = document.getElementById('status-time');
+  const detail = document.getElementById('status-detail');
+
+  const status = data.overall_status || data.status || 'unknown';
+  badge.className = `status-badge ${status}`;
+  text.textContent = status;
+  time.textContent = data.timestamp ? relativeTime(data.timestamp) : '';
+
+  // Show service checks if available
+  detail.innerHTML = '';
+  if (data.checks && typeof data.checks === 'object') {
+    for (const [name, info] of Object.entries(data.checks)) {
+      const st = (typeof info === 'object' && info.status) ? info.status : String(info);
+      const item = document.createElement('div');
+      item.className = 'status-item';
+      item.innerHTML = `<span class="label">${name}</span><span class="value">${st}</span>`;
+      detail.appendChild(item);
+    }
+  }
+}
+
+async function refresh() {
+  await Promise.all([updateEmotion(), updateChart(), updateStatus()]);
+}
+
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>

@@ -655,9 +655,10 @@ soul/
 │   ├── entrypoint.sh           # Workerエントリーポイント
 │   ├── templates/
 │   │   └── openclaw/           # OpenClaw用テンプレート
-│   ├── webhook-proxy/          # Webhook バッファリングプロキシ
+│   ├── webhook-proxy/          # Webhook バッファリングプロキシ + ステータスページ
 │   │   ├── Dockerfile          # node:22-slim ベース
-│   │   └── proxy.js            # リバースプロキシ + バッファ/リプレイ
+│   │   ├── proxy.js            # リバースプロキシ + バッファ/リプレイ + ステータスAPI
+│   │   └── public/             # ステータスページ静的ファイル (感情アバター等)
 │   └── openclaw/               # OpenClaw Discord bot
 │       ├── Dockerfile          # OpenClawコンテナイメージ
 │       ├── .env                # 環境変数 (トークン等)
@@ -833,6 +834,20 @@ docker compose up -d --build  # 全コンテナ再ビルド・再起動
 
 SSE（Server-Sent Events）によりファイル変更を自動検知して画面を更新する。
 ポート番号は `.env` の `WEB_UI_PORT` で変更可能（デフォルト: 3000）。
+
+### OpenClaw Status Page
+
+OpenClawの感情状態とモニタリングステータスを公開表示するページ（ポート3001）。
+webhook-proxyコンテナに統合されており、同プロセス内で第2 HTTPサーバーとして稼働する。
+Tailscale経由でインターネット公開可能。管理機能を含まない読み取り専用ページ。
+
+- **感情アバター**: 現在の感情状態をPNG画像で表示（8種類）+ 感情ラベル + 最終アクティブ時刻
+- **感情分布チャート**: 直近48時間の感情分布をドーナツチャートで可視化
+- **モニタリングステータス**: healthy/warning/critical等のステータスバッジ
+- **自動更新**: 30秒間隔でデータをリフレッシュ
+
+ポート番号は `.env` の `OPENCLAW_STATUS_PORT` で変更可能（デフォルト: 3001）。
+APIは感情・ステータスのみ公開（会話内容・管理機能は一切なし）。
 
 ## Communication Protocol
 

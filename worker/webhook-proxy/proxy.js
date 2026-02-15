@@ -643,3 +643,154 @@ setInterval(replayBuffered, REPLAY_INTERVAL_MS);
 // Probe timer — start immediately
 setInterval(probeUpstream, PROBE_INTERVAL_MS);
 probeUpstream();
+
+// ─── OpenClaw Status Page Server (:3001) ───
+
+const STATUS_PORT = parseInt(process.env.STATUS_PORT || "3001", 10);
+const STATUS_PUBLIC = path.join(__dirname, "public");
+const SHARED_DIR = process.env.SHARED_DIR || "/shared";
+
+const MIME_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".svg": "image/svg+xml",
+};
+
+function tailFileSync(filePath, lines) {
+  try {
+    const content = fs.readFileSync(filePath, "utf-8");
+    const allLines = content.split("\n");
+    return allLines.slice(-lines).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+function readJsonSync(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function handleStatusApi(reqUrl, res) {
+  const url = new URL(reqUrl, "http://localhost");
+
+  if (url.pathname === "/api/emotion") {
+    const convDir = path.join(SHARED_DIR, "openclaw", "conversations");
+    let latestOutbound = null;
+    for (const p of ["line", "discord"]) {
+      const content = tailFileSync(path.join(convDir, `${p}.jsonl`), 20);
+      if (!content) continue;
+      const msgs = content.split("\n")
+        .filter((l) => l.trim())
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter((m) => m && m.direction === "outbound");
+      for (const m of msgs) {
+        if (!latestOutbound || m.timestamp > latestOutbound.timestamp) {
+          latestOutbound = m;
+        }
+      }
+    }
+
+    let emotion = "neutral";
+    let source = "default";
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
+    if (latestOutbound && latestOutbound.timestamp > fiveMinAgo && latestOutbound.emotion_hint) {
+      emotion = latestOutbound.emotion_hint;
+      source = "emotion_hint";
+    } else if (latestOutbound && latestOutbound.timestamp > fiveMinAgo) {
+      emotion = estimateOutboundEmotion(latestOutbound.content);
+      source = "keyword_fallback";
+    }
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ emotion, source, last_message_at: latestOutbound ? latestOutbound.timestamp : null }));
+    return true;
+  }
+
+  if (url.pathname === "/api/emotion-distribution") {
+    const hours = Math.min(parseInt(url.searchParams.get("hours") || "48", 10), 168);
+    const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const convDir = path.join(SHARED_DIR, "openclaw", "conversations");
+
+    const counts = {};
+    for (const p of ["line", "discord"]) {
+      const content = tailFileSync(path.join(convDir, `${p}.jsonl`), 2000);
+      if (!content) continue;
+      const msgs = content.split("\n")
+        .filter((l) => l.trim())
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter((m) => m && m.direction === "outbound" && m.timestamp >= cutoff);
+      for (const m of msgs) {
+        const e = m.emotion_hint || "neutral";
+        counts[e] = (counts[e] || 0) + 1;
+      }
+    }
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ hours, counts, total: Object.values(counts).reduce((a, b) => a + b, 0) }));
+    return true;
+  }
+
+  if (url.pathname === "/api/status") {
+    const data = readJsonSync(path.join(SHARED_DIR, "monitoring", "latest.json"));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(data || { status: "unknown", message: "No monitoring data available" }));
+    return true;
+  }
+
+  return false;
+}
+
+function serveStaticFile(reqPath, res) {
+  let filePath = reqPath === "/" ? "/index.html" : reqPath;
+
+  // Prevent directory traversal
+  const safePath = path.normalize(filePath).replace(/^(\.\.[/\\])+/, "");
+  const fullPath = path.join(STATUS_PUBLIC, safePath);
+
+  if (!fullPath.startsWith(STATUS_PUBLIC)) {
+    res.writeHead(403);
+    res.end("Forbidden");
+    return;
+  }
+
+  try {
+    const data = fs.readFileSync(fullPath);
+    const ext = path.extname(fullPath).toLowerCase();
+    const contentType = MIME_TYPES[ext] || "application/octet-stream";
+    res.writeHead(200, { "Content-Type": contentType });
+    res.end(data);
+  } catch {
+    // Fallback to index.html for SPA
+    try {
+      const index = fs.readFileSync(path.join(STATUS_PUBLIC, "index.html"));
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(index);
+    } catch {
+      res.writeHead(404);
+      res.end("Not Found");
+    }
+  }
+}
+
+const statusServer = http.createServer((req, res) => {
+  if (req.method === "GET" && handleStatusApi(req.url, res)) return;
+  if (req.method === "GET") {
+    serveStaticFile(req.url.split("?")[0], res);
+    return;
+  }
+  res.writeHead(405);
+  res.end("Method Not Allowed");
+});
+
+statusServer.listen(STATUS_PORT, () => {
+  log(`OpenClaw Status page listening on :${STATUS_PORT}`);
+});
