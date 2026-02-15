@@ -4,7 +4,7 @@
 import { renderAvatar, getEmotionLabel } from '../components/openclaw-avatar.js';
 
 let currentFilter = 'all'; // all, policy, security, integrity
-let currentTab = 'monitoring'; // 'monitoring' | 'conversations'
+let currentTab = 'conversations'; // 'monitoring' | 'conversations'
 let currentEmotion = 'idle';
 let conversationFilter = { platform: 'all', direction: 'all', search: '' };
 let loadedMessages = [];

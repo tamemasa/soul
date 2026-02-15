@@ -109,6 +109,14 @@ function connectSSE() {
         return;
       }
 
+      // OpenClaw conversation updates: targeted refresh instead of full re-render
+      if (hash.startsWith('/openclaw') && data.type === 'conversation:updated') {
+        if (window.__refreshOpenClawConversations) {
+          window.__refreshOpenClawConversations();
+        }
+        return;
+      }
+
       const parts2 = hash.split('/').filter(Boolean);
       const isDetailView = (parts2[0] === 'timeline' || parts2[0] === 'discussions' || parts2[0] === 'decisions') && parts2[1];
       const isDiscussionEvent = data.type === 'discussion:updated' || data.type === 'decision:updated';
@@ -120,7 +128,7 @@ function connectSSE() {
 
       // Full re-render for other events (debounced)
       const shouldRefresh =
-        (hash.startsWith('/dashboard')) ||
+        (hash.startsWith('/dashboard') && (isDiscussionEvent || data.type === 'metrics:updated' || data.type === 'task:created' || data.type === 'task:updated')) ||
         (hash.startsWith('/timeline') && isDiscussionEvent) ||
         (hash.startsWith('/discussions') && isDiscussionEvent) ||
         (hash.startsWith('/decisions') && data.type === 'decision:updated') ||

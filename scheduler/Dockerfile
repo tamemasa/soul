@@ -17,6 +17,7 @@ WORKDIR /scheduler
 
 COPY cron-tasks.sh /scheduler/cron-tasks.sh
 COPY scheduler-loop.sh /scheduler/scheduler-loop.sh
-RUN chmod +x /scheduler/cron-tasks.sh /scheduler/scheduler-loop.sh
+COPY archive-tasks.sh /scheduler/archive-tasks.sh
+RUN chmod +x /scheduler/cron-tasks.sh /scheduler/scheduler-loop.sh /scheduler/archive-tasks.sh
 
 CMD ["/scheduler/scheduler-loop.sh"]

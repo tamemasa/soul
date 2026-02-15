@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const path = require('path');
+const fs = require('fs').promises;
 const { listJsonFiles, listDirs, readJson } = require('../lib/shared-reader');
 
 module.exports = function (sharedDir) {
@@ -34,13 +35,21 @@ module.exports = function (sharedDir) {
     // Count workers
     const workerDirs = await listDirs(path.join(sharedDir, 'workers'));
 
+    // Count archived tasks
+    let archivedTasks = 0;
+    try {
+      const indexData = await fs.readFile(path.join(sharedDir, 'archive', 'index.jsonl'), 'utf8');
+      archivedTasks = indexData.trim().split('\n').filter(l => l.trim()).length;
+    } catch { /* no archive yet */ }
+
     res.json({
       nodes: nodeList,
       counts: {
         pending_tasks: pendingTasks,
         active_discussions: activeDiscussions,
         total_decisions: totalDecisions,
-        workers: workerDirs.length
+        workers: workerDirs.length,
+        archived_tasks: archivedTasks
       }
     });
   });

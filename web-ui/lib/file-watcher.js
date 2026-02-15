@@ -12,6 +12,7 @@ function classifyEvent(relativePath) {
   if (relativePath.startsWith('nodes/') && relativePath.endsWith('params.json')) return 'params:changed';
   if (relativePath.startsWith('logs/')) return 'log:appended';
   if (relativePath.startsWith('host_metrics/')) return 'metrics:updated';
+  if (relativePath.startsWith('openclaw/conversations/')) return 'conversation:updated';
   return null;
 }
 

@@ -498,6 +498,77 @@ LINE Webhookを経由するメッセージは、`webhook-proxy`がペイロー�
 - 非テキストメッセージ（画像・スタンプ等）は`[image]`/`[sticker]`等の簡略表記で記録
 - ユーザーIDは末尾8文字のみ記録（プライバシー配慮）
 
+#### API エンドポイント
+
+| エンドポイント | メソッド | 説明 |
+|--------------|---------|------|
+| `/api/openclaw/conversations` | GET | 会話ログ取得 |
+| `/api/openclaw/emotion-state` | GET | 現在の感情状態取得 |
+
+**GET `/api/openclaw/conversations`**
+
+| パラメータ | 型 | デフォルト | 説明 |
+|-----------|-----|---------|------|
+| `platform` | `line` \| `discord` | (全件) | プラットフォームフィルタ |
+| `limit` | number | `100` | 取得件数（最大100） |
+| `before` | ISO 8601 timestamp | (なし) | 指定タイムスタンプより前のメッセージを取得 |
+
+レスポンス: `{ messages: [...], has_more: boolean, oldest_timestamp: string }`
+
+**GET `/api/openclaw/emotion-state`**
+
+レスポンス: `{ emotion: string, source: string, last_message_at: string, monitor_status: string }`
+
+感情状態の決定ロジック（優先度順）:
+
+1. 直近60秒以内にinboundメッセージがあり、outbound応答がまだない → `talking`（source: `inbound_detected`）
+2. 直近5分以内のoutboundメッセージに `emotion_hint` がある → その値を使用（source: `emotion_hint`）
+3. `/shared/monitoring/latest.json` の状態が `error` → `error`（source: `monitor_status`）
+4. 直近5分以内のoutboundメッセージにキーワードマッチング → 推定感情（source: `keyword_fallback`）
+5. いずれも該当しない → `idle`（source: `default`）
+
+#### 感情状態の定義
+
+| emotion_hint | 表示名 | アニメーション | 使用シーン |
+|-------------|--------|-------------|-----------|
+| `idle` | 待機中 | なし | デフォルト状態 |
+| `talking` | 会話中 | パルスグロー | メッセージ受信後、応答生成中 |
+| `thinking` | 考え中... | 点滅パルス | 複雑な質問への回答中 |
+| `happy` | 嬉しい | バウンス | ポジティブな話題 |
+| `concerned` | 心配... | - | エラー報告、リスク検出 |
+| `error` | エラー | シェイク | 処理失敗 |
+| `satisfied` | 達成感 | (happy扱い) | タスク完了 |
+| `neutral` | 通常 | (idle扱い) | 一般的な応答 |
+
+#### キーワードベース感情推定テーブル
+
+`emotion_hint` がない場合のフォールバック（outboundメッセージの内容分析）:
+
+| キーワード（部分一致） | 推定感情 |
+|----------------------|---------|
+| `完了`, `成功`, `done`, `ok` | `satisfied` |
+| `ありがとう`, `thanks`, `嬉しい` | `happy` |
+| `調査`, `確認中`, `検討`, `...` | `thinking` |
+| `申し訳`, `エラー`, `失敗`, `sorry` | `concerned` |
+| `error`, `exception`, `timeout` | `error` |
+| (マッチなし or 複数カテゴリ) | `neutral` |
+
+#### SSE イベント
+
+`conversation:updated` イベントが `/shared/openclaw/conversations/` 配下のファイル変更時に発火。フロントエンドは以下を実行:
+1. アバターの感情状態を `/api/openclaw/emotion-state` から再取得
+2. 会話ログタブ表示中は、最新メッセージを再ロード
+
+#### コンポーネント構成
+
+| ファイル | 役割 |
+|---------|------|
+| `web-ui/public/js/views/openclaw.js` | タブUI制御、会話ログビュー、フィルタ、ページネーション |
+| `web-ui/public/js/components/openclaw-avatar.js` | SVGアバター生成（`renderAvatar(emotion)`, `getEmotionLabel(emotion)`） |
+| `web-ui/routes/api-openclaw.js` | conversations, emotion-state エンドポイント |
+| `web-ui/lib/file-watcher.js` | `classifyEvent()` で `conversation:updated` を分類 |
+| `web-ui/public/css/style.css` | アバター、会話カード、プラットフォームバッジ、アニメーション用CSS |
+
 - 設計ドキュメント: [`docs/design-openclaw-persona.md`](docs/design-openclaw-persona.md)
 
 ### パーソナリティ改善システム
@@ -628,7 +699,7 @@ soul/
 │       ├── index.html
 │       ├── css/style.css
 │       ├── js/views/           # 各画面 (dashboard, discussions, openclaw等)
-│       ├── js/components/      # 共通コンポーネント (nav, timeline等)
+│       ├── js/components/      # 共通コンポーネント (nav, timeline, openclaw-avatar等)
 │       └── lib/                # Chart.js等のライブラリ
 ├── scheduler/
 │   ├── Dockerfile              # スケジューライメージ
@@ -637,7 +708,8 @@ soul/
 ├── scripts/
 │   └── collect-host-metrics.sh # ホストCPU/メモリ/ディスク/温度収集
 ├── docs/
-│   └── proactive-suggestion-system.md  # プロアクティブ提言設計書
+│   ├── proactive-suggestion-system.md  # プロアクティブ提言設計書
+│   └── design-openclaw-persona.md      # 擬人化インターフェイス設計書
 └── shared/                     # コンテナ間共有ボリューム (bind mount)
     ├── nodes/                  # ノードパラメータ
     │   ├── panda/params.json
@@ -654,6 +726,7 @@ soul/
     ├── personality_improvement/ # パーソナリティ改善データ
     ├── bot_commands/           # Brain→OpenClaw制御コマンド
     ├── openclaw/               # OpenClaw関連データ (提言・ブロードキャスト等)
+    │   └── conversations/      # 会話ログ (line.jsonl, discord.jsonl)
     ├── attachments/            # ファイルアップロード
     ├── workspace/              # ワークスペース
     └── logs/                   # システムログ
@@ -710,7 +783,7 @@ docker compose up -d --build  # 全コンテナ再ビルド・再起動
 - **タスク投入**: フォームからタスクや質問を投入
 - **議論ビューア**: ラウンドごとの投票・意見をタイムライン形式で表示。ユーザーコメントもタイムラインにインラインで表示され、各Brainが未回答のラウンドでは「検討中…」インジケーターを表示
 - **決定一覧**: 合意結果と実行結果の閲覧。パイプラインステッパー（Discussion → Announcement → Executing → Completed）で進捗を可視化。トリケラトプスによるAnnouncement（決定発表・要約）とExecution Result（実行結果）を分離表示
-- **OpenClaw管理**: Bot状態・ブロードキャスト配信管理
+- **OpenClaw管理**: 擬人化アバター（感情表示）・統合会話ログ（LINE/Discord）・モニタリング・ブロードキャスト配信。タブUIで切り替え
 - **パラメータ管理**: スライダーで各ノードのparams.jsonをリアルタイム編集
 - **評価履歴**: 相互評価サイクルの詳細とリチューニング結果
 - **ログビューア**: ノード別のログをリアルタイム表示

@@ -41,6 +41,10 @@ cleanup_old_logs() {
   log "Old logs cleaned up"
 }
 
+archive_completed_tasks() {
+  /scheduler/archive-tasks.sh 0
+}
+
 healthcheck() {
   local now
   now=$(date +%s)
@@ -266,6 +270,7 @@ case "${ACTION}" in
     ;;
   cleanup)
     cleanup_old_logs
+    archive_completed_tasks
     ;;
   healthcheck)
     healthcheck

@@ -4,12 +4,12 @@ set -euo pipefail
 # Intervals
 HEALTH_INTERVAL=30    # 30 seconds
 EVAL_INTERVAL=21600   # 6 hours in seconds
-CLEANUP_INTERVAL=86400 # 24 hours in seconds
+CLEANUP_INTERVAL=3600  # 1 hour in seconds
 
 last_eval=0
 last_cleanup=0
 
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [scheduler] Scheduler loop started (health every 30s, eval every 6h, cleanup every 24h)"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [scheduler] Scheduler loop started (health every 30s, eval every 6h, cleanup every 1h)"
 
 while true; do
   now=$(date +%s)

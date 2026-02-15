@@ -198,6 +198,16 @@ process_evaluation_results() {
   "status": "completed"
 }
 EOF
+
+  # Mark request.json as completed so it won't be re-processed
+  local request_file="${eval_dir}/request.json"
+  if [[ -f "${request_file}" ]]; then
+    local tmp
+    tmp=$(mktemp)
+    jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '.status = "completed" | .completed_at = $ts' \
+      "${request_file}" > "${tmp}" && mv "${tmp}" "${request_file}"
+  fi
 }
 
 apply_retuning() {

@@ -13,13 +13,13 @@ const ICONS = {
 
 const NAV_ITEMS = [
   { path: '/dashboard', icon: 'dashboard', label: 'Dashboard' },
+  { path: '/openclaw', icon: 'buddy', label: 'Monitor' },
   { path: '/tasks/new', icon: 'task', label: 'New Task' },
   { path: '/timeline', icon: 'discussion', label: 'Timeline' },
   { path: '/params', icon: 'params', label: 'Parameters' },
   { path: '/evaluations', icon: 'evaluation', label: 'Evaluations' },
   { path: '/personality', icon: 'personality', label: 'Personality' },
-  { path: '/logs', icon: 'logs', label: 'Logs' },
-  { path: '/openclaw', icon: 'buddy', label: 'Monitor' }
+  { path: '/logs', icon: 'logs', label: 'Logs' }
 ];
 
 export function renderNav(currentPath) {

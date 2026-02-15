@@ -3,17 +3,23 @@ import { nodeBadge } from '../components/node-badge.js';
 // Track Chart.js instances for destroy/recreate
 let cpuTempChart = null;
 let memDiskChart = null;
+let tokenCostChart = null;
 
 export async function renderDashboard(app) {
-  app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+  const isRerender = !!app.querySelector('.page-title');
+  const prevScrollY = isRerender ? window.scrollY : -1;
+  if (!isRerender) {
+    app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+  }
 
-  const [status, discussions, monitorStatus, broadcastStatus, personalityData, metrics] = await Promise.all([
+  const [status, discussions, monitorStatus, broadcastStatus, personalityData, metrics, tokenUsage] = await Promise.all([
     fetch('/api/status').then(r => r.json()),
     fetch('/api/discussions').then(r => r.json()),
     fetch('/api/openclaw/status').then(r => r.json()).catch(() => ({ state: { status: 'unknown', check_count: 0 }, summary: {} })),
     fetch('/api/broadcast/status').then(r => r.json()).catch(() => ({ broadcast: { status: 'not_started' }, engine: {}, trigger: null })),
     fetch('/api/personality/history').then(r => r.json()).catch(() => ({ trigger: null, cycles: [] })),
-    fetch('/api/metrics').then(r => r.json()).catch(() => [])
+    fetch('/api/metrics').then(r => r.json()).catch(() => []),
+    fetch('/api/token-usage').then(r => r.json()).catch(() => ({ today: { total_input: 0, total_output: 0, total_cost: 0, by_node: {} }, daily: [], budget: null }))
   ]);
 
   const monitorState = monitorStatus.state || { status: 'unknown', check_count: 0 };
@@ -66,6 +72,10 @@ export async function renderDashboard(app) {
         <div class="stat-value">${status.counts.workers}</div>
         <div class="stat-label">Workers</div>
       </div>
+      <div class="stat-box">
+        <div class="stat-value">${status.counts.archived_tasks || 0}</div>
+        <div class="stat-label">Archived</div>
+      </div>
     </div>
 
     <div class="card clickable" onclick="location.hash='#/openclaw'" style="margin-bottom:16px;">
@@ -84,6 +94,8 @@ export async function renderDashboard(app) {
 
     ${renderBroadcastSection(broadcastStatus)}
 
+    ${renderTokenUsageSection(tokenUsage)}
+
     ${renderMetricsSection(metrics)}
 
     <div class="section-label">Recent Activity</div>
@@ -100,8 +112,13 @@ export async function renderDashboard(app) {
     `).join('') : '<div class="empty-state">No activity yet</div>'}
   `;
 
+  if (prevScrollY >= 0) {
+    window.scrollTo(0, prevScrollY);
+  }
+
   attachBroadcastTrigger();
   renderMetricsCharts(metrics);
+  renderTokenCostChart(tokenUsage);
 }
 
 function renderPersonalityCard(pd) {
@@ -226,6 +243,192 @@ function formatTime(ts) {
 
 function escapeHtml(str) {
   return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function formatTokenCount(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return String(n);
+}
+
+function formatCost(usd) {
+  if (usd >= 1) return '$' + usd.toFixed(2);
+  if (usd >= 0.01) return '$' + usd.toFixed(3);
+  return '$' + usd.toFixed(4);
+}
+
+function renderTokenUsageSection(tu) {
+  const today = tu.today || {};
+  const budget = tu.budget;
+  const totalTokens = (today.total_input || 0) + (today.total_output || 0);
+
+  let budgetHtml = '';
+  if (budget) {
+    const pct = Math.min(budget.usage_pct || 0, 100);
+    const barColor = pct >= 95 ? 'var(--error)' : pct >= 80 ? 'var(--warning)' : 'var(--success)';
+    budgetHtml = `
+      <div style="margin-top:12px;">
+        <div class="text-sm" style="display:flex; justify-content:space-between; margin-bottom:4px;">
+          <span class="text-dim">Monthly Budget</span>
+          <span style="font-family:var(--font-mono)">${formatCost(budget.monthly_spent_usd)} / ${formatCost(budget.monthly_budget_usd)}</span>
+        </div>
+        <div style="height:6px; background:var(--bg-elevated); border-radius:3px; overflow:hidden;">
+          <div style="height:100%; width:${pct.toFixed(1)}%; background:${barColor}; border-radius:3px; transition:width 0.3s ease;"></div>
+        </div>
+        <div class="text-sm text-dim" style="margin-top:4px; text-align:right;">
+          ${formatCost(budget.monthly_remaining_usd)} remaining (${pct.toFixed(1)}% used)
+        </div>
+      </div>`;
+  }
+
+  // Node breakdown
+  const byNode = today.by_node || {};
+  const nodeNames = Object.keys(byNode);
+  const nodeColors = { panda: '#3B82F6', gorilla: '#EF4444', triceratops: '#A855F7' };
+  const nodeBreakdown = nodeNames.length > 0
+    ? `<div style="display:flex; gap:12px; margin-top:8px; flex-wrap:wrap;">
+        ${nodeNames.map(n => `
+          <div class="text-sm">
+            <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${nodeColors[n] || '#8B99B0'}; margin-right:4px;"></span>
+            <span class="text-dim">${n}</span>
+            <span style="font-family:var(--font-mono)">${formatCost(byNode[n].cost)}</span>
+          </div>
+        `).join('')}
+      </div>`
+    : '';
+
+  return `
+    <div class="section-label">Token Usage</div>
+    <div class="stats-row">
+      <div class="stat-box">
+        <div class="stat-value" style="color:#60A5FA">${formatTokenCount(totalTokens)}</div>
+        <div class="stat-label">Today Total</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-value" style="color:#34D399">${formatTokenCount(today.total_input || 0)}</div>
+        <div class="stat-label">Input</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-value" style="color:#A855F7">${formatTokenCount(today.total_output || 0)}</div>
+        <div class="stat-label">Output</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-value" style="color:#F59E0B">${formatCost(today.total_cost || 0)}</div>
+        <div class="stat-label">Cost</div>
+      </div>
+    </div>
+    ${nodeBreakdown}
+    ${budgetHtml}
+    <div class="metrics-chart-container" style="margin-top:12px;">
+      <div class="metrics-chart-title">Daily Token Cost (7 days)</div>
+      <canvas id="chart-token-cost"></canvas>
+    </div>`;
+}
+
+function renderTokenCostChart(tu) {
+  const daily = (tu && tu.daily) || [];
+  if (daily.length === 0) return;
+  if (typeof Chart === 'undefined') return;
+
+  if (tokenCostChart) { tokenCostChart.destroy(); tokenCostChart = null; }
+
+  const ctx = document.getElementById('chart-token-cost');
+  if (!ctx) return;
+
+  const labels = daily.map(d => d.date);
+  const gridColor = 'rgba(30,41,59,0.7)';
+  const tickColor = '#4B5972';
+
+  tokenCostChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Input Tokens',
+          data: daily.map(d => d.input),
+          backgroundColor: 'rgba(52,211,153,0.7)',
+          borderColor: '#34D399',
+          borderWidth: 1,
+          yAxisID: 'y'
+        },
+        {
+          label: 'Output Tokens',
+          data: daily.map(d => d.output),
+          backgroundColor: 'rgba(168,85,247,0.7)',
+          borderColor: '#A855F7',
+          borderWidth: 1,
+          yAxisID: 'y'
+        },
+        {
+          label: 'Cost (USD)',
+          data: daily.map(d => d.cost),
+          type: 'line',
+          borderColor: '#F59E0B',
+          backgroundColor: 'rgba(245,158,11,0.1)',
+          borderWidth: 2,
+          pointRadius: 3,
+          pointBackgroundColor: '#F59E0B',
+          fill: false,
+          tension: 0.3,
+          yAxisID: 'y1'
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          labels: { color: '#8B99B0', font: { size: 11 }, boxWidth: 12, padding: 12 }
+        },
+        tooltip: {
+          backgroundColor: '#1A2332',
+          titleColor: '#E8EDF5',
+          bodyColor: '#8B99B0',
+          borderColor: '#1E293B',
+          borderWidth: 1,
+          padding: 10,
+          callbacks: {
+            label: function(context) {
+              if (context.dataset.yAxisID === 'y1') {
+                return context.dataset.label + ': $' + context.parsed.y.toFixed(4);
+              }
+              return context.dataset.label + ': ' + formatTokenCount(context.parsed.y);
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          stacked: true,
+          grid: { color: gridColor },
+          ticks: { color: tickColor, font: { size: 10 } }
+        },
+        y: {
+          stacked: true,
+          position: 'left',
+          grid: { color: gridColor },
+          ticks: {
+            color: tickColor,
+            font: { size: 10 },
+            callback: v => formatTokenCount(v)
+          }
+        },
+        y1: {
+          position: 'right',
+          grid: { drawOnChartArea: false },
+          ticks: {
+            color: '#F59E0B',
+            font: { size: 10 },
+            callback: v => '$' + v.toFixed(2)
+          }
+        }
+      }
+    }
+  });
 }
 
 function renderMetricsSection(metrics) {
