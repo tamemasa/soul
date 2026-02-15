@@ -102,8 +102,8 @@ $(cat "${context_file}")"
   tmp_json=$(mktemp)
   local exit_code
 
-  # First attempt - JSON output goes to stderr
-  claude -p "${full_prompt}" ${CLAUDE_MODEL:+--model "${CLAUDE_MODEL}"} --permission-mode bypassPermissions --output-format json 2>"${tmp_json}"
+  # First attempt - capture JSON output to temp file
+  claude -p "${full_prompt}" ${CLAUDE_MODEL:+--model "${CLAUDE_MODEL}"} --permission-mode bypassPermissions --output-format json >"${tmp_json}" 2>/dev/null
   exit_code=$?
 
   # Append raw JSON to log file for record-keeping
@@ -116,7 +116,7 @@ $(cat "${context_file}")"
     sleep 5
     tmp_json=$(mktemp)
     # Retry once
-    claude -p "${full_prompt}" ${CLAUDE_MODEL:+--model "${CLAUDE_MODEL}"} --permission-mode bypassPermissions --output-format json 2>"${tmp_json}"
+    claude -p "${full_prompt}" ${CLAUDE_MODEL:+--model "${CLAUDE_MODEL}"} --permission-mode bypassPermissions --output-format json >"${tmp_json}" 2>/dev/null
     exit_code=$?
     cat "${tmp_json}" >> "${log_file}" 2>/dev/null
     echo >> "${log_file}" 2>/dev/null
@@ -171,6 +171,46 @@ ensure_dirs() {
   set_activity "idle"
 }
 
+recover_stalled_discussions() {
+  # Only triceratops runs consensus evaluation
+  [[ "${NODE_NAME}" == "triceratops" ]] || return 0
+
+  local discussions_dir="${SHARED_DIR}/discussions"
+  local recovered=0
+
+  for discussion_dir in "${discussions_dir}"/*/; do
+    [[ -d "${discussion_dir}" ]] || continue
+
+    local task_id
+    task_id=$(basename "${discussion_dir}")
+    local status_file="${discussion_dir}/status.json"
+    [[ -f "${status_file}" ]] || continue
+
+    local status_data
+    status_data=$(jq -r '[.status, (.current_round | tostring)] | @tsv' "${status_file}" 2>/dev/null) || continue
+    local status current_round
+    status=$(echo "${status_data}" | cut -f1)
+    current_round=$(echo "${status_data}" | cut -f2)
+
+    [[ "${status}" == "discussing" ]] || continue
+
+    local round_dir="${discussion_dir}/round_${current_round}"
+    local response_count=0
+    for node in "${ALL_NODES[@]}"; do
+      [[ -f "${round_dir}/${node}.json" ]] && ((response_count++))
+    done
+
+    if [[ ${response_count} -eq ${#ALL_NODES[@]} ]]; then
+      log "RECOVERY: Discussion ${task_id} round ${current_round} has all votes, running consensus"
+      evaluate_consensus "${task_id}" "${current_round}"
+      recovered=$((recovered + 1))
+    fi
+  done
+
+  [[ ${recovered} -gt 0 ]] && log "RECOVERY: Processed ${recovered} stalled discussion(s)"
+  return 0
+}
+
 recover_interrupted_tasks() {
   local decisions_dir="${SHARED_DIR}/decisions"
   local recovered=0
@@ -223,7 +263,8 @@ main_loop() {
   load_params
   ensure_dirs
 
-  recover_interrupted_tasks
+  recover_stalled_discussions  # 1. Consensus check first (short, unblocks stalled discussions)
+  recover_interrupted_tasks    # 2. Task re-execution second (may block for 30min+)
 
   log "Entering main loop (poll interval: ${POLL_INTERVAL}s)"
 
