@@ -230,14 +230,14 @@ healthcheck() {
       fi
     fi
 
-    # Remediating > 30min
+    # Remediating > 10min
     if [[ "${dec_status}" == "remediating" ]]; then
       local remediate_since
       remediate_since=$(jq -r '.review_completed_at // .executed_at // .decided_at' "${decision_file}")
       local remediate_epoch
       remediate_epoch=$(date -d "${remediate_since}" +%s 2>/dev/null || echo 0)
       local age=$(( now - remediate_epoch ))
-      if [[ ${age} -gt 1800 ]]; then
+      if [[ ${age} -gt 600 ]]; then
         _notify_stuck "${task_id}" "remediating" "${remediate_since}" "${age}" "${decision_file}" "retry_remediation"
         ((alert_count++))
       fi
