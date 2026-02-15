@@ -401,6 +401,15 @@ You MUST respond with ONLY a valid JSON object (no markdown, no code fences):
   local response
   response=$(jq -r 'select(.type == "result") | .result // ""' "${progress_file}" 2>/dev/null | tail -1)
 
+  # Record token usage from stream-json result line
+  local _stream_result_json
+  _stream_result_json=$(mktemp)
+  jq -c 'select(.type == "result")' "${progress_file}" 2>/dev/null | tail -1 > "${_stream_result_json}"
+  if [[ -s "${_stream_result_json}" ]]; then
+    record_token_usage "${_stream_result_json}" "${task_id}" "stream" || true
+  fi
+  rm -f "${_stream_result_json}"
+
   # If no response, try alternative extraction or revert status
   if [[ -z "${response}" ]]; then
     log "WARN: No result extracted from announcement progress, attempting alternative extraction"
@@ -602,6 +611,15 @@ Report your results."
   local result
   result=$(jq -r 'select(.type == "result") | .result // ""' "${progress_file}" 2>/dev/null | tail -1)
 
+  # Record token usage from stream-json result line
+  local _stream_result_json
+  _stream_result_json=$(mktemp)
+  jq -c 'select(.type == "result")' "${progress_file}" 2>/dev/null | tail -1 > "${_stream_result_json}"
+  if [[ -s "${_stream_result_json}" ]]; then
+    record_token_usage "${_stream_result_json}" "${task_id}" "stream" || true
+  fi
+  rm -f "${_stream_result_json}"
+
   # If result is empty, check if execution actually succeeded
   if [[ -z "${result}" ]]; then
     local subtype
@@ -679,18 +697,280 @@ EOF
     fi
   fi
 
-  # Mark decision as completed
+  # Mark decision as reviewing (panda will review the execution)
   tmp=$(mktemp)
-  jq '.status = "completed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+  jq '.status = "reviewing" | .executed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
     "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
 
-  # Move task from inbox to archive
+  set_activity "idle"
+  log "Task ${task_id} execution completed, pending review"
+}
+
+# Archive a completed task: move inbox file to archive
+_archive_task() {
+  local task_id="$1"
   local inbox_task="${SHARED_DIR}/inbox/${task_id}.json"
   if [[ -f "${inbox_task}" ]]; then
     mkdir -p "${SHARED_DIR}/archive"
     mv "${inbox_task}" "${SHARED_DIR}/archive/${task_id}.json"
   fi
+}
+
+review_execution() {
+  local decision_file="$1"
+  local task_id
+  task_id=$(jq -r '.task_id' "${decision_file}")
+  local discussion_dir="${SHARED_DIR}/discussions/${task_id}"
+
+  # Panda-only guard
+  if [[ "${NODE_NAME}" != "panda" ]]; then
+    log "WARN: review_execution called on non-panda node ${NODE_NAME}, skipping"
+    return
+  fi
+
+  set_activity "reviewing" "\"task_id\":\"${task_id}\","
+  log "Reviewing execution of task ${task_id}"
+
+  # Read final_approach and result
+  local approach
+  approach=$(jq -r '.final_approach // ""' "${decision_file}")
+  local result_file="${SHARED_DIR}/decisions/${task_id}_result.json"
+  local result=""
+  if [[ -f "${result_file}" ]]; then
+    result=$(jq -r '.result // ""' "${result_file}")
+  fi
+
+  if [[ -z "${approach}" || -z "${result}" ]]; then
+    log "WARN: Missing approach or result for review of ${task_id}, auto-passing"
+    local tmp
+    tmp=$(mktemp)
+    jq '.status = "completed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+      "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+    _archive_task "${task_id}"
+    set_activity "idle"
+    return
+  fi
+
+  # Load task info for context
+  local task_content=""
+  if [[ -f "${discussion_dir}/task.json" ]]; then
+    task_content=$(cat "${discussion_dir}/task.json")
+  fi
+
+  # Load review protocol
+  local protocol
+  protocol=$(cat "${BRAIN_DIR}/protocols/review.md")
+
+  local prompt="${protocol}
+
+## Task
+${task_content}
+
+## Agreed Approach (final_approach)
+${approach}
+
+## Execution Result
+${result}
+
+## Instructions
+上記の合意済みアプローチに対して実行結果を検証してください。
+verdict、summary、violations、remediation_instructionsを含むJSONで回答してください。
+summaryとviolationsとremediation_instructionsは日本語で記述すること。"
+
+  local response
+  response=$(invoke_claude "${prompt}")
+
+  # Strip markdown code fences
+  response=$(echo "${response}" | sed '/^```\(json\)\?$/d')
+
+  # Parse review response
+  local verdict="pass"
+  local review_json=""
+  if echo "${response}" | jq . > /dev/null 2>&1; then
+    review_json="${response}"
+    verdict=$(echo "${response}" | jq -r '.verdict // "pass"')
+  else
+    # Try extracting JSON from mixed text
+    local json_part
+    json_part=$(echo "${response}" | sed -n '/^[[:space:]]*{/,/^[[:space:]]*}/p')
+    if [[ -n "${json_part}" ]] && echo "${json_part}" | jq . > /dev/null 2>&1; then
+      review_json="${json_part}"
+      verdict=$(echo "${json_part}" | jq -r '.verdict // "pass"')
+    else
+      # Fallback: auto-pass if we can't parse the review
+      log "WARN: Could not parse review response for ${task_id}, auto-passing"
+      review_json="{\"verdict\":\"pass\",\"summary\":\"レビュー応答のパース失敗、自動パス\",\"violations\":[],\"remediation_instructions\":\"\"}"
+      verdict="pass"
+    fi
+  fi
+
+  # Save review result
+  local review_file="${SHARED_DIR}/decisions/${task_id}_review.json"
+  local tmp
+  tmp=$(mktemp)
+  echo "${review_json}" | jq --arg reviewer "${NODE_NAME}" --arg reviewed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '. + {reviewer: $reviewer, reviewed_at: $reviewed_at}' > "${tmp}" && mv "${tmp}" "${review_file}"
+
+  if [[ "${verdict}" == "pass" ]]; then
+    log "Review PASSED for task ${task_id}"
+    tmp=$(mktemp)
+    jq '.status = "completed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .review_verdict = "pass"' \
+      "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+    _archive_task "${task_id}"
+  else
+    log "Review FAILED for task ${task_id}, transitioning to remediating"
+    tmp=$(mktemp)
+    jq '.status = "remediating" | .review_verdict = "fail" | .remediation_started_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+      "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+  fi
 
   set_activity "idle"
-  log "Task ${task_id} execution completed"
+}
+
+remediate_execution() {
+  local decision_file="$1"
+  local task_id
+  task_id=$(jq -r '.task_id' "${decision_file}")
+  local discussion_dir="${SHARED_DIR}/discussions/${task_id}"
+
+  # Executor-only guard (usually triceratops)
+  local executor
+  executor=$(jq -r '.executor // ""' "${decision_file}")
+  if [[ -n "${executor}" && "${executor}" != "${NODE_NAME}" ]]; then
+    return
+  fi
+
+  # Mark as remediating (in progress)
+  local tmp
+  tmp=$(mktemp)
+  jq '.status = "remediating" | .executor = "'"${NODE_NAME}"'" | .remediation_started_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+    "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+
+  set_activity "remediating" "\"task_id\":\"${task_id}\","
+  log "Remediating task ${task_id}"
+
+  # Read review violations and instructions
+  local review_file="${SHARED_DIR}/decisions/${task_id}_review.json"
+  local violations=""
+  local remediation_instructions=""
+  if [[ -f "${review_file}" ]]; then
+    violations=$(jq -r '.violations // [] | join("\n- ")' "${review_file}")
+    remediation_instructions=$(jq -r '.remediation_instructions // ""' "${review_file}")
+  fi
+
+  # Read previous result
+  local result_file="${SHARED_DIR}/decisions/${task_id}_result.json"
+  local previous_result=""
+  if [[ -f "${result_file}" ]]; then
+    previous_result=$(jq -r '.result // ""' "${result_file}")
+  fi
+
+  # Read task and approach
+  local task_content=""
+  if [[ -f "${discussion_dir}/task.json" ]]; then
+    task_content=$(cat "${discussion_dir}/task.json")
+  fi
+  local approach
+  approach=$(jq -r '.final_approach // ""' "${decision_file}")
+
+  # Build attachment context
+  local attachment_context
+  attachment_context=$(build_attachment_context "${task_id}")
+
+  # Load execution protocol as base
+  local protocol
+  protocol=$(cat "${BRAIN_DIR}/protocols/task-execution.md")
+
+  local prompt="${protocol}
+
+## Task
+${task_content}
+${attachment_context}
+
+## Agreed Approach
+${approach}
+
+## Previous Execution Result
+${previous_result}
+
+## Review Violations
+The following issues were identified by the reviewer:
+- ${violations}
+
+## Remediation Instructions
+${remediation_instructions}
+
+## Instructions
+上記のレビュー違反事項を修正してください。合意済みアプローチに従って修正を行い、結果を報告してください。
+修正内容に集中し、前回正しく実行された部分はやり直さないでください。"
+
+  # Stream remediation to progress file
+  local progress_file="${SHARED_DIR}/decisions/${task_id}_progress.jsonl"
+
+  # Backup previous progress
+  if [[ -s "${progress_file}" ]]; then
+    local backup_file="${SHARED_DIR}/decisions/${task_id}_progress_preremediation.jsonl"
+    cp "${progress_file}" "${backup_file}" 2>/dev/null || true
+  fi
+
+  : > "${progress_file}"
+
+  claude -p "${prompt}" ${CLAUDE_MODEL:+--model "${CLAUDE_MODEL}"} --permission-mode bypassPermissions --verbose --output-format stream-json \
+    > "${progress_file}" \
+    2>>"${SHARED_DIR}/logs/$(date -u +%Y-%m-%d)/${NODE_NAME}_claude.log" &
+  local claude_pid=$!
+  wait "${claude_pid}" 2>/dev/null
+
+  # Extract result
+  local result
+  result=$(jq -r 'select(.type == "result") | .result // ""' "${progress_file}" 2>/dev/null | tail -1)
+
+  # Record token usage
+  local _stream_result_json
+  _stream_result_json=$(mktemp)
+  jq -c 'select(.type == "result")' "${progress_file}" 2>/dev/null | tail -1 > "${_stream_result_json}"
+  if [[ -s "${_stream_result_json}" ]]; then
+    record_token_usage "${_stream_result_json}" "${task_id}" "stream" || true
+  fi
+  rm -f "${_stream_result_json}"
+
+  if [[ -z "${result}" ]]; then
+    local subtype
+    subtype=$(jq -r 'select(.type == "result") | .subtype // ""' "${progress_file}" 2>/dev/null | tail -1)
+    if [[ "${subtype}" == "success" ]]; then
+      result=$(jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text // ""' \
+        "${progress_file}" 2>/dev/null | tail -n 50 | head -c 10000)
+    fi
+  fi
+
+  if [[ -z "${result}" ]]; then
+    log "ERROR: Remediation failed for task ${task_id}, no result"
+    tmp=$(mktemp)
+    jq '.status = "failed" | .failed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .failure_reason = "remediation failed: no result"' \
+      "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+    set_activity "idle"
+    return
+  fi
+
+  # Save remediation result (overwrite previous result)
+  local escaped_result
+  escaped_result=$(echo "${result}" | jq -Rs .)
+  cat > "${result_file}" <<EOF
+{
+  "task_id": "${task_id}",
+  "executor": "${NODE_NAME}",
+  "result": ${escaped_result},
+  "remediated": true,
+  "completed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
+  # Complete directly (no re-review to prevent infinite loop)
+  tmp=$(mktemp)
+  jq '.status = "completed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .remediated = true' \
+    "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+  _archive_task "${task_id}"
+
+  set_activity "idle"
+  log "Task ${task_id} remediation completed"
 }

@@ -99,6 +99,7 @@ check_decisions_unified() {
     # Skip non-decision files
     [[ "${decision_file}" != *_result.json ]] || continue
     [[ "${decision_file}" != *_history.json ]] || continue
+    [[ "${decision_file}" != *_review.json ]] || continue
     [[ "${decision_file}" != *_progress.jsonl ]] || continue
     [[ "${decision_file}" != *_announce_progress.jsonl ]] || continue
 
@@ -144,10 +145,10 @@ check_decisions_unified() {
         # Check if result file already exists (task completed but status not updated)
         local result_file="${decisions_dir}/${task_id}_result.json"
         if [[ -f "${result_file}" ]]; then
-          log "Task ${task_id} has result file but status is executing, marking as completed"
+          log "Task ${task_id} has result file but status is executing, marking as reviewing"
           local tmp
           tmp=$(mktemp)
-          jq '.status = "completed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+          jq '.status = "reviewing" | .executed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
             "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
           continue
         fi
@@ -176,6 +177,18 @@ check_decisions_unified() {
 
         log "Retrying stale execution for task: ${task_id} (started ${age_seconds}s ago)"
         execute_decision "${decision_file}"
+      fi
+
+    # --- Review handling (panda only) ---
+    elif [[ "${decision_status}" == "reviewing" && "${NODE_NAME}" == "panda" ]]; then
+      log "Reviewing execution for task: ${task_id}"
+      review_execution "${decision_file}"
+
+    # --- Remediation handling (executor only) ---
+    elif [[ "${decision_status}" == "remediating" ]]; then
+      if [[ -z "${executor}" || "${executor}" == "${NODE_NAME}" ]]; then
+        log "Remediating task: ${task_id}"
+        remediate_execution "${decision_file}"
       fi
     fi
   done
@@ -702,6 +715,10 @@ check_evaluation_requests() {
     if [[ "${all_done}" == "false" ]]; then
       log "Evaluation cycle ${cycle_id}: submitting evaluations"
       run_evaluation "${cycle_id}"
+    elif [[ "${NODE_NAME}" == "gorilla" ]]; then
+      # All our evaluations are submitted; check if all 6 evaluations are in
+      # and process results if so (gorilla is the coordinator for result processing)
+      check_evaluation_results "${cycle_id}"
     fi
   done
 }

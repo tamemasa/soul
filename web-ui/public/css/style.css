@@ -232,6 +232,8 @@ body {
 .badge-pending_announcement { background: rgba(168,85,247,0.12); color: var(--node-triceratops); border: 1px solid rgba(168,85,247,0.25); }
 .badge-announced { background: rgba(168,85,247,0.12); color: var(--node-triceratops); border: 1px solid rgba(168,85,247,0.25); }
 .badge-announcing { background: rgba(168,85,247,0.12); color: var(--node-triceratops); border: 1px solid rgba(168,85,247,0.25); }
+.badge-reviewing { background: rgba(59,130,246,0.12); color: var(--node-panda); border: 1px solid rgba(59,130,246,0.25); }
+.badge-remediating { background: rgba(245,158,11,0.12); color: var(--warning); border: 1px solid rgba(245,158,11,0.25); }
 
 /* ─── Timeline ─── */
 .timeline { border-left: 1px solid var(--border); margin-left: 12px; padding-left: 24px; }

@@ -11,6 +11,11 @@ export async function renderTimelineList(app) {
   // Sort by time descending (newest first)
   discussions.sort((a, b) => (b.started_at || '').localeCompare(a.started_at || ''));
 
+  // Check if archive section is expanded
+  const showArchive = app.querySelector('.archive-section.expanded') !== null;
+
+  const prevScrollY = window.scrollY;
+
   app.innerHTML = `
     <div class="page-header">
       <h1 class="page-title">Timeline</h1>
@@ -27,14 +32,57 @@ export async function renderTimelineList(app) {
         </div>
       </div>
     `).join('') : '<div class="empty-state">No tasks yet</div>'}
+
+    <div class="archive-section ${showArchive ? 'expanded' : ''}" id="archive-section">
+      <div class="section-label clickable" id="archive-toggle" style="cursor:pointer;user-select:none;">
+        <span id="archive-arrow">${showArchive ? '\u25BC' : '\u25B6'}</span> Archived Tasks
+        <span class="badge" id="archive-count" style="margin-left:8px;">...</span>
+      </div>
+      <div id="archive-list" style="display:${showArchive ? 'block' : 'none'}"></div>
+    </div>
   `;
+
+  window.scrollTo(0, prevScrollY);
+
+  // Archive toggle handler
+  document.getElementById('archive-toggle').addEventListener('click', async () => {
+    const section = document.getElementById('archive-section');
+    const list = document.getElementById('archive-list');
+    const arrow = document.getElementById('archive-arrow');
+    const isExpanded = section.classList.toggle('expanded');
+    arrow.textContent = isExpanded ? '\u25BC' : '\u25B6';
+    list.style.display = isExpanded ? 'block' : 'none';
+    if (isExpanded && !list.dataset.loaded) {
+      list.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+      const archived = await fetch('/api/archive').then(r => r.json());
+      list.dataset.loaded = 'true';
+      list.innerHTML = archived.length > 0 ? archived.map(a => `
+        <div class="card clickable" onclick="location.hash='#/timeline/${a.task_id}'" style="opacity:0.8">
+          <div class="card-header">
+            <span class="card-title">${escapeHtml(a.title || a.task_id || '(無題)')}</span>
+            <span class="badge badge-status badge-${a.decision || a.status || 'completed'}">${a.decision || a.status || 'archived'}</span>
+          </div>
+          <div class="text-sm text-secondary" style="font-family:var(--font-mono)">
+            ${formatTime(a.decided_at)} &middot; Archived ${formatTime(a.archived_at)}
+          </div>
+        </div>
+      `).join('') : '<div class="empty-state">No archived tasks</div>';
+    }
+  });
+
+  // Load archive count
+  fetch('/api/archive').then(r => r.json()).then(archived => {
+    const countEl = document.getElementById('archive-count');
+    if (countEl) countEl.textContent = archived.length;
+  }).catch(() => {});
 }
 
 function renderMiniPipeline(d) {
   const stages = [
     { key: 'discussion', label: 'Discussion', icon: '\u{1F4AC}' },
     { key: 'decision', label: 'Decision', icon: '\u2714' },
-    { key: 'execution', label: 'Execution', icon: '\u26A1' }
+    { key: 'execution', label: 'Execution', icon: '\u26A1' },
+    { key: 'review', label: 'Review', icon: '\u{1F50D}' }
   ];
 
   // Determine which stage is current
@@ -42,7 +90,8 @@ function renderMiniPipeline(d) {
     discussing: 0,
     pending_announcement: 1, announcing: 1, announced: 1,
     executing: 2,
-    completed: 3
+    reviewing: 3, remediating: 3,
+    completed: 4
   };
   const currentIdx = statusMap[d.status] ?? 0;
 
@@ -55,6 +104,7 @@ function renderMiniPipeline(d) {
     const detail = i === 0 ? `R${d.current_round}`
       : i === 1 && d.decision_type ? d.decision_type
       : i === 2 && d.executor ? d.executor
+      : i === 3 && d.status === 'remediating' ? 'remediate'
       : '';
 
     return `<div class="mini-pipeline-stage ${stateClass}">
@@ -80,12 +130,17 @@ export async function renderDiscussionDetail(app, taskId) {
     app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
   }
 
-  const data = await fetch(`/api/discussions/${taskId}`).then(r => r.json());
+  let data = await fetch(`/api/discussions/${taskId}`).then(r => r.json());
 
+  // Fallback to archive if not found in active discussions
+  if (data.error) {
+    data = await fetch(`/api/archive/${taskId}`).then(r => r.json());
+  }
   if (data.error) {
     app.innerHTML = `<div class="empty-state">${data.error}</div>`;
     return;
   }
+  const isArchived = !!data.archived;
 
   const isDiscussing = data.status?.status === 'discussing';
   const currentRound = data.status?.current_round || 0;
@@ -114,6 +169,7 @@ export async function renderDiscussionDetail(app, taskId) {
       <div class="card mb-4">
         <div class="flex items-center gap-8">
           <span class="badge badge-status badge-${effectiveStatus}">${effectiveStatus}</span>
+          ${isArchived ? '<span class="badge" style="background:var(--bg-tertiary);color:var(--text-dim)">archived</span>' : ''}
           <span class="text-sm text-secondary" style="font-family:var(--font-mono)">Round ${currentRound} / ${data.status?.max_rounds || 3}</span>
         </div>
         ${isMobile ? '' : descriptionHtml}
@@ -141,7 +197,7 @@ export async function renderDiscussionDetail(app, taskId) {
         previousAttempts: data.previousAttempts || []
       })}
 
-      <div class="card comment-form-card" style="margin-top:24px;">
+      ${isArchived ? '' : `<div class="card comment-form-card" style="margin-top:24px;">
         <form id="comment-form">
           <textarea class="form-textarea" name="message" placeholder="Add a comment or request to the discussion..." rows="3"></textarea>
           <div class="file-list" id="comment-file-list"></div>
@@ -163,7 +219,7 @@ export async function renderDiscussionDetail(app, taskId) {
             <button type="submit" class="btn btn-primary btn-sm">Send</button>
           </div>
         </form>
-      </div>
+      </div>`}
     </div>
   `;
 
@@ -178,15 +234,18 @@ export async function renderDiscussionDetail(app, taskId) {
   }
 
   // Toggle switch handler
-  document.getElementById('action-toggle').addEventListener('change', (e) => {
-    document.getElementById('toggle-left').classList.toggle('active', !e.target.checked);
-    document.getElementById('toggle-right').classList.toggle('active', e.target.checked);
-  });
+  const actionToggle = document.getElementById('action-toggle');
+  if (actionToggle) {
+    actionToggle.addEventListener('change', (e) => {
+      document.getElementById('toggle-left').classList.toggle('active', !e.target.checked);
+      document.getElementById('toggle-right').classList.toggle('active', e.target.checked);
+    });
+  }
 
   // Comment file input handler
   const commentFileInput = document.getElementById('comment-files');
   const commentFileList = document.getElementById('comment-file-list');
-  commentFileInput.addEventListener('change', () => {
+  if (commentFileInput) commentFileInput.addEventListener('change', () => {
     commentFileList.innerHTML = '';
     for (const f of commentFileInput.files) {
       const item = document.createElement('div');
@@ -197,7 +256,8 @@ export async function renderDiscussionDetail(app, taskId) {
   });
 
   // Comment form handler
-  document.getElementById('comment-form').addEventListener('submit', async (e) => {
+  const commentForm = document.getElementById('comment-form');
+  if (commentForm) commentForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const form = e.target;
     const message = form.message.value.trim();
@@ -235,10 +295,12 @@ export async function renderDiscussionDetail(app, taskId) {
     }
   });
 
-  // Start progress polling if executing
+  // Skip all polling for archived tasks
+  if (!isArchived) {
+  // Start progress polling if executing or remediating
   // But skip if progress already has a result (avoids infinite re-render loop when decision status is stale)
   const execAlreadyDone = data.progress && data.progress.some(e => e.type === 'result');
-  if (isExecuting && !execAlreadyDone) {
+  if ((isExecuting || isRemediating) && !execAlreadyDone) {
     startProgressPolling(taskId, app);
   }
 
@@ -252,10 +314,13 @@ export async function renderDiscussionDetail(app, taskId) {
   // Status polling handles lightweight in-place updates (badge, pipeline)
   // and does full re-render when status, round responses, or comments change
   const isTerminal = !!data.result?.result || effectiveStatus === 'completed';
-  if (!isTerminal && !isExecuting && !isAnnouncing) {
+  const isReviewing = effectiveStatus === 'reviewing';
+  const isRemediating = effectiveStatus === 'remediating';
+  if (!isTerminal && !isExecuting && !isAnnouncing && !isRemediating) {
     const initialFingerprint = buildFingerprint(data, effectiveStatus);
     startStatusPolling(taskId, app, initialFingerprint);
   }
+  } // end if (!isArchived)
 }
 
 // --- Status polling (for intermediate states) ---
@@ -275,7 +340,8 @@ function buildFingerprint(data, status) {
   const hasDecision = data.decision ? 1 : 0;
   const hasAnnouncement = data.decision?.announcement?.summary ? 1 : 0;
   const hasResult = data.result?.result ? 1 : 0;
-  return `${status}_r${currentRound}_n${totalResponses}_c${commentCount}_d${hasDecision}_a${hasAnnouncement}_x${hasResult}`;
+  const hasReview = data.review?.verdict ? 1 : 0;
+  return `${status}_r${currentRound}_n${totalResponses}_c${commentCount}_d${hasDecision}_a${hasAnnouncement}_x${hasResult}_rv${hasReview}`;
 }
 
 function startStatusPolling(taskId, app, lastFingerprint) {
@@ -545,17 +611,18 @@ function renderPipeline(status, result) {
     { key: 'discussing', label: 'Discussion' },
     { key: 'announcement', label: 'Announcement' },
     { key: 'executing', label: 'Executing' },
+    { key: 'review', label: 'Review' },
     { key: 'completed', label: 'Completed' }
   ];
 
   const hasResult = !!result?.result;
 
   function stepState(step) {
-    const order = { discussing: 0, pending_announcement: 1, announcing: 1, announced: 2, executing: 2, completed: 3 };
-    const currentIdx = order[status] ?? (hasResult ? 3 : -1);
+    const order = { discussing: 0, pending_announcement: 1, announcing: 1, announced: 2, executing: 2, reviewing: 3, remediating: 3, completed: 4 };
+    const currentIdx = order[status] ?? (hasResult ? 4 : -1);
     const stepIdx = steps.indexOf(step);
     if (stepIdx < currentIdx) return 'done';
-    if (stepIdx === currentIdx) return hasResult && stepIdx === 3 ? 'done' : 'active';
+    if (stepIdx === currentIdx) return hasResult && stepIdx === 4 ? 'done' : 'active';
     return 'pending';
   }
 

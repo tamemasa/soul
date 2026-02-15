@@ -58,7 +58,7 @@ module.exports = function (sharedDir) {
     }
 
     discussions.sort((a, b) => {
-      const order = { discussing: 0, pending_announcement: 1, announcing: 1, announced: 2, executing: 3, decided: 4, approved: 5, completed: 6 };
+      const order = { discussing: 0, pending_announcement: 1, announcing: 1, announced: 2, executing: 3, reviewing: 4, remediating: 4, decided: 5, approved: 6, completed: 7 };
       const diff = (order[a.status] ?? 9) - (order[b.status] ?? 9);
       if (diff !== 0) return diff;
       return (b.started_at || '').localeCompare(a.started_at || '');
@@ -92,9 +92,10 @@ module.exports = function (sharedDir) {
       rounds.push({ round: roundNum, responses });
     }
 
-    // Include decision and result if available
+    // Include decision, result, and review if available
     const decision = await readJson(path.join(sharedDir, 'decisions', `${taskId}.json`));
     const result = await readJson(path.join(sharedDir, 'decisions', `${taskId}_result.json`));
+    const review = await readJson(path.join(sharedDir, 'decisions', `${taskId}_review.json`));
 
     // Include execution history (previous cycles)
     const history = await readJson(path.join(sharedDir, 'decisions', `${taskId}_history.json`)) || [];
@@ -107,7 +108,7 @@ module.exports = function (sharedDir) {
     let announceProgress = null;
     let previousAttempts = [];
     const effectiveStatus = decision?.status || status?.status;
-    if (effectiveStatus === 'executing' || effectiveStatus === 'completed') {
+    if (effectiveStatus === 'executing' || effectiveStatus === 'completed' || effectiveStatus === 'reviewing' || effectiveStatus === 'remediating') {
       progress = await readProgressFile(path.join(sharedDir, 'decisions', `${taskId}_progress.jsonl`));
     }
     // Load announce progress: while announcing (live) or when announcement data is empty (fallback)
@@ -129,7 +130,7 @@ module.exports = function (sharedDir) {
       }
     }
 
-    res.json({ task_id: taskId, task, status, rounds, decision, result, comments, progress, announceProgress, history, previousAttempts });
+    res.json({ task_id: taskId, task, status, rounds, decision, result, review, comments, progress, announceProgress, history, previousAttempts });
   });
 
   // Progress endpoint for real-time execution monitoring
@@ -305,6 +306,97 @@ module.exports = function (sharedDir) {
     }
 
     res.json(comment);
+  });
+
+  // Archive endpoints
+  const archiveDir = path.join(sharedDir, 'archive');
+  const archiveIndex = path.join(archiveDir, 'index.jsonl');
+
+  router.get('/archive', async (req, res) => {
+    try {
+      const data = await fs.readFile(archiveIndex, 'utf8');
+      const entries = data.trim().split('\n').filter(l => l.trim()).map(l => {
+        try { return JSON.parse(l); } catch { return null; }
+      }).filter(e => e && e.task_id);
+
+      // Enrich entries with missing titles from discussion/task.json
+      for (const entry of entries) {
+        if (!entry.title) {
+          const ap = entry.archive_path || entry.path;
+          if (ap) {
+            const taskJson = await readJson(path.join(archiveDir, ap, 'discussion', 'task.json'));
+            if (taskJson && taskJson.title) {
+              entry.title = taskJson.title;
+            }
+          }
+        }
+      }
+
+      entries.sort((a, b) => (b.archived_at || '').localeCompare(a.archived_at || ''));
+      res.json(entries);
+    } catch {
+      res.json([]);
+    }
+  });
+
+  router.get('/archive/:taskId', async (req, res) => {
+    const { taskId } = req.params;
+    // Find archive path from index
+    let archivePath = null;
+    try {
+      const data = await fs.readFile(archiveIndex, 'utf8');
+      for (const line of data.trim().split('\n')) {
+        try {
+          const entry = JSON.parse(line);
+          if (entry.task_id === taskId) { archivePath = entry.archive_path || entry.path; break; }
+        } catch { /* skip */ }
+      }
+    } catch { /* no index */ }
+
+    if (!archivePath) return res.status(404).json({ error: 'Archived task not found' });
+
+    const taskDir = path.join(archiveDir, archivePath);
+    const discPath = path.join(taskDir, 'discussion');
+
+    const task = await readJson(path.join(discPath, 'task.json'));
+    const status = await readJson(path.join(discPath, 'status.json'));
+    const decision = await readJson(path.join(taskDir, `${taskId}.json`));
+    const result = await readJson(path.join(taskDir, `${taskId}_result.json`));
+
+    // Read rounds
+    const roundDirs = await listDirs(discPath);
+    const rounds = [];
+    for (const rd of roundDirs.filter(d => d.startsWith('round_')).sort()) {
+      const roundNum = parseInt(rd.replace('round_', ''), 10);
+      const files = await listJsonFiles(path.join(discPath, rd));
+      const responses = [];
+      for (const f of files) {
+        const resp = await readJson(path.join(discPath, rd, f));
+        if (resp) responses.push(resp);
+      }
+      responses.sort((a, b) => {
+        const order = { panda: 0, gorilla: 1, triceratops: 2 };
+        return (order[a.node] ?? 9) - (order[b.node] ?? 9);
+      });
+      rounds.push({ round: roundNum, responses });
+    }
+
+    const comments = await readJson(path.join(discPath, 'comments.json')) || [];
+
+    res.json({
+      task_id: taskId,
+      archived: true,
+      task,
+      status,
+      rounds,
+      decision,
+      result,
+      comments,
+      progress: null,
+      announceProgress: null,
+      history: [],
+      previousAttempts: []
+    });
   });
 
   return router;
