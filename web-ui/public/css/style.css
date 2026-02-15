@@ -1569,6 +1569,10 @@ body {
   gap: 2px;
   margin-left: auto;
 }
+.emotion-chart-wrap {
+  margin-left: auto;
+  flex-shrink: 0;
+}
 
 /* ─── Platform Badges ─── */
 .badge-line {
@@ -1705,6 +1709,7 @@ body {
   .openclaw-avatar svg { width: 60px; height: 60px; }
   .avatar-section { flex-direction: column; text-align: center; gap: 10px; }
   .avatar-meta { margin-left: 0; align-items: center; }
+  .emotion-chart-wrap { margin-left: 0; }
   .conv-filter-bar { flex-direction: column; align-items: stretch; }
   .conv-filter-group { justify-content: center; }
   .conv-message { padding: 8px 10px; }

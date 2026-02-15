@@ -6,6 +6,7 @@ import { renderAvatar, getEmotionLabel } from '../components/openclaw-avatar.js'
 let currentFilter = 'all'; // all, policy, security, integrity
 let currentTab = 'conversations'; // 'monitoring' | 'conversations'
 let currentEmotion = 'neutral';
+let emotionChart = null;
 let conversationFilter = { platform: 'all', direction: 'all', search: '' };
 let loadedMessages = [];
 let oldestTimestamp = null;
@@ -46,7 +47,7 @@ export async function renderOpenClaw(app) {
       <span class="badge badge-status badge-${statusBadge(state.status)}">${state.status || 'unknown'}</span>
     </div>
 
-    <!-- Avatar Section -->
+    <!-- Avatar + Emotion Chart Section -->
     <div class="avatar-section">
       ${renderAvatar(currentEmotion)}
       <div class="avatar-status">
@@ -55,6 +56,10 @@ export async function renderOpenClaw(app) {
       </div>
       <div class="avatar-meta">
         <span>Last active: ${lastActiveAgo}</span>
+      </div>
+      <div class="emotion-chart-wrap">
+        <canvas id="emotion-chart" width="160" height="160"></canvas>
+        <div class="text-sm text-dim" style="text-align:center; margin-top:4px;">直近48h感情分布</div>
       </div>
     </div>
 
@@ -76,6 +81,9 @@ export async function renderOpenClaw(app) {
   if (currentTab === 'conversations') {
     await loadConversations();
   }
+
+  // Render emotion distribution chart
+  renderEmotionChart();
 }
 
 function renderMonitoringTab(state, summary, bySeverity, byCategory, pendingCount, pendingActions, filteredAlerts, remediation, researchRequests, integrity) {
@@ -329,6 +337,58 @@ window.__convFilterSearch = function(search) {
 window.__convLoadMore = function() {
   loadConversations(true);
 };
+
+const EMOTION_COLORS = {
+  happy: '#facc15',
+  sad: '#60a5fa',
+  angry: '#ef4444',
+  surprised: '#f97316',
+  thinking: '#a78bfa',
+  concerned: '#fb923c',
+  satisfied: '#34d399',
+  neutral: '#94a3b8'
+};
+
+async function renderEmotionChart() {
+  const canvas = document.getElementById('emotion-chart');
+  if (!canvas) return;
+  try {
+    const data = await fetch('/api/openclaw/emotion-distribution?hours=48').then(r => r.json());
+    if (!data.total || data.total === 0) {
+      canvas.parentElement.querySelector('.text-sm').textContent = '直近48h データなし';
+      return;
+    }
+    const labels = Object.keys(data.counts);
+    const values = Object.values(data.counts);
+    const colors = labels.map(l => EMOTION_COLORS[l] || '#6b7280');
+
+    if (emotionChart) { emotionChart.destroy(); emotionChart = null; }
+    emotionChart = new Chart(canvas.getContext('2d'), {
+      type: 'doughnut',
+      data: {
+        labels: labels.map(l => getEmotionLabel(l) || l),
+        datasets: [{
+          data: values,
+          backgroundColor: colors,
+          borderColor: 'var(--bg-card)',
+          borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => `${ctx.label}: ${ctx.raw}件 (${Math.round(ctx.raw / data.total * 100)}%)`
+            }
+          }
+        },
+        cutout: '55%'
+      }
+    });
+  } catch { /* ignore */ }
+}
 
 // Refresh avatar emotion state (works regardless of active tab)
 async function refreshAvatarEmotion() {

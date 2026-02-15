@@ -377,31 +377,106 @@ module.exports = function (sharedDir) {
     });
   });
 
+  // GET /api/openclaw/emotion-distribution - 直近48時間の感情分布
+  router.get('/openclaw/emotion-distribution', async (req, res) => {
+    const hours = Math.min(parseInt(req.query.hours || '48', 10), 168);
+    const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const convDir = path.join(sharedDir, 'openclaw', 'conversations');
+
+    const counts = {};
+    for (const p of ['line', 'discord']) {
+      const content = await tailFile(path.join(convDir, `${p}.jsonl`), 2000);
+      if (!content) continue;
+      const msgs = content.split('\n')
+        .filter(l => l.trim())
+        .map(l => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(m => m && m.direction === 'outbound' && m.timestamp >= cutoff);
+      for (const m of msgs) {
+        const emotion = m.emotion_hint || 'neutral';
+        counts[emotion] = (counts[emotion] || 0) + 1;
+      }
+    }
+
+    res.json({ hours, counts, total: Object.values(counts).reduce((a, b) => a + b, 0) });
+  });
+
   return router;
 };
 
-// キーワードベースの感情推定
+// キーワードベースの感情推定（最後にマッチしたキーワードの感情を優先）
 function estimateEmotion(content) {
   if (!content) return 'neutral';
-  const text = content.toLowerCase();
+  const lower = content.toLowerCase();
 
   const patterns = [
-    { keywords: ['完了', '成功', 'done', 'ok'], emotion: 'satisfied' },
-    { keywords: ['ありがとう', 'thanks', '嬉しい'], emotion: 'happy' },
-    { keywords: ['調査', '確認中', '検討', '...'], emotion: 'thinking' },
-    { keywords: ['申し訳', 'エラー', '失敗', 'sorry', 'error', 'exception', 'timeout'], emotion: 'concerned' },
-    { keywords: ['マジ', 'えっ', 'びっくり', 'すごい', '驚'], emotion: 'surprised' },
-    { keywords: ['残念', '悲しい', 'つらい', 'ごめん'], emotion: 'sad' },
-    { keywords: ['ふざけ', 'ありえない', '許せ', '怒', 'ダメ'], emotion: 'angry' }
+    { emotion: 'happy', keywords: [
+      '嬉しい', '楽しい', 'ありがとう', 'おめでとう', 'ナイス', 'ええやん',
+      'やった', '最高', '幸せ', '素敵', 'いいね', 'よかった', '良かった',
+      'ハッピー', '面白い', 'ウケる', '感謝', 'サンキュー',
+      '素晴らしい', '見事', '上手い', '完璧', 'わーい', 'よっしゃ',
+      'ラッキー', 'いい感じ', 'good', 'great', 'awesome', 'nice',
+      'cool', 'excellent', 'wonderful', 'happy', 'love', 'thanks', 'thx',
+    ]},
+    { emotion: 'sad', keywords: [
+      '悲しい', '残念', 'つらい', '辛い', '寂しい', '切ない', '申し訳',
+      'ごめん', 'ごめんなさい', 'すまん', 'すみません',
+      '泣き', '涙', '落ち込', 'しょんぼり', 'がっかり', 'ショック',
+      '失望', '惜しい', '虚しい', '空しい', '後悔', '不幸', '無念',
+      'しゃーない', '仕方ない', 'sorry', 'unfortunately', 'disappointed',
+    ]},
+    { emotion: 'angry', keywords: [
+      'ふざけ', 'ありえない', 'ありえへん', '許せ', '怒り', '怒る',
+      'ダメ', 'むかつく', 'イライラ', '腹立', 'うざい', 'いい加減に',
+      '最悪', 'ひどい', '酷い', 'なめんな', '舐めんな', '黙れ',
+      'うるさい', '勘弁', '邪魔', '迷惑', '不満', '文句',
+      '激おこ', 'キレ', 'ブチ切れ', '頭にくる', '腹が立つ',
+      '不快', '気に入らない', 'angry',
+    ]},
+    { emotion: 'surprised', keywords: [
+      'マジ', 'まじ', 'えっ', 'びっくり', 'すごい', '驚', 'まさか',
+      'うそ', '嘘', 'ほんまに', '本当に', '信じられない',
+      'ヤバい', 'やばい', '衝撃', 'まじか', 'おお', 'わお',
+      '想定外', '予想外', '意外', 'たまげた', '仰天',
+      '半端ない', 'とんでもない', 'unexpected', 'amazing', 'wow',
+      'incredible', 'unbelievable', 'omg',
+    ]},
+    { emotion: 'thinking', keywords: [
+      '調べ', '確認', '検討', 'ちょっと待', '調査',
+      '考え中', '思案', '悩んで', '悩む', '迷って', '迷う',
+      'うーん', 'んー', 'どうしよう', '検索', '分析',
+      'リサーチ', '見てみる', 'チェック', '精査', '模索',
+      '考察', '見極め', '比較', '試して',
+    ]},
+    { emotion: 'concerned', keywords: [
+      '心配', '気をつけ', '注意', 'まずい', '問題', 'エラー',
+      '不安', '危険', '危ない', 'リスク', '警告', '障害',
+      '故障', 'バグ', '異常', '不具合', 'おかしい', '気がかり',
+      '懸念', '用心', '慎重', '困った', 'トラブル', '深刻', '重大',
+      '怖い', '恐い',
+      'error', 'exception', 'timeout', 'warning', 'bug', 'trouble',
+      'issue', 'critical', 'failure', 'fault',
+    ]},
+    { emotion: 'satisfied', keywords: [
+      '完了', '成功', 'できた', 'できました',
+      '達成', '終了', '終わった', '終わり', '片付いた', '解決',
+      '対応済', '修正済', '反映済', 'やり遂げ', '仕上がった',
+      'クリア', 'バッチリ', 'ばっちり', '上手くいった', 'うまくいった',
+      '問題なし', '問題ない', '大丈夫',
+      'done', 'ok', 'solved', 'fixed', 'deployed', 'finished',
+      'complete', 'completed', 'passed',
+    ]},
   ];
 
-  const matches = [];
+  let lastPos = -1;
+  let result = 'neutral';
   for (const p of patterns) {
-    if (p.keywords.some(kw => text.includes(kw))) {
-      matches.push(p.emotion);
+    for (const kw of p.keywords) {
+      const pos = lower.lastIndexOf(kw);
+      if (pos > lastPos) {
+        lastPos = pos;
+        result = p.emotion;
+      }
     }
   }
-
-  if (matches.length === 1) return matches[0];
-  return 'neutral';
+  return result;
 }
