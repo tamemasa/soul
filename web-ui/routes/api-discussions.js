@@ -60,7 +60,7 @@ module.exports = function (sharedDir) {
     }
 
     discussions.sort((a, b) => {
-      const order = { discussing: 0, pending_announcement: 1, announcing: 1, announced: 2, executing: 3, reviewing: 4, remediating: 4, decided: 5, approved: 6, completed: 7 };
+      const order = { discussing: 0, pending_announcement: 1, announcing: 1, announced: 2, executing: 3, reviewing: 4, remediating: 4, decided: 5, approved: 6, completed: 7, failed: 8 };
       const diff = (order[a.status] ?? 9) - (order[b.status] ?? 9);
       if (diff !== 0) return diff;
       return (b.started_at || '').localeCompare(a.started_at || '');
@@ -113,7 +113,7 @@ module.exports = function (sharedDir) {
     let announceProgress = null;
     let previousAttempts = [];
     const effectiveStatus = decision?.status || status?.status;
-    if (effectiveStatus === 'executing' || effectiveStatus === 'completed' || effectiveStatus === 'reviewing' || effectiveStatus === 'remediating') {
+    if (effectiveStatus === 'executing' || effectiveStatus === 'completed' || effectiveStatus === 'failed' || effectiveStatus === 'reviewing' || effectiveStatus === 'remediating') {
       progress = await readProgressFile(path.join(sharedDir, 'decisions', `${taskId}_progress.jsonl`));
     }
     // Load announce progress: while announcing (live) or when announcement data is empty (fallback)

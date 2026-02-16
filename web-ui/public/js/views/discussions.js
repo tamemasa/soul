@@ -60,7 +60,7 @@ export async function renderTimelineList(app) {
         <div class="card clickable" onclick="location.hash='#/timeline/${a.task_id}'" style="opacity:0.8">
           <div class="card-header">
             <span class="card-title">${escapeHtml(a.title || a.task_id || '(無題)')}</span>
-            <span class="badge badge-status badge-${a.decision || a.status || 'completed'}">${a.decision || a.status || 'archived'}</span>
+            <span class="badge badge-status badge-${a.status === 'failed' ? 'failed' : (a.decision || a.status || 'completed')}">${a.status === 'failed' ? 'failed' : (a.decision || a.status || 'archived')}</span>
           </div>
           <div class="text-sm text-secondary" style="font-family:var(--font-mono)">
             ${formatTime(a.decided_at)} &middot; Archived ${formatTime(a.archived_at)}
@@ -91,15 +91,16 @@ function renderMiniPipeline(d) {
     pending_announcement: 1, announcing: 1, announced: 1,
     executing: 2,
     reviewing: 3, remediating: 3,
-    completed: 4
+    completed: 4, failed: 4
   };
+  const isTerminal = d.status === 'completed' || d.status === 'failed';
   const currentIdx = statusMap[d.status] ?? 0;
 
   return `<div class="mini-pipeline">${stages.map((stage, i) => {
     let stateClass = 'mini-pipeline-pending';
     if (i < currentIdx) stateClass = 'mini-pipeline-done';
-    else if (i === currentIdx && d.status !== 'completed') stateClass = 'mini-pipeline-active';
-    else if (d.status === 'completed') stateClass = 'mini-pipeline-done';
+    else if (i === currentIdx && !isTerminal) stateClass = 'mini-pipeline-active';
+    else if (isTerminal) stateClass = d.status === 'failed' ? 'mini-pipeline-failed' : 'mini-pipeline-done';
 
     const detail = i === 0 ? `R${d.current_round}`
       : i === 1 && d.decision_type ? d.decision_type
@@ -303,7 +304,7 @@ export async function renderDiscussionDetail(app, taskId) {
 
   // Skip all polling for archived tasks
   if (!isArchived) {
-  const isTerminal = !!data.result?.result || effectiveStatus === 'completed';
+  const isTerminal = !!data.result?.result || effectiveStatus === 'completed' || effectiveStatus === 'failed';
   const isReviewing = effectiveStatus === 'reviewing';
   const isRemediating = effectiveStatus === 'remediating';
 
@@ -626,11 +627,11 @@ function renderPipeline(status, result) {
   const hasResult = !!result?.result;
 
   function stepState(step) {
-    const order = { discussing: 0, pending_announcement: 1, announcing: 1, announced: 2, executing: 2, reviewing: 3, remediating: 3, completed: 4 };
+    const order = { discussing: 0, pending_announcement: 1, announcing: 1, announced: 2, executing: 2, reviewing: 3, remediating: 3, completed: 4, failed: 3 };
     const currentIdx = order[status] ?? (hasResult ? 4 : -1);
     const stepIdx = steps.indexOf(step);
     if (stepIdx < currentIdx) return 'done';
-    if (stepIdx === currentIdx) return hasResult && stepIdx === 4 ? 'done' : 'active';
+    if (stepIdx === currentIdx) { if (status === 'failed') return 'failed'; return hasResult && stepIdx === 4 ? 'done' : 'active'; }
     return 'pending';
   }
 
