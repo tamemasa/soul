@@ -11,7 +11,7 @@ const ALL_NODES = ['panda', 'gorilla', 'triceratops'];
 export function renderTimeline(rounds, options = {}) {
   const {
     comments = [], isDiscussing = false, currentRound = 0, maxRounds = 3,
-    decision = null, result = null, review = null, reviewHistory = [], isExecuting = false, isReviewing = false, progress = null,
+    decision = null, result = null, review = null, reviewHistory = [], isExecuting = false, isReviewing = false, isRemediating = false, progress = null,
     remediationProgress = null,
     history = [], isAnnouncing = false, announceProgress = null,
     taskId = null, previousAttempts = []
@@ -67,7 +67,7 @@ export function renderTimeline(rounds, options = {}) {
     if (entry.result) {
       events.push({
         type: 'history_execution',
-        time: new Date(entry.result.completed_at || entry.decision?.decided_at || 0).getTime(),
+        time: new Date(entry.result.completed_at || entry.result.failed_at || entry.decision?.decided_at || 0).getTime(),
         result: entry.result,
         decision: entry.decision
       });
@@ -82,11 +82,11 @@ export function renderTimeline(rounds, options = {}) {
       // Fallback: reconstruct minimal review from decision metadata
       events.push({
         type: 'history_review',
-        time: new Date(entry.decision.completed_at || entry.decision.executed_at || 0).getTime(),
+        time: new Date(entry.decision.completed_at || entry.decision.failed_at || entry.decision.executed_at || 0).getTime(),
         review: {
           verdict: entry.decision.review_verdict,
           reviewer: 'panda',
-          reviewed_at: entry.decision.completed_at || entry.decision.executed_at
+          reviewed_at: entry.decision.completed_at || entry.decision.failed_at || entry.decision.executed_at
         }
       });
     }
@@ -122,12 +122,20 @@ export function renderTimeline(rounds, options = {}) {
   }
 
   // 8. Current execution result (completed)
+  // When remediation has occurred, use decision.executed_at (first execution time) and
+  // show the pre-remediation progress backup (remediationProgress) as the execution details.
+  // The current progress file contains remediation output, not the original execution.
+  const hasRemediation = (decision?.remediation_count > 0) || decision?.remediated;
   if (result?.result) {
+    const execTime = hasRemediation && decision?.executed_at
+      ? new Date(decision.executed_at).getTime()
+      : new Date(result.completed_at || result.failed_at || 0).getTime();
+    const execProgress = hasRemediation ? remediationProgress : progress;
     events.push({
       type: 'execution_result',
-      time: new Date(result.completed_at || 0).getTime(),
+      time: execTime,
       result,
-      progress,
+      progress: execProgress,
       decision,
       previousAttempts
     });
@@ -143,8 +151,9 @@ export function renderTimeline(rounds, options = {}) {
         reviewNum: i + 1
       });
       // Remediation after each failed review
-      if (decision?.remediation_count || decision?.remediated) {
-        const remProg = (i === reviewHistory.length - 1) ? remediationProgress : null;
+      if (hasRemediation) {
+        // The current progress file contains the latest remediation output
+        const remProg = (i === reviewHistory.length - 1) ? progress : null;
         events.push({
           type: 'remediation',
           time: new Date(reviewHistory[i].reviewed_at || 0).getTime() + 1,
@@ -305,6 +314,24 @@ export function renderTimeline(rounds, options = {}) {
     </div>`;
   }
 
+  // Live remediation progress
+  if (isRemediating) {
+    const remCount = decision?.remediation_count || 1;
+    html += `
+    <div class="timeline-item timeline-remediation-item">
+      <div class="timeline-round">Remediation #${remCount}</div>
+      <div class="execution-progress" id="execution-progress">
+        <div class="execution-progress-header">
+          <span class="execution-progress-title">Remediation Progress #${remCount}</span>
+          ${nodeBadge(decision?.executor || 'triceratops')}
+        </div>
+        <div class="progress-events" id="progress-events">
+          <div class="progress-streaming"><span class="progress-streaming-dot"></span> Waiting for output...</div>
+        </div>
+      </div>
+    </div>`;
+  }
+
   // Live review in progress
   if (isReviewing && !review?.verdict) {
     const reviewNum = (reviewHistory?.length > 0) ? (reviewHistory.length + 1) : 0;
@@ -428,7 +455,7 @@ function renderExecutionItem(result, isExecuting, progress, decision) {
     <div class="execution-result-box" style="border-left:none;margin-top:0;">
       <div class="flex items-center gap-8 mb-4">
         ${nodeBadge(result.executor || 'panda')}
-        <span class="text-dim text-sm" style="font-family:var(--font-mono)">${formatTime(result.completed_at)}</span>
+        <span class="text-dim text-sm" style="font-family:var(--font-mono)">${formatTime(result.completed_at || result.failed_at)}</span>
       </div>
       <div class="result-content">${renderMarkdown(result.result)}</div>
     </div>`;

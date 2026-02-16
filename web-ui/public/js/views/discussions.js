@@ -195,6 +195,7 @@ export async function renderDiscussionDetail(app, taskId) {
         reviewHistory: data.reviewHistory || [],
         isExecuting,
         isReviewing,
+        isRemediating: effectiveStatus === 'remediating',
         progress: data.progress,
         remediationProgress: data.remediationProgress,
         history: data.history || [],

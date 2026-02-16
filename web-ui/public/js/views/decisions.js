@@ -47,7 +47,7 @@ export async function renderDecisionDetail(app, taskId) {
       <div class="text-sm text-secondary" style="font-family:var(--font-mono)">
         <div>Round: ${data.final_round || '?'}</div>
         <div>Decided: ${formatTime(data.decided_at)}</div>
-        ${data.completed_at ? `<div>Completed: ${formatTime(data.completed_at)}</div>` : ''}
+        ${data.completed_at ? `<div>Completed: ${formatTime(data.completed_at)}</div>` : data.failed_at ? `<div>Failed: ${formatTime(data.failed_at)}</div>` : ''}
       </div>
       <div class="mt-4">
         <a href="#/discussions/${taskId}" style="color: var(--accent-primary); font-size: 13px;">View full discussion</a>

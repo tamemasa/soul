@@ -841,7 +841,7 @@ summaryとviolationsとremediation_instructionsは日本語で記述すること
     if [[ ${remediation_count} -ge ${max_remediation} ]]; then
       log "Review FAILED for task ${task_id}, but max remediation count (${max_remediation}) reached, marking as failed"
       tmp=$(mktemp)
-      jq '.status = "failed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .review_verdict = "fail" | .remediation_exhausted = true' \
+      jq '.status = "failed" | .failed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .review_verdict = "fail" | .remediation_exhausted = true' \
         "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
       _archive_task "${task_id}"
     else

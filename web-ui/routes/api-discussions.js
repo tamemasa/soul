@@ -53,7 +53,7 @@ module.exports = function (sharedDir) {
         decided_at: decision?.decided_at || status?.decided_at || '',
         decision_type: decision?.decision || null,
         executor: decision?.executor || null,
-        completed_at: decision?.completed_at || result?.completed_at || null,
+        completed_at: decision?.completed_at || decision?.failed_at || result?.completed_at || null,
         has_result: !!result?.result,
         review_verdict: review?.verdict || decision?.review_verdict || null
       });

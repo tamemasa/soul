@@ -86,7 +86,7 @@ module.exports = function (sharedDir) {
         status: 'announced',
         final_round: 0,
         final_approach: `User requested direct execution.\n\nTask: ${description || title}`,
-        executor: 'panda',
+        executor: 'triceratops',
         decided_at: utcTimestamp()
       });
     }
