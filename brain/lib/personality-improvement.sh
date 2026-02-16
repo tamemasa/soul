@@ -1420,14 +1420,14 @@ _pi_send_line_message() {
   if [[ -f "${pending_file}" ]]; then
     jq --argjson new_msg "${new_msg}" --arg ts "${now_ts}" \
       '.pending_messages += [$new_msg] | .updated_at = $ts' \
-      "${pending_file}" > "${tmp}" && mv "${tmp}" "${pending_file}"
+      "${pending_file}" > "${tmp}" && chmod 666 "${tmp}" && mv "${tmp}" "${pending_file}"
   else
     jq -n \
       --arg target_id "${destination}" \
       --argjson new_msg "${new_msg}" \
       --arg ts "${now_ts}" \
       '{target_id: $target_id, pending_messages: [$new_msg], updated_at: $ts}' \
-      > "${tmp}" && mv "${tmp}" "${pending_file}"
+      > "${tmp}" && chmod 666 "${tmp}" && mv "${tmp}" "${pending_file}"
   fi
 
   log "Personality improvement: LINE pending message written for ${destination} (${msg_id})"

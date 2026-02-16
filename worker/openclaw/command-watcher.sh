@@ -163,14 +163,14 @@ process_personality_questions() {
   if [[ -f "${line_pending}" ]]; then
     jq --argjson new_msg "${new_msg}" --arg ts "${now_ts}" \
       '.pending_messages += [$new_msg] | .updated_at = $ts' \
-      "${line_pending}" > "${tmp}" && mv "${tmp}" "${line_pending}"
+      "${line_pending}" > "${tmp}" && chmod 666 "${tmp}" && mv "${tmp}" "${line_pending}"
   else
     jq -n \
       --arg target_id "${owner_line_id}" \
       --argjson new_msg "${new_msg}" \
       --arg ts "${now_ts}" \
       '{target_id: $target_id, pending_messages: [$new_msg], updated_at: $ts}' \
-      > "${tmp}" && mv "${tmp}" "${line_pending}"
+      > "${tmp}" && chmod 666 "${tmp}" && mv "${tmp}" "${line_pending}"
   fi
 
   log "Personality questions written to pending file for ${owner_line_id} (${msg_id})"

@@ -133,9 +133,80 @@ NODEOF
   fi
 }
 
+# --- Patch 3: Inject pending messages into LINE replies ---
+# When replying to a LINE message, check /bot_commands/line_pending_{userId}.json
+# and prepend any pending messages to the reply text automatically.
+# Uses existsSync/readFileSync/writeFileSync already imported in the ESM loader.
+patch_pending_injection() {
+  local file
+  file=$(find "$OPENCLAW_DIST" -name 'loader-*.js' -print -quit 2>/dev/null || true)
+  if [[ -z "$file" || ! -f "$file" ]]; then
+    log "WARNING: loader file not found, skipping pending injection patch"
+    return 1
+  fi
+
+  if grep -q 'LINE-PENDING' "$file" 2>/dev/null; then
+    log "Loader already patched (LINE pending injection)"
+    return 0
+  fi
+
+  cat > /tmp/patch-pending.js << 'NODEOF'
+const fs = require("fs");
+const distDir = "/usr/local/lib/node_modules/openclaw/dist";
+const loaderFiles = fs.readdirSync(distDir).filter(function(f) { return f.startsWith("loader-") && f.endsWith(".js"); });
+if (loaderFiles.length === 0) { console.log("ERROR: no loader file found"); process.exit(1); }
+const fpath = distDir + "/" + loaderFiles[0];
+let code = fs.readFileSync(fpath, "utf8");
+
+const marker = "let replyTokenUsed = params.replyTokenUsed;";
+if (!code.includes(marker)) {
+  console.log("ERROR: marker not found in " + loaderFiles[0]);
+  process.exit(1);
+}
+
+// Injection uses existsSync/readFileSync/writeFileSync from the ESM import already in scope
+// (imported as: import fs, { existsSync, ..., readFileSync, ..., writeFileSync } from "node:fs")
+// `to` has format "line:userId" or "line:group:groupId" — strip prefix to match pending file names
+var injection = [
+  "",
+  "\ttry {",
+  "\t\tvar _toId = to.replace(/^line:group:/, '').replace(/^line:room:/, '').replace(/^line:/, '');",
+  "\t\tvar _pp = '/bot_commands/line_pending_' + _toId + '.json';",
+  "\t\tconsole.log('[LINE-PENDING] checking ' + _pp);",
+  "\t\tif (existsSync(_pp)) {",
+  "\t\t\tvar _pd = JSON.parse(readFileSync(_pp, 'utf8'));",
+  "\t\t\tif (_pd.pending_messages && _pd.pending_messages.length > 0) {",
+  "\t\t\t\tvar _pt = _pd.pending_messages.map(function(m){ return m.text; }).join('\\n\\n---\\n\\n');",
+  "\t\t\t\tpayload.text = _pt + (payload.text ? '\\n\\n---\\n\\n' + payload.text : '');",
+  "\t\t\t\t_pd.pending_messages = [];",
+  "\t\t\t\t_pd.updated_at = new Date().toISOString().replace(/\\.\\d{3}Z$/, 'Z');",
+  "\t\t\t\twriteFileSync(_pp, JSON.stringify(_pd, null, 2));",
+  "\t\t\t\tconsole.log('[LINE-PENDING] Injected ' + _pt.length + ' chars of pending messages for ' + _toId);",
+  "\t\t\t}",
+  "\t\t}",
+  "\t} catch(_e) { console.log('[LINE-PENDING] Error: ' + _e.message); }",
+].join("\n");
+
+code = code.replace(marker, marker + injection);
+fs.writeFileSync(fpath, code);
+console.log("Pending injection patch applied to " + loaderFiles[0]);
+NODEOF
+
+  node /tmp/patch-pending.js 2>&1
+  rm -f /tmp/patch-pending.js
+
+  if grep -q 'LINE-PENDING' "$file" 2>/dev/null; then
+    log "Loader patched: pending messages injected into LINE replies"
+  else
+    log "WARNING: pending injection patch may have failed"
+    return 1
+  fi
+}
+
 # --- Apply patches ---
 # Each patch runs independently — failure of one must not block the other.
 log "Applying LINE channel restrictions..."
 patch_coding_tools || log "WARNING: patch_coding_tools failed (continuing)"
 patch_push_api_all || log "WARNING: patch_push_api_all failed (continuing)"
+patch_pending_injection || log "WARNING: patch_pending_injection failed (continuing)"
 log "LINE channel restrictions applied."

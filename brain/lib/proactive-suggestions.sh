@@ -1257,7 +1257,7 @@ _deliver_line() {
     # Append to existing pending_messages array
     jq --argjson new_msg "${new_msg}" --arg ts "${now_ts}" \
       '.pending_messages += [$new_msg] | .updated_at = $ts' \
-      "${pending_file}" > "${tmp}" && mv "${tmp}" "${pending_file}"
+      "${pending_file}" > "${tmp}" && chmod 666 "${tmp}" && mv "${tmp}" "${pending_file}"
   else
     # Create new pending file
     jq -n \
@@ -1265,7 +1265,7 @@ _deliver_line() {
       --argjson new_msg "${new_msg}" \
       --arg ts "${now_ts}" \
       '{target_id: $target_id, pending_messages: [$new_msg], updated_at: $ts}' \
-      > "${tmp}" && mv "${tmp}" "${pending_file}"
+      > "${tmp}" && chmod 666 "${tmp}" && mv "${tmp}" "${pending_file}"
   fi
 
   log "Proactive engine: LINE pending message written for ${target_id} (${msg_id})"
