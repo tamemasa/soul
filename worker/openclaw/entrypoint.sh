@@ -20,6 +20,11 @@ if [[ "$(id -u)" == "0" ]]; then
   fi
 fi
 
+# Apply LINE channel restrictions (block web_search on LINE, block Push API)
+if [[ -f /app/patch-line-restrictions.sh ]]; then
+  /app/patch-line-restrictions.sh
+fi
+
 # Clean up stale lock files
 rm -rf /tmp/openclaw-* 2>/dev/null || true
 

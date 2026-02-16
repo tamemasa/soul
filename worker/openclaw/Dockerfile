@@ -27,7 +27,8 @@ COPY write-approval.sh /app/write-approval.sh
 COPY command-watcher.sh /app/command-watcher.sh
 COPY research-request.sh /app/research-request.sh
 COPY check-research-result.sh /app/check-research-result.sh
-RUN chmod +x /app/entrypoint.sh /app/network-restrict.sh /app/suggest.sh /app/write-approval.sh /app/command-watcher.sh /app/research-request.sh /app/check-research-result.sh
+COPY patch-line-restrictions.sh /app/patch-line-restrictions.sh
+RUN chmod +x /app/entrypoint.sh /app/network-restrict.sh /app/suggest.sh /app/write-approval.sh /app/command-watcher.sh /app/research-request.sh /app/check-research-result.sh /app/patch-line-restrictions.sh
 
 # Install jq for JSON handling in suggest.sh
 RUN apt-get update && apt-get install -y --no-install-recommends jq \
