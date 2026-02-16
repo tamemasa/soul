@@ -617,13 +617,12 @@ check_openclaw_research_requests() {
   done
 }
 
-# Send LINE notification when a research task completes
+# Write LINE notification to pending file when a research task completes
 _notify_research_result_line() {
   local task_id="$1"
   local request_file="$2"
   local result_summary="$3"
 
-  local line_token="${LINE_CHANNEL_ACCESS_TOKEN:-}"
   local owner_line_id="${OWNER_LINE_ID:-Ua78c97ab5f7b6090fc17656bc12f5c99}"
 
   # Use reply_to from request file if available (group ID or user ID)
@@ -641,11 +640,6 @@ _notify_research_result_line() {
   fi
   # Use reply_to if available, otherwise fall back to owner DM
   local destination="${reply_to:-${owner_line_id}}"
-
-  if [[ -z "${line_token}" ]]; then
-    log "WARN: LINE_CHANNEL_ACCESS_TOKEN not set, skipping research result notification"
-    return 0
-  fi
 
   # Get task title from request file or discussion
   local title
@@ -687,39 +681,38 @@ ${summary}
     message="${message:0:4897}..."
   fi
 
-  local payload
-  payload=$(jq -n \
-    --arg to "${destination}" \
+  # Write to pending file instead of Push API
+  local pending_file="${SHARED_DIR}/bot_commands/line_pending_${destination}.json"
+  local now_ts
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local msg_id="msg_$(date +%s)_${RANDOM}"
+
+  local new_msg
+  new_msg=$(jq -n \
+    --arg id "${msg_id}" \
     --arg text "${message}" \
-    '{
-      to: $to,
-      messages: [{
-        type: "text",
-        text: $text
-      }]
-    }')
+    --arg source "research_result" \
+    --arg created_at "${now_ts}" \
+    '{id: $id, text: $text, source: $source, created_at: $created_at}')
 
-  local http_code response_body
-  response_body=$(mktemp)
-  http_code=$(curl -s -o "${response_body}" -w "%{http_code}" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${line_token}" \
-    -d "${payload}" \
-    "https://api.line.me/v2/bot/message/push" 2>/dev/null) || {
-    log "ERROR: LINE Push API request failed for research notification"
-    rm -f "${response_body}"
-    return 1
-  }
+  local tmp
+  tmp=$(mktemp)
 
-  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
-    log "Research result notification sent via LINE (HTTP ${http_code}, dest=${destination}) for task ${task_id}"
-    rm -f "${response_body}"
-    return 0
+  if [[ -f "${pending_file}" ]]; then
+    jq --argjson new_msg "${new_msg}" --arg ts "${now_ts}" \
+      '.pending_messages += [$new_msg] | .updated_at = $ts' \
+      "${pending_file}" > "${tmp}" && mv "${tmp}" "${pending_file}"
   else
-    log "ERROR: LINE Push API returned HTTP ${http_code} for research notification: $(cat "${response_body}")"
-    rm -f "${response_body}"
-    return 1
+    jq -n \
+      --arg target_id "${destination}" \
+      --argjson new_msg "${new_msg}" \
+      --arg ts "${now_ts}" \
+      '{target_id: $target_id, pending_messages: [$new_msg], updated_at: $ts}' \
+      > "${tmp}" && mv "${tmp}" "${pending_file}"
   fi
+
+  log "Research result notification written to pending file for ${destination} (${msg_id}) for task ${task_id}"
+  return 0
 }
 
 check_evaluation_requests() {
