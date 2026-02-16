@@ -734,14 +734,22 @@ review_execution() {
   # Read final_approach and result
   local approach
   approach=$(jq -r '.final_approach // ""' "${decision_file}")
+  # Fallback: if approach is empty, use task description
+  if [[ -z "${approach}" || "${approach}" =~ ^[[:space:]]*$ ]]; then
+    local task_json="${discussion_dir}/task.json"
+    if [[ -f "${task_json}" ]]; then
+      approach=$(jq -r '(.title // "") + "\n" + (.description // "")' "${task_json}")
+    fi
+    log "Review: approach was empty, using task description as fallback for ${task_id}"
+  fi
   local result_file="${SHARED_DIR}/decisions/${task_id}_result.json"
   local result=""
   if [[ -f "${result_file}" ]]; then
     result=$(jq -r '.result // ""' "${result_file}")
   fi
 
-  if [[ -z "${approach}" || -z "${result}" ]]; then
-    log "WARN: Missing approach or result for review of ${task_id}, auto-passing"
+  if [[ -z "${result}" ]]; then
+    log "WARN: Missing result for review of ${task_id}, auto-passing"
     local review_file="${SHARED_DIR}/decisions/${task_id}_review.json"
     local now_ts
     now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
