@@ -225,14 +225,32 @@ recover_interrupted_tasks() {
     task_id=$(echo "${data}" | cut -f2)
     executor=$(echo "${data}" | cut -f3)
 
-    # このノードが担当で "executing" 状態のタスクのみ対象
-    [[ "${status}" == "executing" ]] || continue
-    [[ "${executor}" == "${NODE_NAME}" || -z "${executor}" ]] || continue
+    # Default executor to triceratops when unset
+    local effective_executor="${executor:-triceratops}"
 
-    local execution_started_at start_epoch current_epoch age_seconds
-    execution_started_at=$(jq -r '.execution_started_at // ""' "${decision_file}" 2>/dev/null)
-    if [[ -n "${execution_started_at}" ]]; then
-      start_epoch=$(date -d "${execution_started_at}" +%s 2>/dev/null || echo 0)
+    # Recover executing, remediating, and reviewing tasks
+    local started_at_field=""
+    case "${status}" in
+      executing)
+        [[ "${effective_executor}" == "${NODE_NAME}" ]] || continue
+        started_at_field="execution_started_at"
+        ;;
+      remediating)
+        [[ "${effective_executor}" == "${NODE_NAME}" ]] || continue
+        started_at_field="remediation_started_at"
+        ;;
+      reviewing)
+        # Reviewing: panda primary, triceratops fallback
+        [[ "${NODE_NAME}" == "panda" || "${NODE_NAME}" == "triceratops" ]] || continue
+        started_at_field="executed_at"
+        ;;
+      *) continue ;;
+    esac
+
+    local started_at start_epoch current_epoch age_seconds
+    started_at=$(jq -r ".${started_at_field} // \"\"" "${decision_file}" 2>/dev/null)
+    if [[ -n "${started_at}" ]]; then
+      start_epoch=$(date -d "${started_at}" +%s 2>/dev/null || echo 0)
       current_epoch=$(date +%s)
       age_seconds=$((current_epoch - start_epoch))
     else
@@ -241,15 +259,26 @@ recover_interrupted_tasks() {
 
     if [[ ${age_seconds} -gt 7200 ]]; then
       # 2時間超 → 失敗としてマーク
-      log "RECOVERY: Task ${task_id} timed out (${age_seconds}s >2h), marking as failed"
+      log "RECOVERY: Task ${task_id} (${status}) timed out (${age_seconds}s >2h), marking as failed"
       local tmp
       tmp=$(mktemp)
-      jq '.status = "failed" | .failed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .failure_reason = "execution interrupted by container restart, exceeded 2h timeout"' \
+      jq '.status = "failed" | .failed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .failure_reason = "'"${status}"' interrupted, exceeded 2h timeout"' \
         "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
-    else
-      # 即座に再実行（execute_decisionがretry_count管理・continuation contextを処理）
-      log "RECOVERY: Task ${task_id} was interrupted (${age_seconds}s elapsed), retrying now"
+    elif [[ "${status}" == "executing" ]]; then
+      log "RECOVERY: Task ${task_id} execution was interrupted (${age_seconds}s elapsed), retrying now"
       execute_decision "${decision_file}"
+      recovered=$((recovered + 1))
+    elif [[ "${status}" == "remediating" ]]; then
+      log "RECOVERY: Task ${task_id} remediation was interrupted (${age_seconds}s elapsed), retrying now"
+      # Clear stale remediation_started_at so remediate_execution can re-enter
+      local tmp
+      tmp=$(mktemp)
+      jq 'del(.remediation_started_at)' "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
+      remediate_execution "${decision_file}"
+      recovered=$((recovered + 1))
+    elif [[ "${status}" == "reviewing" ]]; then
+      log "RECOVERY: Task ${task_id} review was interrupted (${age_seconds}s elapsed), retrying now"
+      review_execution "${decision_file}"
       recovered=$((recovered + 1))
     fi
   done

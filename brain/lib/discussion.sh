@@ -824,15 +824,15 @@ summaryとviolationsとremediation_instructionsは日本語で記述すること
     local max_remediation=2
 
     if [[ ${remediation_count} -ge ${max_remediation} ]]; then
-      log "Review FAILED for task ${task_id}, but max remediation count (${max_remediation}) reached, completing"
+      log "Review FAILED for task ${task_id}, but max remediation count (${max_remediation}) reached, marking as failed"
       tmp=$(mktemp)
-      jq '.status = "completed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .review_verdict = "fail" | .remediation_exhausted = true' \
+      jq '.status = "failed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'" | .review_verdict = "fail" | .remediation_exhausted = true' \
         "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
       _archive_task "${task_id}"
     else
       log "Review FAILED for task ${task_id}, transitioning to remediating (attempt $((remediation_count + 1))/${max_remediation})"
       tmp=$(mktemp)
-      jq '.status = "remediating" | .review_verdict = "fail" | .remediation_count = '"$((remediation_count + 1))"' | .remediation_started_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+      jq '.status = "remediating" | .review_verdict = "fail" | .remediation_count = '"$((remediation_count + 1))"' | del(.remediation_started_at)' \
         "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
     fi
   fi
@@ -846,21 +846,28 @@ remediate_execution() {
   task_id=$(jq -r '.task_id' "${decision_file}")
   local discussion_dir="${SHARED_DIR}/discussions/${task_id}"
 
-  # Executor-only guard (usually triceratops)
+  # Executor-only guard (default to triceratops when unset)
   local executor
   executor=$(jq -r '.executor // ""' "${decision_file}")
-  if [[ -n "${executor}" && "${executor}" != "${NODE_NAME}" ]]; then
+  local effective_executor="${executor:-triceratops}"
+  if [[ "${effective_executor}" != "${NODE_NAME}" ]]; then
     return
   fi
 
-  # Prevent duplicate execution: if already remediating with timestamp, skip
+  # Prevent duplicate execution: if already remediating with recent timestamp, skip
+  # Allow re-entry if remediation is stale (>10 minutes = likely crashed)
   local current_status
   current_status=$(jq -r '.status' "${decision_file}")
   if [[ "${current_status}" == "remediating" ]]; then
     local remediation_started_at
     remediation_started_at=$(jq -r '.remediation_started_at // ""' "${decision_file}")
     if [[ -n "${remediation_started_at}" ]]; then
-      return
+      local rem_epoch=$(date -d "${remediation_started_at}" +%s 2>/dev/null || echo 0)
+      local rem_age=$(( $(date +%s) - rem_epoch ))
+      if [[ ${rem_age} -lt 600 ]]; then
+        return  # Still actively remediating (< 10 minutes)
+      fi
+      log "Stale remediation detected for ${task_id} (${rem_age}s), retrying"
     fi
   fi
 

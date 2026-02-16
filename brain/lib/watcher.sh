@@ -83,6 +83,17 @@ check_discussions_unified() {
         log "All nodes responded in round ${current_round} for ${task_id}, checking consensus"
         evaluate_consensus "${task_id}" "${current_round}"
       fi
+    elif [[ ${response_count} -ge 2 && "${NODE_NAME}" == "triceratops" ]]; then
+      # Majority fallback: if 2/3 nodes responded and round has been waiting > 10 minutes, proceed
+      local oldest_response_epoch
+      oldest_response_epoch=$(stat -c %Y "${round_dir}"/*.json 2>/dev/null | sort -n | head -1)
+      if [[ -n "${oldest_response_epoch}" ]]; then
+        local wait_seconds=$(( $(date +%s) - oldest_response_epoch ))
+        if [[ ${wait_seconds} -gt 600 ]]; then
+          log "Majority consensus: ${response_count}/${#ALL_NODES[@]} responded after ${wait_seconds}s for ${task_id}, proceeding with majority"
+          evaluate_consensus "${task_id}" "${current_round}"
+        fi
+      fi
     fi
   done
 }
@@ -134,13 +145,29 @@ check_decisions_unified() {
     fi
 
     # --- Execution handling ---
+    # Default executor to triceratops when unset (prevents other nodes from picking up unassigned tasks)
+    local effective_executor="${executor:-triceratops}"
     if [[ "${decision_status}" == "announced" ]]; then
-      if [[ -z "${executor}" || "${executor}" == "${NODE_NAME}" ]]; then
+      if [[ "${effective_executor}" == "${NODE_NAME}" ]]; then
         log "Executing decision for task: ${task_id}"
         execute_decision "${decision_file}"
+      elif [[ "${NODE_NAME}" == "triceratops" ]]; then
+        # Fallback: if designated executor hasn't started within 10 minutes, triceratops takes over
+        local decided_at_ts announced_at_ts ref_ts
+        announced_at_ts="${announced_at}"
+        decided_at_ts=$(jq -r '.decided_at // ""' "${decision_file}" 2>/dev/null)
+        ref_ts="${announced_at_ts:-${decided_at_ts}}"
+        if [[ -n "${ref_ts}" ]]; then
+          local ref_epoch=$(date -d "${ref_ts}" +%s 2>/dev/null || echo 0)
+          local wait_sec=$(( $(date +%s) - ref_epoch ))
+          if [[ ${wait_sec} -gt 600 ]]; then
+            log "Execution fallback: executor ${executor} unresponsive for ${wait_sec}s, ${NODE_NAME} taking over task ${task_id}"
+            execute_decision "${decision_file}"
+          fi
+        fi
       fi
     elif [[ "${decision_status}" == "executing" ]]; then
-      if [[ -z "${executor}" || "${executor}" == "${NODE_NAME}" ]]; then
+      if [[ "${effective_executor}" == "${NODE_NAME}" ]]; then
 
         # Check if result file already exists (task completed but status not updated)
         local result_file="${decisions_dir}/${task_id}_result.json"
@@ -179,14 +206,26 @@ check_decisions_unified() {
         execute_decision "${decision_file}"
       fi
 
-    # --- Review handling (panda only) ---
-    elif [[ "${decision_status}" == "reviewing" && "${NODE_NAME}" == "panda" ]]; then
-      log "Reviewing execution for task: ${task_id}"
-      review_execution "${decision_file}"
+    # --- Review handling (panda primary, triceratops fallback after 30min) ---
+    elif [[ "${decision_status}" == "reviewing" ]]; then
+      if [[ "${NODE_NAME}" == "panda" ]]; then
+        log "Reviewing execution for task: ${task_id}"
+        review_execution "${decision_file}"
+      elif [[ "${NODE_NAME}" == "triceratops" ]]; then
+        local executed_at_ts
+        executed_at_ts=$(jq -r '.executed_at // ""' "${decision_file}" 2>/dev/null)
+        if [[ -n "${executed_at_ts}" ]]; then
+          local exec_epoch=$(date -d "${executed_at_ts}" +%s 2>/dev/null || echo 0)
+          if [[ $(( $(date +%s) - exec_epoch )) -gt 1800 ]]; then
+            log "Review fallback: panda unresponsive for 30min+, triceratops reviewing task ${task_id}"
+            review_execution "${decision_file}"
+          fi
+        fi
+      fi
 
     # --- Remediation handling (executor only) ---
     elif [[ "${decision_status}" == "remediating" ]]; then
-      if [[ -z "${executor}" || "${executor}" == "${NODE_NAME}" ]]; then
+      if [[ "${effective_executor}" == "${NODE_NAME}" ]]; then
         log "Remediating task: ${task_id}"
         remediate_execution "${decision_file}"
       fi
