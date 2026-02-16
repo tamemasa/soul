@@ -742,9 +742,16 @@ review_execution() {
 
   if [[ -z "${approach}" || -z "${result}" ]]; then
     log "WARN: Missing approach or result for review of ${task_id}, auto-passing"
+    local review_file="${SHARED_DIR}/decisions/${task_id}_review.json"
+    local now_ts
+    now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     local tmp
     tmp=$(mktemp)
-    jq '.status = "completed" | .completed_at = "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"' \
+    jq -n --arg reviewer "${NODE_NAME}" --arg reviewed_at "${now_ts}" \
+      '{verdict: "pass", summary: "approachまたはresultが空のため自動パス", violations: [], remediation_instructions: "", reviewer: $reviewer, reviewed_at: $reviewed_at}' \
+      > "${tmp}" && mv "${tmp}" "${review_file}"
+    tmp=$(mktemp)
+    jq '.status = "completed" | .completed_at = "'"${now_ts}"'" | .review_verdict = "pass"' \
       "${decision_file}" > "${tmp}" && mv "${tmp}" "${decision_file}"
     _archive_task "${task_id}"
     set_activity "idle"
