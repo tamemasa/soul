@@ -1227,55 +1227,49 @@ _deliver_discord_bot() {
   fi
 }
 
-# Send message via LINE Push API
+# Write pending LINE message to file (picked up by OpenClaw on next user message)
 _deliver_line() {
   local target_id="$1"
   local message_text="$2"
-
-  local line_token="${LINE_CHANNEL_ACCESS_TOKEN:-}"
-  if [[ -z "${line_token}" ]]; then
-    log "WARN: Proactive engine: LINE_CHANNEL_ACCESS_TOKEN not set, skipping LINE delivery"
-    return 1
-  fi
 
   # LINE message limit is 5000 chars
   if [[ ${#message_text} -gt 5000 ]]; then
     message_text="${message_text:0:4997}..."
   fi
 
-  local payload
-  payload=$(jq -n \
-    --arg to "${target_id}" \
+  local pending_file="/shared/bot_commands/line_pending_${target_id}.json"
+  local now_ts
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local msg_id="msg_$(date +%s)_${RANDOM}"
+
+  local new_msg
+  new_msg=$(jq -n \
+    --arg id "${msg_id}" \
     --arg text "${message_text}" \
-    '{
-      to: $to,
-      messages: [{
-        type: "text",
-        text: $text
-      }]
-    }')
+    --arg source "proactive_news" \
+    --arg created_at "${now_ts}" \
+    '{id: $id, text: $text, source: $source, created_at: $created_at}')
 
-  local http_code response_body
-  response_body=$(mktemp)
-  http_code=$(curl -s -o "${response_body}" -w "%{http_code}" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${line_token}" \
-    -d "${payload}" \
-    "https://api.line.me/v2/bot/message/push" 2>/dev/null) || {
-    log "ERROR: Proactive engine: LINE Push API request failed"
-    rm -f "${response_body}"
-    return 1
-  }
+  local tmp
+  tmp=$(mktemp)
 
-  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
-    log "Proactive engine: LINE message sent to ${target_id} (HTTP ${http_code})"
-    rm -f "${response_body}"
-    return 0
+  if [[ -f "${pending_file}" ]]; then
+    # Append to existing pending_messages array
+    jq --argjson new_msg "${new_msg}" --arg ts "${now_ts}" \
+      '.pending_messages += [$new_msg] | .updated_at = $ts' \
+      "${pending_file}" > "${tmp}" && mv "${tmp}" "${pending_file}"
   else
-    log "ERROR: Proactive engine: LINE Push API returned HTTP ${http_code}: $(cat "${response_body}")"
-    rm -f "${response_body}"
-    return 1
+    # Create new pending file
+    jq -n \
+      --arg target_id "${target_id}" \
+      --argjson new_msg "${new_msg}" \
+      --arg ts "${now_ts}" \
+      '{target_id: $target_id, pending_messages: [$new_msg], updated_at: $ts}' \
+      > "${tmp}" && mv "${tmp}" "${pending_file}"
   fi
+
+  log "Proactive engine: LINE pending message written for ${target_id} (${msg_id})"
+  return 0
 }
 
 # Submit suggestion as Soul System task (for 'suggestion' category)

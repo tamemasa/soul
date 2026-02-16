@@ -12,7 +12,7 @@ export async function renderDashboard(app) {
     app.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
   }
 
-  const [status, discussions, monitorStatus, broadcastStatus, personalityData, metrics, tokenUsage, latestEval] = await Promise.all([
+  const [status, discussions, monitorStatus, broadcastStatus, personalityData, metrics, tokenUsage, latestEval, lineUsage] = await Promise.all([
     fetch('/api/status').then(r => r.json()),
     fetch('/api/discussions').then(r => r.json()),
     fetch('/api/openclaw/status').then(r => r.json()).catch(() => ({ state: { status: 'unknown', check_count: 0 }, summary: {} })),
@@ -20,7 +20,8 @@ export async function renderDashboard(app) {
     fetch('/api/personality/history').then(r => r.json()).catch(() => ({ trigger: null, cycles: [] })),
     fetch('/api/metrics').then(r => r.json()).catch(() => []),
     fetch('/api/token-usage').then(r => r.json()).catch(() => ({ today: { total_input: 0, total_output: 0, total_cost: 0, by_node: {} }, daily: [], budget: null })),
-    fetch('/api/evaluations/latest').then(r => r.json()).catch(() => null)
+    fetch('/api/evaluations/latest').then(r => r.json()).catch(() => null),
+    fetch('/api/line-usage').then(r => r.json()).catch(() => ({ quota: 200, used: null, remaining: null, pct: null, error: 'FETCH_ERROR' }))
   ]);
 
   const monitorState = monitorStatus.state || { status: 'unknown', check_count: 0 };
@@ -96,6 +97,8 @@ export async function renderDashboard(app) {
     ${renderEvaluationCard(latestEval)}
 
     ${renderBroadcastSection(broadcastStatus)}
+
+    ${renderLinePushUsage(lineUsage)}
 
     ${renderTokenUsageSection(tokenUsage)}
 
@@ -202,6 +205,43 @@ function renderEvaluationCard(ev) {
 function truncateSummary(str, max) {
   if (!str || str.length <= max) return str || '';
   return str.substring(0, max) + '...';
+}
+
+function renderLinePushUsage(lu) {
+  if (!lu || lu.used == null) {
+    return `
+      <div class="card" style="margin-bottom:16px;">
+        <div class="card-header">
+          <span class="card-title">LINE Push API</span>
+          <span class="badge badge-status badge-discussing">--</span>
+        </div>
+        <div class="text-sm text-dim">${lu && lu.error === 'TOKEN_NOT_SET' ? 'Token not configured' : 'Unable to fetch usage'}</div>
+      </div>`;
+  }
+
+  const pct = Math.min(lu.pct || 0, 100);
+  const barColor = pct > 85 ? 'var(--error)' : pct > 60 ? 'var(--warning)' : 'var(--success)';
+  const statusBadge = pct > 85 ? 'rejected' : pct > 60 ? 'discussing' : 'approved';
+
+  return `
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-header">
+        <span class="card-title">LINE Push API</span>
+        <span class="badge badge-status badge-${statusBadge}">${lu.remaining} remaining</span>
+      </div>
+      <div style="margin-top:12px;">
+        <div class="text-sm" style="display:flex; justify-content:space-between; margin-bottom:4px;">
+          <span class="text-dim">Monthly Usage</span>
+          <span style="font-family:var(--font-mono)">${lu.used} / ${lu.quota}</span>
+        </div>
+        <div style="height:6px; background:var(--bg-elevated); border-radius:3px; overflow:hidden;">
+          <div style="height:100%; width:${pct.toFixed(1)}%; background:${barColor}; border-radius:3px; transition:width 0.3s ease;"></div>
+        </div>
+        <div class="text-sm text-dim" style="margin-top:4px; text-align:right;">
+          ${lu.remaining} remaining (${pct.toFixed(1)}% used)
+        </div>
+      </div>
+    </div>`;
 }
 
 function renderBroadcastSection(bs) {

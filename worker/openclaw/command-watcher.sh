@@ -18,7 +18,7 @@ process_command() {
   local basename
   basename=$(basename "${cmd_file}")
   case "${basename}" in
-    personality_manual_trigger*.json|personality_rollback_trigger*.json|personality_answer*.json|personality_external_trigger*.json|personality_external_answer*.json|personality_freeform_trigger*.json|personality_external_freeform_trigger*.json)
+    personality_manual_trigger*.json|personality_rollback_trigger*.json|personality_answer*.json|personality_external_trigger*.json|personality_external_answer*.json|personality_freeform_trigger*.json|personality_external_freeform_trigger*.json|line_pending_*.json)
       return 0
       ;;
   esac
@@ -104,13 +104,7 @@ process_command() {
 process_personality_questions() {
   local cmd_file="$1"
 
-  local line_token="${LINE_CHANNEL_ACCESS_TOKEN:-}"
   local owner_line_id="${OWNER_LINE_ID:-Ua78c97ab5f7b6090fc17656bc12f5c99}"
-
-  if [[ -z "${line_token}" ]]; then
-    log "ERROR: LINE_CHANNEL_ACCESS_TOKEN not set, cannot send personality questions"
-    return 1
-  fi
 
   # Extract questions from command
   local questions
@@ -149,61 +143,56 @@ process_personality_questions() {
 ※全問じゃなくても答えられる分だけでOK
 ※48時間以内に回答してください"
 
-  # Send via LINE Push API
-  local payload
-  payload=$(jq -n \
-    --arg to "${owner_line_id}" \
+  # Write to pending file instead of Push API
+  local line_pending="/bot_commands/line_pending_${owner_line_id}.json"
+  local now_ts
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local msg_id="msg_$(date +%s)_${RANDOM}"
+
+  local new_msg
+  new_msg=$(jq -n \
+    --arg id "${msg_id}" \
     --arg text "${message}" \
-    '{
-      to: $to,
-      messages: [{
-        type: "text",
-        text: $text
-      }]
-    }')
+    --arg source "personality_questions" \
+    --arg created_at "${now_ts}" \
+    '{id: $id, text: $text, source: $source, created_at: $created_at}')
 
-  local http_code response_body
-  response_body=$(mktemp)
-  http_code=$(curl -s -o "${response_body}" -w "%{http_code}" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${line_token}" \
-    -d "${payload}" \
-    "https://api.line.me/v2/bot/message/push" 2>/dev/null) || {
-    log "ERROR: LINE Push API request failed"
-    rm -f "${response_body}"
-    return 1
-  }
+  local tmp
+  tmp=$(mktemp)
 
-  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
-    log "Personality questions sent to Masaru via LINE (HTTP ${http_code})"
-    rm -f "${response_body}"
-
-    # Write a marker file so Brain knows questions were sent
-    # Include the timestamp for answer matching
-    local ts
-    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    local marker_tmp
-    marker_tmp=$(mktemp)
-    jq -n \
-      --arg ts "${ts}" \
-      --arg pending_file "${pending_file}" \
-      --argjson questions "${questions}" \
-      --arg question_count "${i}" \
-      '{
-        status: "questions_sent",
-        sent_at: $ts,
-        pending_file: $pending_file,
-        questions: $questions,
-        question_count: ($question_count | tonumber),
-        answers_collected: 0
-      }' > "${marker_tmp}" && mv "${marker_tmp}" "${COMMANDS_DIR}/personality_q_status.json"
-
-    return 0
+  if [[ -f "${line_pending}" ]]; then
+    jq --argjson new_msg "${new_msg}" --arg ts "${now_ts}" \
+      '.pending_messages += [$new_msg] | .updated_at = $ts' \
+      "${line_pending}" > "${tmp}" && mv "${tmp}" "${line_pending}"
   else
-    log "ERROR: LINE Push API returned HTTP ${http_code}: $(cat "${response_body}")"
-    rm -f "${response_body}"
-    return 1
+    jq -n \
+      --arg target_id "${owner_line_id}" \
+      --argjson new_msg "${new_msg}" \
+      --arg ts "${now_ts}" \
+      '{target_id: $target_id, pending_messages: [$new_msg], updated_at: $ts}' \
+      > "${tmp}" && mv "${tmp}" "${line_pending}"
   fi
+
+  log "Personality questions written to pending file for ${owner_line_id} (${msg_id})"
+
+  # Write a marker file so Brain knows questions are pending delivery
+  local marker_tmp
+  marker_tmp=$(mktemp)
+  jq -n \
+    --arg ts "${now_ts}" \
+    --arg pending_file "${pending_file}" \
+    --argjson questions "${questions}" \
+    --arg question_count "${i}" \
+    '{
+      status: "questions_pending_delivery",
+      sent_at: $ts,
+      pending_file: $pending_file,
+      questions: $questions,
+      question_count: ($question_count | tonumber),
+      answers_collected: 0
+    }' > "${marker_tmp}" && mv "${marker_tmp}" "${COMMANDS_DIR}/personality_q_status.json"
+
+  return 0
 }
 
 main() {
@@ -216,8 +205,8 @@ main() {
       process_command "${cmd_file}"
     done
 
-    # Clean up old processed commands (older than 1 hour, except status files)
-    find "${COMMANDS_DIR}" -name "*.json" ! -name "*_status.json" -mmin +60 -exec rm -f {} \; 2>/dev/null || true
+    # Clean up old processed commands (older than 1 hour, except status and pending files)
+    find "${COMMANDS_DIR}" -name "*.json" ! -name "*_status.json" ! -name "line_pending_*.json" -mmin +60 -exec rm -f {} \; 2>/dev/null || true
 
     sleep "${POLL_INTERVAL}"
   done

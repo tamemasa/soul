@@ -23,6 +23,7 @@ app.use('/api', require('./routes/api-logs')(SHARED_DIR));
 app.use('/api', require('./routes/api-openclaw')(SHARED_DIR));
 app.use('/api', require('./routes/api-broadcast')(SHARED_DIR));
 app.use('/api', require('./routes/api-metrics')(SHARED_DIR));
+app.use('/api', require('./routes/api-line-usage')());
 app.use('/api', require('./routes/sse')(SHARED_DIR, watcher));
 
 // SPA fallback

@@ -1397,33 +1397,40 @@ _pi_git_commit_and_push() {
 
 _pi_send_line_message() {
   local message="$1"
-  local line_token="${LINE_CHANNEL_ACCESS_TOKEN:-}"
-
-  if [[ -z "${line_token}" ]]; then
-    log "WARN: Personality improvement: LINE_CHANNEL_ACCESS_TOKEN not set"
-    return 1
-  fi
 
   # Determine destination: use reply_to from trigger, fallback to owner DM
   local destination="${PI_REPLY_TO:-${PI_OWNER_LINE_ID}}"
 
-  local payload
-  payload=$(jq -n \
-    --arg to "${destination}" \
-    --arg text "${message}" \
-    '{
-      to: $to,
-      messages: [{
-        type: "text",
-        text: $text
-      }]
-    }')
+  local pending_file="/shared/bot_commands/line_pending_${destination}.json"
+  local now_ts
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local msg_id="msg_$(date +%s)_${RANDOM}"
 
-  curl -s \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${line_token}" \
-    -d "${payload}" \
-    "https://api.line.me/v2/bot/message/push" >/dev/null 2>&1
+  local new_msg
+  new_msg=$(jq -n \
+    --arg id "${msg_id}" \
+    --arg text "${message}" \
+    --arg source "personality_improvement" \
+    --arg created_at "${now_ts}" \
+    '{id: $id, text: $text, source: $source, created_at: $created_at}')
+
+  local tmp
+  tmp=$(mktemp)
+
+  if [[ -f "${pending_file}" ]]; then
+    jq --argjson new_msg "${new_msg}" --arg ts "${now_ts}" \
+      '.pending_messages += [$new_msg] | .updated_at = $ts' \
+      "${pending_file}" > "${tmp}" && mv "${tmp}" "${pending_file}"
+  else
+    jq -n \
+      --arg target_id "${destination}" \
+      --argjson new_msg "${new_msg}" \
+      --arg ts "${now_ts}" \
+      '{target_id: $target_id, pending_messages: [$new_msg], updated_at: $ts}' \
+      > "${tmp}" && mv "${tmp}" "${pending_file}"
+  fi
+
+  log "Personality improvement: LINE pending message written for ${destination} (${msg_id})"
 }
 
 # ============================================================

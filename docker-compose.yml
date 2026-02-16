@@ -107,6 +107,7 @@ services:
     environment:
       - SHARED_DIR=/shared
       - PORT=3000
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
     volumes:
       - shared:/shared
     ports:
