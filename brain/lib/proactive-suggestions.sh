@@ -759,6 +759,7 @@ _discover_trending_content() {
 ${search_results}
 
 ## 選定基準
+- **ageフィールドが12時間以内の記事のみ選定すること**（「X hours ago」でXが12以下、または「X minutes ago」のもの。「1 day ago」等は除外）
 - カテゴリは記事の内容から自由に判定すること。特定のジャンル（テクノロジー・ゲーム等）に偏らないこと
 - 新鮮で話題性のあるもの
 - X（旧Twitter）で話題のトピックも含めること
