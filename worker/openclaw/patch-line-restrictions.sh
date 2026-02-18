@@ -270,11 +270,77 @@ NODEOF
   fi
 }
 
+# --- Patch 5: Enforce pause on Discord replies ---
+# Mirrors Patch 4 for Discord: when /tmp/openclaw-pause.json is active,
+# replace the text parameter of sendMessageDiscord with a maintenance message.
+patch_discord_pause_enforcement() {
+  local file
+  file=$(find "$OPENCLAW_DIST" -name 'loader-*.js' -print -quit 2>/dev/null || true)
+  if [[ -z "$file" || ! -f "$file" ]]; then
+    log "WARNING: loader file not found, skipping Discord pause enforcement patch"
+    return 1
+  fi
+
+  if grep -q 'DISCORD-PAUSE' "$file" 2>/dev/null; then
+    log "Loader already patched (Discord pause enforcement)"
+    return 0
+  fi
+
+  cat > /tmp/patch-discord-pause.js << 'NODEOF'
+const fs = require("fs");
+const distDir = "/usr/local/lib/node_modules/openclaw/dist";
+const loaderFiles = fs.readdirSync(distDir).filter(function(f) { return f.startsWith("loader-") && f.endsWith(".js"); });
+if (loaderFiles.length === 0) { console.log("ERROR: no loader file found"); process.exit(1); }
+const fpath = distDir + "/" + loaderFiles[0];
+let code = fs.readFileSync(fpath, "utf8");
+
+const marker = "async function sendMessageDiscord(to, text, opts = {}) {";
+if (!code.includes(marker)) {
+  console.log("ERROR: sendMessageDiscord marker not found");
+  process.exit(1);
+}
+
+// Guard inserted at the top of sendMessageDiscord — replaces text if pause is active
+var guard = [
+  "",
+  "\ttry {",
+  "\t\tvar _dpf = '/tmp/openclaw-pause.json';",
+  "\t\tif (require('fs').existsSync(_dpf)) {",
+  "\t\t\tvar _dpd = JSON.parse(require('fs').readFileSync(_dpf, 'utf8'));",
+  "\t\t\tvar _dpu = _dpd.paused_until ? new Date(_dpd.paused_until) : null;",
+  "\t\t\tif (_dpu && _dpu > new Date()) {",
+  "\t\t\t\tconsole.log('[DISCORD-PAUSE] Pause active until ' + _dpd.paused_until + ', replacing reply');",
+  "\t\t\t\ttext = 'ちょっと今メンテ中。すぐ戻るわ。';",
+  "\t\t\t} else if (_dpu && _dpu <= new Date()) {",
+  "\t\t\t\tconsole.log('[DISCORD-PAUSE] Pause expired, removing stale file');",
+  "\t\t\t\ttry { require('fs').unlinkSync(_dpf); } catch(_due) {}",
+  "\t\t\t}",
+  "\t\t}",
+  "\t} catch(_dpe) { console.log('[DISCORD-PAUSE] Error: ' + _dpe.message); }",
+].join("\n");
+
+code = code.replace(marker, marker + guard);
+fs.writeFileSync(fpath, code);
+console.log("Discord pause enforcement patch applied to " + loaderFiles[0]);
+NODEOF
+
+  node /tmp/patch-discord-pause.js 2>&1
+  rm -f /tmp/patch-discord-pause.js
+
+  if grep -q 'DISCORD-PAUSE' "$file" 2>/dev/null; then
+    log "Loader patched: pause enforcement active for Discord replies"
+  else
+    log "WARNING: Discord pause enforcement patch may have failed"
+    return 1
+  fi
+}
+
 # --- Apply patches ---
 # Each patch runs independently — failure of one must not block the other.
-log "Applying LINE channel restrictions..."
+log "Applying channel restrictions..."
 patch_coding_tools || log "WARNING: patch_coding_tools failed (continuing)"
 patch_push_api_all || log "WARNING: patch_push_api_all failed (continuing)"
 patch_pending_injection || log "WARNING: patch_pending_injection failed (continuing)"
 patch_pause_enforcement || log "WARNING: patch_pause_enforcement failed (continuing)"
-log "LINE channel restrictions applied."
+patch_discord_pause_enforcement || log "WARNING: patch_discord_pause_enforcement failed (continuing)"
+log "Channel restrictions applied."
