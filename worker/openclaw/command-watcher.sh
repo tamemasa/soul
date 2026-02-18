@@ -162,6 +162,38 @@ check_intervention_expiry() {
     fi
   fi
 
+  # Check evolution file expiry (cleanup stale entries)
+  if [[ -f /tmp/openclaw-evolution.json ]]; then
+    local evo_updated=false
+    local evo_keys
+    evo_keys=$(jq -r 'keys[]' /tmp/openclaw-evolution.json 2>/dev/null || true)
+    for evo_key in ${evo_keys}; do
+      local evo_expires
+      evo_expires=$(jq -r --arg k "${evo_key}" '.[$k].expires_at // ""' /tmp/openclaw-evolution.json 2>/dev/null)
+      if [[ -n "${evo_expires}" ]]; then
+        local evo_epoch now_epoch
+        evo_epoch=$(date -u -d "${evo_expires}" +%s 2>/dev/null || echo 0)
+        now_epoch=$(date -u +%s)
+        if [[ ${now_epoch} -ge ${evo_epoch} ]]; then
+          log "Evolution expired for session ${evo_key}, removing entry"
+          local evo_tmp
+          evo_tmp=$(mktemp)
+          jq --arg k "${evo_key}" 'del(.[$k])' /tmp/openclaw-evolution.json > "${evo_tmp}" && mv "${evo_tmp}" /tmp/openclaw-evolution.json
+          evo_updated=true
+        fi
+      fi
+    done
+    if [[ "${evo_updated}" == "true" ]]; then
+      # Remove file if empty
+      local evo_count
+      evo_count=$(jq 'keys | length' /tmp/openclaw-evolution.json 2>/dev/null || echo 0)
+      if [[ "${evo_count}" -eq 0 ]]; then
+        rm -f /tmp/openclaw-evolution.json
+        log "Evolution file removed (no active sessions)"
+      fi
+    fi
+  fi
+
   # Check intervention TTL (non-pause interventions auto-expire after INTERVENTION_TTL_MINUTES)
   if [[ -f "${INTERVENTION_META}" ]]; then
     local itype created_at expires_at

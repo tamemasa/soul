@@ -335,6 +335,119 @@ NODEOF
   fi
 }
 
+# --- Patch 6: Evolution Trigger (Opus upgrade on owner command) ---
+# When the owner says "Masaru-kun進化！", inject /model directive to switch to Opus
+# for 30 minutes. Auto-reverts on next message after expiry.
+# Patched in resolveReplyDirectives(): const→let for commandText,
+# then inject evolution check before parseInlineDirectives().
+patch_evolution_trigger() {
+  local file
+  file=$(find "$OPENCLAW_DIST" -name 'loader-*.js' -print -quit 2>/dev/null || true)
+  if [[ -z "$file" || ! -f "$file" ]]; then
+    log "WARNING: loader file not found, skipping evolution trigger patch"
+    return 1
+  fi
+
+  if grep -q 'EVOLUTION-TRIGGER' "$file" 2>/dev/null; then
+    log "Loader already patched (evolution trigger)"
+    return 0
+  fi
+
+  cat > /tmp/patch-evolution.js << 'NODEOF'
+const fs = require("fs");
+const distDir = "/usr/local/lib/node_modules/openclaw/dist";
+const loaderFiles = fs.readdirSync(distDir).filter(function(f) { return f.startsWith("loader-") && f.endsWith(".js"); });
+if (loaderFiles.length === 0) { console.log("ERROR: no loader file found"); process.exit(1); }
+const fpath = distDir + "/" + loaderFiles[0];
+let code = fs.readFileSync(fpath, "utf8");
+
+// Step 1: Inject evolution state check before parseInlineDirectives
+// This handles: detection, state file read/write, expiry cleanup
+const parseMarker = "let parsedDirectives = parseInlineDirectives(commandText,";
+if (!code.includes(parseMarker)) {
+  console.log("ERROR: parseInlineDirectives marker not found");
+  process.exit(1);
+}
+
+var stateInjection = [
+  "",
+  "\t// [EVOLUTION-TRIGGER] State management (detect trigger, manage timer)",
+  "\tvar _evoActive = false;",
+  "\ttry {",
+  "\t\tvar _evoFile = '/tmp/openclaw-evolution.json';",
+  "\t\tvar _evoData = {};",
+  "\t\tif (existsSync(_evoFile)) {",
+  "\t\t\t_evoData = JSON.parse(readFileSync(_evoFile, 'utf8'));",
+  "\t\t}",
+  "\t\tvar _evoSid = ctx.SenderId || command.senderId || '';",
+  "\t\tvar _evoOwnerLine = process.env.OWNER_LINE_ID || '';",
+  "\t\tvar _evoOwnerDiscord = process.env.OWNER_DISCORD_ID || '';",
+  "\t\tvar _evoIsOwner = (_evoSid && (_evoSid === _evoOwnerLine || _evoSid === _evoOwnerDiscord));",
+  "\t\tvar _evoKey = (command.from || sessionKey || '') + ':evo';",
+  "\t\tif (_evoData[_evoKey] && new Date(_evoData[_evoKey].expires_at) <= new Date()) {",
+  "\t\t\tdelete _evoData[_evoKey];",
+  "\t\t\tif (Object.keys(_evoData).length === 0) {",
+  "\t\t\t\tunlinkSync(_evoFile);",
+  "\t\t\t} else {",
+  "\t\t\t\twriteFileSync(_evoFile, JSON.stringify(_evoData, null, 2));",
+  "\t\t\t}",
+  "\t\t\tconsole.log('[EVOLUTION-TRIGGER] Session ' + _evoKey + ' expired, reverted to default');",
+  "\t\t}",
+  "\t\telse if (_evoIsOwner && commandText.includes('Masaru-kun\\u9032\\u5316\\uff01')) {",
+  "\t\t\t_evoData[_evoKey] = {",
+  "\t\t\t\tactivated_at: _evoData[_evoKey] ? _evoData[_evoKey].activated_at : new Date().toISOString(),",
+  "\t\t\t\texpires_at: new Date(Date.now() + 30*60*1000).toISOString()",
+  "\t\t\t};",
+  "\t\t\twriteFileSync(_evoFile, JSON.stringify(_evoData, null, 2));",
+  "\t\t\t_evoActive = true;",
+  "\t\t\tconsole.log('[EVOLUTION-TRIGGER] Opus triggered for session ' + _evoKey + ' (owner: ' + _evoSid + ')');",
+  "\t\t}",
+  "\t\telse if (_evoData[_evoKey] && new Date(_evoData[_evoKey].expires_at) > new Date()) {",
+  "\t\t\t_evoActive = true;",
+  "\t\t}",
+  "\t} catch(_evoErr) { console.log('[EVOLUTION-TRIGGER] Error: ' + _evoErr.message); }",
+].join("\n");
+
+code = code.replace(parseMarker, stateInjection + "\n\t" + parseMarker);
+console.log("Step 1: Evolution state management injected");
+
+// Step 2: Inject model override after "model = modelState.model;"
+// Directly sets provider/model when evolution is active (bypasses commandAuthorized check)
+const modelMarker = "\tmodel = modelState.model;\n\tlet contextTokens = resolveContextTokens({";
+if (!code.includes(modelMarker)) {
+  console.log("ERROR: model assignment marker not found");
+  process.exit(1);
+}
+
+var modelInjection = [
+  "\tmodel = modelState.model;",
+  "\t// [EVOLUTION-TRIGGER] Direct model override (bypasses directive auth)",
+  "\tif (_evoActive) {",
+  "\t\tprovider = 'anthropic';",
+  "\t\tmodel = 'claude-opus-4-6';",
+  "\t\tconsole.log('[EVOLUTION-TRIGGER] Model overridden to anthropic/claude-opus-4-6');",
+  "\t}",
+  "\tlet contextTokens = resolveContextTokens({",
+].join("\n");
+
+code = code.replace(modelMarker, modelInjection);
+console.log("Step 2: Direct model override injected");
+
+fs.writeFileSync(fpath, code);
+console.log("Evolution trigger patch applied to " + loaderFiles[0]);
+NODEOF
+
+  node /tmp/patch-evolution.js 2>&1
+  rm -f /tmp/patch-evolution.js
+
+  if grep -q 'EVOLUTION-TRIGGER' "$file" 2>/dev/null; then
+    log "Loader patched: evolution trigger active (Opus upgrade on owner command)"
+  else
+    log "WARNING: evolution trigger patch may have failed"
+    return 1
+  fi
+}
+
 # --- Apply patches ---
 # Each patch runs independently — failure of one must not block the other.
 log "Applying channel restrictions..."
@@ -343,4 +456,5 @@ patch_push_api_all || log "WARNING: patch_push_api_all failed (continuing)"
 patch_pending_injection || log "WARNING: patch_pending_injection failed (continuing)"
 patch_pause_enforcement || log "WARNING: patch_pause_enforcement failed (continuing)"
 patch_discord_pause_enforcement || log "WARNING: patch_discord_pause_enforcement failed (continuing)"
+patch_evolution_trigger || log "WARNING: patch_evolution_trigger failed (continuing)"
 log "Channel restrictions applied."
