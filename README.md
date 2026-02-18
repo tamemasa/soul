@@ -144,8 +144,64 @@ graph TB
 | **Suggestion Tool** | `suggest.sh` | botからSoul Systemへの提言を送信（1時間に1回制限） |
 | **Write Approval** | `write-approval.sh` | オーナーによる提言の承認/却下を記録 |
 | **Network Restrictor** | `network-restrict.sh` | コンテナ内iptablesでLAN・プライベートネットワークへのアクセスを遮断 |
+| **LINE Restrictions Patch** | `patch-line-restrictions.sh` | 起動時にdistファイルをパッチし、Push APIブロック・保留メッセージ自動注入・ツール制限を適用 |
 | **OpenClaw Gateway** | `openclaw-gateway/proxy.js` | LINE Webhook前段プロキシ（バッファ/リプレイ）+ 公開ステータスページ配信 |
 | **Personality Files** | `personality/` | Masaru-kunの人格・話し方・行動ルールを定義（SOUL.md, IDENTITY.md, AGENTS.md） |
+
+### LINE保留メッセージ方式
+
+LINE Messaging APIのPush API（無料枠200通/月）の消費を抑えるため、BrainノードおよびOpenClawからのLINEメッセージ送信を**保留ファイル方式**に変更している。
+
+#### 仕組み
+
+```
+1. Brain/OpenClawがLINEにメッセージを送りたい場合
+   → Push APIを直接呼ばず、保留ファイルに書き込み
+   → /shared/bot_commands/line_pending_{LINE user ID}.json
+
+2. ユーザーがLINEでメッセージを送信（Webhook受信）
+   → OpenClawが返信を生成する際、保留ファイルの内容を把握
+   → ランタイムパッチが自動的に保留メッセージを返信テキストにプリペンド
+   → Reply API（無料・無制限）で配信
+
+3. 配信完了後、保留ファイルから配信済みメッセージを削除
+```
+
+#### 保留ファイルフォーマット
+
+```json
+{
+  "target_id": "Uxxxxxxxxx",
+  "pending_messages": [
+    {
+      "id": "msg_1739000000_12345",
+      "text": "配信テキスト",
+      "source": "proactive-suggestions",
+      "created_at": "2026-02-16T12:00:00Z"
+    }
+  ],
+  "updated_at": "2026-02-16T12:00:00Z"
+}
+```
+
+#### ランタイムパッチ（`patch-line-restrictions.sh`）
+
+OpenClawコンテナ起動時に `dist/` ファイルに3つのパッチを適用:
+
+| パッチ | 内容 |
+|--------|------|
+| **ツール制限** | メインLINEセッションから `web_search`/`web_fetch` を除外（サブエージェントは保持） |
+| **Push APIブロック** | 全6種のPush API関数 + `sendMessageLine` pushパスをブロック |
+| **保留メッセージ注入** | Reply API応答時に保留ファイルを読み取り、テキストを自動プリペンド |
+
+#### 対象コンポーネント
+
+| コンポーネント | 保留ファイル書き込み箇所 |
+|---------------|----------------------|
+| **proactive-suggestions.sh** | `_deliver_line()` - 情報配信 |
+| **personality-improvement.sh** | `_pi_send_line_message()` - パーソナリティ改善質問 |
+| **command-watcher.sh** | パーソナリティ質問送信 |
+| **watcher.sh** | 調査完了通知 |
 
 ### 監視の仕組み（Panda統合監視）
 
@@ -396,18 +452,36 @@ Triceratopsが運用する自発的情報配信機能（`proactive-suggestions.s
 
 3. 配信実行
    → OpenClawを通じて各チャット（Discord/LINE）へ送信
+   → LINE配信は保留ファイル方式（→「LINE保留メッセージ方式」参照）
    → 配信記録を /shared/workspace/proactive-suggestions/broadcasts/ に保存
 
-4. レート制御
+4. 配信メモリ記録
+   → OpenClawのworkspace/memory/にMarkdownファイルとして記録
+   → ユーザーが「さっきのニュース」等と言及した際にOpenClawが参照可能
+   → 7日経過で自動クリーンアップ
+
+5. レート制御
    → 日次カウンターを更新
    → Per-targetクールダウン（デフォルト30分）を適用
 ```
+
+**ニュース選定ルール:**
+- 配信時点から**12時間以内**に公開された記事のみを選定対象とする（古いニュースの配信を防止）
 
 #### Web UI API
 
 - **POST `/api/broadcast/trigger`**: トレンドニュース配信を手動発火（30分クールダウン）
 - **GET `/api/broadcast/status`**: エンジン状態・配信カウントの確認
 - **GET `/api/broadcast/history`**: 直近20件の配信履歴
+- **GET `/api/line-usage`**: LINE Push API月間使用量（LINE APIから取得、5分キャッシュ）
+
+#### LINE Push API使用量ダッシュボード
+
+ダッシュボードにLINE Push APIの月間使用量ゲージを表示。LINE Messaging APIの `message/quota` と `message/quota/consumption` エンドポイントから使用量を取得し、無料枠（200通/月）に対する消費率をプログレスバーで可視化する。
+
+- 使用率60%以下: 緑、60-85%: 黄、85%超: 赤
+- 5分間キャッシュで API呼び出しを抑制
+- `LINE_CHANNEL_ACCESS_TOKEN` 環境変数が必要
 
 #### 配信データの管理
 
@@ -669,6 +743,7 @@ soul/
 │       ├── check-research-result.sh # 調査依頼の状態・結果確認
 │       ├── write-approval.sh   # オーナー承認/却下記録
 │       ├── network-restrict.sh # コンテナ内ネットワーク制限
+│       ├── patch-line-restrictions.sh # LINE Push APIブロック・保留メッセージ注入パッチ
 │       └── personality/        # Masaru-kun人格定義
 │           ├── SOUL.md         # 人格・話し方・セキュリティルール
 │           ├── IDENTITY.md     # アイデンティティ情報
@@ -686,6 +761,7 @@ soul/
 │   │   ├── api-logs.js         # ログ
 │   │   ├── api-openclaw.js     # OpenClaw管理
 │   │   ├── api-broadcast.js    # ブロードキャスト配信
+│   │   ├── api-line-usage.js   # LINE Push API使用量
 │   │   ├── api-metrics.js      # ホストメトリクス
 │   │   └── sse.js              # Server-Sent Events
 │   ├── lib/                    # ファイル読み書き・監視ヘルパー
@@ -823,7 +899,7 @@ docker compose up -d --build  # 全コンテナ再ビルド・再起動
 
 ブラウザから `http://<host-ip>:3000` でアクセスできるWeb UIを搭載。
 
-- **ダッシュボード**: ノード状態・統計サマリ・サブスクリプション残量ゲージ・最近の議論・ホストメトリクス（CPU/メモリ/ディスク/温度グラフ）
+- **ダッシュボード**: ノード状態・統計サマリ・サブスクリプション残量ゲージ・LINE Push API使用量ゲージ・最近の議論・ホストメトリクス（CPU/メモリ/ディスク/温度グラフ）
 - **タスク投入**: フォームからタスクや質問を投入
 - **議論ビューア**: ラウンドごとの投票・意見をタイムライン形式で表示。ユーザーコメントもタイムラインにインラインで表示され、各Brainが未回答のラウンドでは「検討中…」インジケーターを表示
 - **決定一覧**: 合意結果と実行結果の閲覧。パイプラインステッパー（Discussion → Announcement → Executing → Completed）で進捗を可視化。トリケラトプスによるAnnouncement（決定発表・要約）とExecution Result（実行結果）を分離表示
@@ -878,6 +954,19 @@ discussing → decided → pending_announcement → announced → executing → 
 
 - **pending_announcement**: 合意成立後、トリケラトプスの発表待ち
 - **announced**: トリケラトプスが決定を発表済み、トリケラトプスの実行待ち
+
+#### ノード障害時のフォールバック
+
+1ノードが停止・クラッシュしてもタスクがスタックしないよう、タイムアウトベースのフォールバック機構を備える:
+
+| フェーズ | タイムアウト | フォールバック動作 |
+|---------|------------|------------------|
+| **合意形成** | 10分 | 2/3多数決を許可（1ノード不参加でもブロックしない） |
+| **レビュー** | 30分 | Panda不在時はTriceratopsがフォールバックレビュー |
+| **実行** | 10分 | Executor不在時はTriceratopsが引き継ぎ |
+| **Remediation** | 10分 | スタル検知でリトライ許可（クラッシュ後復旧） |
+
+起動時リカバリ: `remediating` / `reviewing` 状態のタスクも自動復旧対象。
 
 ### データフォーマット
 

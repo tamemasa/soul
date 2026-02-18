@@ -671,111 +671,96 @@ _extract_json_array() {
 
 # ---- Trending Content Discovery ----
 
-# Search for trending content using Brave Search API
-# Now accepts optional dynamic_queries parameter
+# Discover trending content: Yahoo News RSS (primary) with LLM curation
 _discover_trending_content() {
   local trigger_json="$1"
   local dynamic_queries="${2:-}"
 
-  local brave_key="${BRAVE_API_KEY:-}"
-  if [[ -z "${brave_key}" ]]; then
-    log "WARN: Proactive engine: BRAVE_API_KEY not set, using LLM knowledge only"
-    _discover_trending_content_llm_only
-    return
-  fi
+  # Primary: Yahoo News RSS (no API key needed, always has URLs)
+  _discover_trending_content_rss
+}
 
-  local today
-  today=$(_get_jst_date)
+# Fallback: discover trending content via Yahoo News RSS (no API key needed)
+_discover_trending_content_rss() {
+  local categories=("top-picks" "domestic" "world" "business" "entertainment" "sports" "it" "science")
+  local all_items=""
 
-  # Build search queries: dynamic queries from chat context + generic fallback queries
-  local search_results=""
+  for cat in "${categories[@]}"; do
+    local rss_url="https://news.yahoo.co.jp/rss/topics/${cat}.xml"
+    local xml
+    xml=$(curl -s --max-time 10 "${rss_url}" 2>/dev/null)
+    if [[ -z "${xml}" ]]; then
+      continue
+    fi
 
-  # Generic fallback queries (no category dependency)
-  local fallback_queries=()
-  fallback_queries+=("最新ニュース 話題 ${today}")
-  fallback_queries+=("今日の注目ニュース 日本 ${today}")
-  fallback_queries+=("いま話題のニュース ${today}")
-  fallback_queries+=("トレンド 話題 SNS ${today}")
+    local items
+    items=$(echo "${xml}" | python3 -c "
+import sys, json, xml.etree.ElementTree as ET
+xml = sys.stdin.read()
+try:
+    root = ET.fromstring(xml)
+    items = []
+    for item in root.findall('.//item'):
+        title = item.find('title')
+        link = item.find('link')
+        pub = item.find('pubDate')
+        if title is not None and link is not None:
+            url = link.text.split('?')[0] if link.text else ''
+            items.append({'title': title.text or '', 'url': url, 'category': '${cat}', 'pubDate': pub.text if pub is not None else ''})
+    print(json.dumps(items, ensure_ascii=False))
+except:
+    print('[]')
+" 2>/dev/null)
 
-  local queries=()
-  if [[ -n "${dynamic_queries}" ]] && echo "${dynamic_queries}" | jq '.[0]' > /dev/null 2>&1; then
-    # Use dynamic queries only (up to 12) - no category-based fallback mixing
-    local dq_count
-    dq_count=$(echo "${dynamic_queries}" | jq 'length')
-    local dq_max=$(( dq_count > 12 ? 12 : dq_count ))
-    local dqi=0
-    while [[ ${dqi} -lt ${dq_max} ]]; do
-      local dq
-      dq=$(echo "${dynamic_queries}" | jq -r ".[${dqi}]")
-      queries+=("${dq}")
-      dqi=$((dqi + 1))
-    done
-    log "Proactive engine: Using ${#queries[@]} dynamic queries from per-chat context (no category fallback)"
-    # Also add 1-2 generic fallback queries to ensure minimum article diversity
-    queries+=("${fallback_queries[0]}")
-    queries+=("${fallback_queries[1]}")
-  else
-    # No dynamic queries available, use generic fallback queries
-    log "Proactive engine: No dynamic queries, using generic fallback queries"
-    queries=("${fallback_queries[@]}")
-  fi
-
-  for query in "${queries[@]}"; do
-    local encoded_query
-    encoded_query=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${query}'))" 2>/dev/null || echo "${query}")
-
-    local response
-    response=$(curl -s --max-time 10 \
-      -H "Accept: application/json" \
-      -H "Accept-Language: ja,en" \
-      -H "X-Subscription-Token: ${brave_key}" \
-      "https://api.search.brave.com/res/v1/web/search?q=${encoded_query}&count=10&freshness=pd&country=JP&search_lang=ja" 2>/dev/null)
-
-    if [[ -n "${response}" ]] && echo "${response}" | jq '.web.results' > /dev/null 2>&1; then
-      local results
-      results=$(echo "${response}" | jq '[.web.results[]? | {title: .title, url: .url, description: .description, age: .age}]' 2>/dev/null)
-      if [[ -n "${results}" && "${results}" != "[]" ]]; then
-        if [[ -z "${search_results}" ]]; then
-          search_results="${results}"
-        else
-          search_results=$(echo "${search_results}" "${results}" | jq -s 'add')
-        fi
+    if [[ -n "${items}" && "${items}" != "[]" ]]; then
+      if [[ -z "${all_items}" ]]; then
+        all_items="${items}"
+      else
+        all_items=$(echo "${all_items}" "${items}" | jq -s 'add' 2>/dev/null)
       fi
     fi
-    # Brief delay to avoid rate limiting
-    sleep 1
+    sleep 0.5
   done
 
-  if [[ -z "${search_results}" || "${search_results}" == "[]" ]]; then
-    log "WARN: Proactive engine: Brave Search returned no results, falling back to LLM"
+  local total_count
+  total_count=$(echo "${all_items}" | jq 'length' 2>/dev/null || echo 0)
+
+  if [[ ${total_count} -lt 5 ]]; then
+    log "WARN: Proactive engine: Yahoo News RSS returned only ${total_count} items, falling back to LLM only"
     _discover_trending_content_llm_only
     return
   fi
 
-  # Use LLM to curate and select the best items
-  local prompt="あなたはニュースキュレーターです。以下の検索結果から、最も興味深く価値のある記事を**必ず10件**選んでください。10件に満たない場合でもできるだけ多く選んでください（最低8件）。
+  log "Proactive engine: Yahoo News RSS collected ${total_count} items across ${#categories[@]} categories"
 
-## 検索結果
-${search_results}
+  # Deduplicate by title
+  all_items=$(echo "${all_items}" | jq '[group_by(.title)[] | first]' 2>/dev/null)
+
+  # Use LLM to curate and add summaries
+  local prompt="あなたはニュースキュレーターです。以下のYahoo Newsの記事一覧から、最も興味深く価値のある記事を**必ず10件**選んでください。10件に満たない場合でもできるだけ多く選んでください（最低8件）。
+
+## 記事一覧
+${all_items}
 
 ## 選定基準
-- **ageフィールドが12時間以内の記事のみ選定すること**（「X hours ago」でXが12以下、または「X minutes ago」のもの。「1 day ago」等は除外）
-- カテゴリは記事の内容から自由に判定すること。特定のジャンル（テクノロジー・ゲーム等）に偏らないこと
+- カテゴリは記事の内容から自由に判定すること。特定のジャンルに偏らないこと
 - 新鮮で話題性のあるもの
-- X（旧Twitter）で話題のトピックも含めること
 - 暴力的・過激な政治発言・個人攻撃・センセーショナルなゴシップは除外
 - 実用的・教育的・インスピレーションを与える内容を優先
 - 重複する話題は最も情報量の多いものを1つだけ選択
-- **多様なジャンルの記事を幅広く選定すること（テクノロジーばかりにならないよう注意）**
+- **多様なジャンルの記事を幅広く選定すること**
 - 異なるカテゴリ（例：経済、健康、文化、スポーツ、科学、政治、エンタメ等）から満遍なく選ぶこと
-- **日本国内のニュース・日本語の記事を優先すること。海外の記事は日本に直接関係するものに限定する**
+
+## 重要
+- **urlフィールドは記事一覧に含まれるURLをそのまま使用すること（絶対に変更・省略しない）**
+- summaryはタイトルから推測して2〜3文で作成すること
 
 以下のJSON配列で回答してください（コードフェンスなし、JSONのみ）：
 [
   {
     \"title\": \"記事タイトル\",
-    \"url\": \"検索結果から取得した元記事のURL（必須。検索結果のurlフィールドをそのまま使用すること）\",
-    \"summary\": \"2〜3文の要約\",
+    \"url\": \"記事一覧のurlをそのまま使用\",
+    \"summary\": \"タイトルから推測した2〜3文の要約\",
     \"category\": \"記事の内容に最も適したカテゴリ名（自由記述）\",
     \"interest_score\": 8
   }
@@ -784,14 +769,13 @@ ${search_results}
   local response
   response=$(invoke_claude "${prompt}")
 
-  # Parse curated content using common parser
   local parsed
   parsed=$(_extract_json_array "${response}")
 
   if [[ -n "${parsed}" ]]; then
     echo "${parsed}"
   else
-    log "WARN: Proactive engine: Failed to parse curated content, falling back to LLM"
+    log "WARN: Proactive engine: RSS curation failed, falling back to LLM only"
     _discover_trending_content_llm_only
   fi
 }

@@ -398,17 +398,16 @@ _unified_get_recent_messages() {
     return 1
   }
 
-  local session_files
-  session_files=$(echo "${sessions_json}" | jq -r '
-    to_entries[] |
-    select((.value.channel == "discord" or .value.channel == "line") and .value.sessionFile != null) |
-    .value.sessionFile
+  # Select the most recently updated session across all channels
+  # (LINE DM may appear as "whatsapp" in OpenClaw's session registry)
+  local latest_session
+  latest_session=$(echo "${sessions_json}" | jq -r '
+    to_entries |
+    map(select(.value.sessionFile != null)) |
+    sort_by(.value.updatedAt) | reverse |
+    .[0].value.sessionFile // empty
   ' 2>/dev/null)
 
-  [[ -n "${session_files}" ]] || { echo "[]"; return 0; }
-
-  local latest_session
-  latest_session=$(echo "${session_files}" | head -1)
   [[ -n "${latest_session}" ]] || { echo "[]"; return 0; }
 
   docker exec "${UNIFIED_OPENCLAW_CONTAINER}" tail -n 50 "${latest_session}" 2>/dev/null | \
@@ -1074,6 +1073,8 @@ ONLY valid JSONで回答してください：
 
 _unified_check_personality_integrity() {
   local integrity_file="${UNIFIED_INTEGRITY_FILE}"
+  # Source files on host (git-managed, authoritative)
+  local source_dir="/home/masaru/soul/worker/openclaw/personality"
   local issues=""
 
   # Check SOUL.md hash
@@ -1087,11 +1088,21 @@ _unified_check_personality_integrity() {
     fi
 
     if [[ -n "${stored_soul_hash}" && "${stored_soul_hash}" != "${soul_hash}" ]]; then
-      issues="SOUL.mdが変更されました (expected: ${stored_soul_hash}, actual: ${soul_hash})"
-      log "ALERT: Unified monitor - ${issues}"
+      # Hash changed — check if it matches the source file (legitimate deploy)
+      local source_soul_hash=""
+      if [[ -f "${source_dir}/SOUL.md" ]]; then
+        source_soul_hash=$(md5sum "${source_dir}/SOUL.md" | awk '{print $1}')
+      fi
 
-      if [[ "${UNIFIED_PARALLEL_MODE}" != "true" ]]; then
-        _unified_restore_personality_file "SOUL.md"
+      if [[ "${soul_hash}" == "${source_soul_hash}" ]]; then
+        log "Unified monitor: SOUL.md hash updated (legitimate deploy detected)"
+      else
+        issues="SOUL.mdが不正に変更されました (expected: ${stored_soul_hash}, container: ${soul_hash}, source: ${source_soul_hash})"
+        log "ALERT: Unified monitor - ${issues}"
+
+        if [[ "${UNIFIED_PARALLEL_MODE}" != "true" ]]; then
+          _unified_restore_personality_file "SOUL.md"
+        fi
       fi
     fi
   fi
@@ -1107,16 +1118,26 @@ _unified_check_personality_integrity() {
     fi
 
     if [[ -n "${stored_agents_hash}" && "${stored_agents_hash}" != "${agents_hash}" ]]; then
-      local agents_issue="AGENTS.mdが変更されました"
-      if [[ -n "${issues}" ]]; then
-        issues="${issues}; ${agents_issue}"
-      else
-        issues="${agents_issue}"
+      # Hash changed — check if it matches the source file (legitimate deploy)
+      local source_agents_hash=""
+      if [[ -f "${source_dir}/AGENTS.md" ]]; then
+        source_agents_hash=$(md5sum "${source_dir}/AGENTS.md" | awk '{print $1}')
       fi
-      log "ALERT: Unified monitor - ${agents_issue}"
 
-      if [[ "${UNIFIED_PARALLEL_MODE}" != "true" ]]; then
-        _unified_restore_personality_file "AGENTS.md"
+      if [[ "${agents_hash}" == "${source_agents_hash}" ]]; then
+        log "Unified monitor: AGENTS.md hash updated (legitimate deploy detected)"
+      else
+        local agents_issue="AGENTS.mdが不正に変更されました"
+        if [[ -n "${issues}" ]]; then
+          issues="${issues}; ${agents_issue}"
+        else
+          issues="${agents_issue}"
+        fi
+        log "ALERT: Unified monitor - ${agents_issue}"
+
+        if [[ "${UNIFIED_PARALLEL_MODE}" != "true" ]]; then
+          _unified_restore_personality_file "AGENTS.md"
+        fi
       fi
     fi
   fi
