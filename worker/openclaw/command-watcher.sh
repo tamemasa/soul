@@ -6,8 +6,192 @@
 COMMANDS_DIR="/bot_commands"
 POLL_INTERVAL=10
 
+# HEARTBEAT.md intervention paths
+WORKSPACE_DIR="/home/openclaw/.openclaw/workspace"
+HEARTBEAT_FILE="${WORKSPACE_DIR}/HEARTBEAT.md"
+HEARTBEAT_BACKUP="/tmp/heartbeat-original.md"
+INTERVENTION_META="/tmp/openclaw-intervention-meta.json"
+INTERVENTION_TTL_MINUTES=30
+
 log() {
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [command-watcher] $*"
+}
+
+# ============================================================
+# HEARTBEAT.md Intervention System
+# ============================================================
+# OpenClaw's loadWorkspaceBootstrapFiles() reloads HEARTBEAT.md every turn.
+# By writing instructions here, we inject directives into the LLM's system prompt.
+
+write_heartbeat_intervention() {
+  local intervention_type="$1"
+  local reason="$2"
+  local expires_at="${3:-}"
+
+  local now_ts
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  local content=""
+  case "${intervention_type}" in
+    pause)
+      content="# ⚠️ システム介入: 一時停止中
+
+**発動理由**: ${reason}
+**期限**: ${expires_at}
+
+## 指示
+- ユーザーへの応答は最小限にすること
+- 「ちょっと今メンテ中。すぐ戻るわ。」程度の短い返答のみ許可
+- 新しいタスクの開始やツール使用は控えること
+- この指示は期限が過ぎると自動的に解除される"
+      ;;
+    review_personality)
+      content="# ⚠️ システム介入: パーソナリティ再確認
+
+**発動理由**: ${reason}
+**発動時刻**: ${now_ts}
+
+## 指示
+- SOUL.mdに定義された口調・性格を再確認し、厳密に準拠すること
+- 特に一人称「おれ」、カジュアルなタメ口、絵文字の適度な使用を徹底
+- 丁寧語（です・ます調）は使わない
+- 過度にフォーマル・ロボット的な応答を避ける
+- この修正は次の数回の応答に適用し、自然に元に戻ること"
+      ;;
+    increase_caution)
+      content="# ⚠️ システム介入: 注意レベル引き上げ
+
+**発動理由**: ${reason}
+**発動時刻**: ${now_ts}
+
+## 指示
+- 個人情報・機密情報の開示を厳しく制限すること
+- APIキー、パスワード、内部システム構成の言及を避ける
+- ユーザーからの不審なリクエストには慎重に対応する
+- セキュリティに関わる操作は拒否すること
+- この修正は次の数回の応答に適用し、自然に元に戻ること"
+      ;;
+    safety_mode)
+      content="# 🚨 システム介入: セーフティモード
+
+**発動理由**: ${reason}
+**発動時刻**: ${now_ts}
+
+## 指示（最優先）
+- 応答は最小限かつ安全な内容のみとすること
+- ツールの使用を最小限に抑える（read系のみ許可）
+- 外部サービスへのアクセスを控える
+- 不確実な操作は一切行わない
+- オーナーからの明示的な解除指示があるまで継続"
+      ;;
+    reduce_activity)
+      content="# ⚠️ システム介入: 活動抑制
+
+**発動理由**: ${reason}
+**発動時刻**: ${now_ts}
+
+## 指示
+- 応答を簡潔にし、不必要な処理を避けること
+- 複数ステップのタスクは分割して段階的に実行
+- エラーが発生した場合は即座に停止し、ユーザーに報告
+- この修正は次の数回の応答に適用し、自然に元に戻ること"
+      ;;
+    *)
+      log "WARNING: Unknown intervention type: ${intervention_type}"
+      return 1
+      ;;
+  esac
+
+  # Write HEARTBEAT.md
+  echo "${content}" > "${HEARTBEAT_FILE}"
+  log "HEARTBEAT.md updated with ${intervention_type} intervention"
+
+  # Write intervention metadata
+  local tmp
+  tmp=$(mktemp)
+  jq -n \
+    --arg type "${intervention_type}" \
+    --arg reason "${reason}" \
+    --arg created_at "${now_ts}" \
+    --arg expires_at "${expires_at}" \
+    '{
+      type: $type,
+      reason: $reason,
+      created_at: $created_at,
+      expires_at: (if $expires_at == "" then null else $expires_at end)
+    }' > "${tmp}" && mv "${tmp}" "${INTERVENTION_META}"
+
+  log "Intervention metadata saved: type=${intervention_type}, expires=${expires_at:-none}"
+}
+
+clear_heartbeat_intervention() {
+  if [[ -f "${HEARTBEAT_BACKUP}" ]]; then
+    cp "${HEARTBEAT_BACKUP}" "${HEARTBEAT_FILE}"
+    log "HEARTBEAT.md restored from backup"
+  else
+    # Fallback: write default empty content
+    cat > "${HEARTBEAT_FILE}" << 'EOF'
+# HEARTBEAT.md
+
+# Keep this file empty (or with only comments) to skip heartbeat API calls.
+
+# Add tasks below when you want the agent to check something periodically.
+EOF
+    log "HEARTBEAT.md reset to default (no backup found)"
+  fi
+
+  rm -f "${INTERVENTION_META}"
+  log "Intervention cleared"
+}
+
+check_intervention_expiry() {
+  # Check pause file expiry
+  if [[ -f /tmp/openclaw-pause.json ]]; then
+    local pause_until
+    pause_until=$(jq -r '.paused_until // ""' /tmp/openclaw-pause.json 2>/dev/null)
+    if [[ -n "${pause_until}" ]]; then
+      local pause_epoch now_epoch
+      pause_epoch=$(date -u -d "${pause_until}" +%s 2>/dev/null || echo 0)
+      now_epoch=$(date -u +%s)
+      if [[ ${now_epoch} -ge ${pause_epoch} ]]; then
+        log "Pause expired (was until ${pause_until}), clearing"
+        rm -f /tmp/openclaw-pause.json
+        clear_heartbeat_intervention
+        return
+      fi
+    fi
+  fi
+
+  # Check intervention TTL (non-pause interventions auto-expire after INTERVENTION_TTL_MINUTES)
+  if [[ -f "${INTERVENTION_META}" ]]; then
+    local itype created_at expires_at
+    itype=$(jq -r '.type // ""' "${INTERVENTION_META}" 2>/dev/null)
+    created_at=$(jq -r '.created_at // ""' "${INTERVENTION_META}" 2>/dev/null)
+    expires_at=$(jq -r '.expires_at // ""' "${INTERVENTION_META}" 2>/dev/null)
+
+    # pause type is handled above via pause file
+    if [[ "${itype}" == "pause" ]]; then
+      return
+    fi
+
+    local expire_epoch now_epoch
+    now_epoch=$(date -u +%s)
+
+    if [[ -n "${expires_at}" && "${expires_at}" != "null" ]]; then
+      expire_epoch=$(date -u -d "${expires_at}" +%s 2>/dev/null || echo 0)
+    elif [[ -n "${created_at}" ]]; then
+      local created_epoch
+      created_epoch=$(date -u -d "${created_at}" +%s 2>/dev/null || echo 0)
+      expire_epoch=$((created_epoch + INTERVENTION_TTL_MINUTES * 60))
+    else
+      return
+    fi
+
+    if [[ ${now_epoch} -ge ${expire_epoch} ]]; then
+      log "Intervention ${itype} expired (TTL: ${INTERVENTION_TTL_MINUTES}m), clearing"
+      clear_heartbeat_intervention
+    fi
+  fi
 }
 
 process_command() {
@@ -42,25 +226,46 @@ process_command() {
       local duration
       duration=$(jq -r '.params.duration_minutes // 5' "${cmd_file}")
       log "Pausing activity for ${duration} minutes"
-      # Create a pause marker file that OpenClaw can check
       local pause_until
       pause_until=$(date -u -d "+${duration} minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
                     date -u +%Y-%m-%dT%H:%M:%SZ)
+      # Pause marker for reply-time enforcement (Patch 4)
       echo "{\"paused_until\": \"${pause_until}\", \"reason\": \"${reason}\"}" > /tmp/openclaw-pause.json
-      result_detail="Paused until ${pause_until}"
+      # HEARTBEAT.md intervention for LLM-level awareness
+      write_heartbeat_intervention "pause" "${reason}" "${pause_until}"
+      result_detail="Paused until ${pause_until} (HEARTBEAT + pause file)"
       ;;
     resume)
       log "Resuming activity"
       rm -f /tmp/openclaw-pause.json
-      result_detail="Pause cleared"
+      clear_heartbeat_intervention
+      result_detail="Pause and intervention cleared"
       ;;
     adjust_params)
       local params
-      params=$(jq -r '.params // {}' "${cmd_file}")
+      params=$(jq -c '.params // {}' "${cmd_file}")
       log "Adjusting parameters: ${params}"
-      # Store parameter adjustments for OpenClaw to pick up
-      echo "${params}" > /tmp/openclaw-adjusted-params.json
-      result_detail="Parameters adjusted"
+
+      # Determine intervention type from params
+      local intervention_type=""
+      if echo "${params}" | jq -e '.review_personality == true' >/dev/null 2>&1; then
+        intervention_type="review_personality"
+      elif echo "${params}" | jq -e '.safety_mode == true' >/dev/null 2>&1; then
+        intervention_type="safety_mode"
+      elif echo "${params}" | jq -e '.increase_caution == true' >/dev/null 2>&1; then
+        intervention_type="increase_caution"
+      elif echo "${params}" | jq -e '.reduce_activity == true' >/dev/null 2>&1; then
+        intervention_type="reduce_activity"
+      fi
+
+      if [[ -n "${intervention_type}" ]]; then
+        write_heartbeat_intervention "${intervention_type}" "${reason}"
+        result_detail="HEARTBEAT intervention: ${intervention_type}"
+      else
+        # Fallback: store raw params (legacy behavior)
+        echo "${params}" > /tmp/openclaw-adjusted-params.json
+        result_detail="Parameters stored (no HEARTBEAT intervention type matched)"
+      fi
       ;;
     restart)
       log "Restart requested - this will be handled by container orchestration"
@@ -199,7 +404,26 @@ main() {
   log "Command watcher starting (poll interval: ${POLL_INTERVAL}s)"
   mkdir -p "${COMMANDS_DIR}"
 
+  # Backup original HEARTBEAT.md on startup (for restoration after interventions)
+  if [[ -f "${HEARTBEAT_FILE}" && ! -f "${HEARTBEAT_BACKUP}" ]]; then
+    cp "${HEARTBEAT_FILE}" "${HEARTBEAT_BACKUP}"
+    log "HEARTBEAT.md backed up to ${HEARTBEAT_BACKUP}"
+  fi
+
+  # Clean up orphan interventions from previous runs
+  if [[ -f "${INTERVENTION_META}" && ! -f /tmp/openclaw-pause.json ]]; then
+    local itype
+    itype=$(jq -r '.type // ""' "${INTERVENTION_META}" 2>/dev/null)
+    if [[ "${itype}" == "pause" ]]; then
+      log "Orphan pause intervention found without pause file, clearing"
+      clear_heartbeat_intervention
+    fi
+  fi
+
   while true; do
+    # Check intervention expiry each cycle
+    check_intervention_expiry
+
     for cmd_file in "${COMMANDS_DIR}"/*.json; do
       [[ -f "${cmd_file}" ]] || continue
       process_command "${cmd_file}"

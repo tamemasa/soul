@@ -25,8 +25,8 @@ if [[ -f /app/patch-line-restrictions.sh ]]; then
   /app/patch-line-restrictions.sh
 fi
 
-# Clean up stale lock files
-rm -rf /tmp/openclaw-* 2>/dev/null || true
+# Clean up stale lock/intervention files from previous runs
+rm -rf /tmp/openclaw-* /tmp/heartbeat-original.md /tmp/openclaw-intervention-meta.json 2>/dev/null || true
 
 # Ensure required directories exist
 mkdir -p "${OPENCLAW_HOME}/workspace"

@@ -178,6 +178,7 @@ var injection = [
   "\t\t\tif (_pd.pending_messages && _pd.pending_messages.length > 0) {",
   "\t\t\t\tvar _pt = _pd.pending_messages.map(function(m){ return m.text; }).join('\\n\\n---\\n\\n');",
   "\t\t\t\tpayload.text = _pt + (payload.text ? '\\n\\n---\\n\\n' + payload.text : '');",
+  "\t\t\t\t_pd.delivered_messages = _pd.pending_messages.map(function(m){ m.delivered_at = new Date().toISOString().replace(/\\.\\d{3}Z$/, 'Z'); return m; });",
   "\t\t\t\t_pd.pending_messages = [];",
   "\t\t\t\t_pd.updated_at = new Date().toISOString().replace(/\\.\\d{3}Z$/, 'Z');",
   "\t\t\t\twriteFileSync(_pp, JSON.stringify(_pd, null, 2));",
@@ -203,10 +204,77 @@ NODEOF
   fi
 }
 
+# --- Patch 4: Enforce pause by replacing LINE reply text ---
+# When /tmp/openclaw-pause.json exists and is not expired,
+# replace the outgoing reply text with a minimal maintenance message.
+# Inserted right after the LINE-PENDING injection block.
+patch_pause_enforcement() {
+  local file
+  file=$(find "$OPENCLAW_DIST" -name 'loader-*.js' -print -quit 2>/dev/null || true)
+  if [[ -z "$file" || ! -f "$file" ]]; then
+    log "WARNING: loader file not found, skipping pause enforcement patch"
+    return 1
+  fi
+
+  if grep -q 'LINE-PAUSE' "$file" 2>/dev/null; then
+    log "Loader already patched (LINE pause enforcement)"
+    return 0
+  fi
+
+  cat > /tmp/patch-pause.js << 'NODEOF'
+const fs = require("fs");
+const distDir = "/usr/local/lib/node_modules/openclaw/dist";
+const loaderFiles = fs.readdirSync(distDir).filter(function(f) { return f.startsWith("loader-") && f.endsWith(".js"); });
+if (loaderFiles.length === 0) { console.log("ERROR: no loader file found"); process.exit(1); }
+const fpath = distDir + "/" + loaderFiles[0];
+let code = fs.readFileSync(fpath, "utf8");
+
+// Insert after LINE-PENDING catch block
+const marker = "} catch(_e) { console.log('[LINE-PENDING] Error: ' + _e.message); }";
+if (!code.includes(marker)) {
+  console.log("ERROR: LINE-PENDING marker not found — apply patch_pending_injection first");
+  process.exit(1);
+}
+
+var injection = [
+  "",
+  "\ttry {",
+  "\t\tvar _pauseFile = '/tmp/openclaw-pause.json';",
+  "\t\tif (existsSync(_pauseFile)) {",
+  "\t\t\tvar _pauseData = JSON.parse(readFileSync(_pauseFile, 'utf8'));",
+  "\t\t\tvar _pauseUntil = _pauseData.paused_until ? new Date(_pauseData.paused_until) : null;",
+  "\t\t\tif (_pauseUntil && _pauseUntil > new Date()) {",
+  "\t\t\t\tconsole.log('[LINE-PAUSE] Pause active until ' + _pauseData.paused_until + ', replacing reply');",
+  "\t\t\t\tpayload.text = 'ちょっと今メンテ中。すぐ戻るわ。';",
+  "\t\t\t} else if (_pauseUntil && _pauseUntil <= new Date()) {",
+  "\t\t\t\tconsole.log('[LINE-PAUSE] Pause expired, removing stale file');",
+  "\t\t\t\ttry { require('fs').unlinkSync(_pauseFile); } catch(_ue) {}",
+  "\t\t\t}",
+  "\t\t}",
+  "\t} catch(_pe) { console.log('[LINE-PAUSE] Error: ' + _pe.message); }",
+].join("\n");
+
+code = code.replace(marker, marker + injection);
+fs.writeFileSync(fpath, code);
+console.log("Pause enforcement patch applied to " + loaderFiles[0]);
+NODEOF
+
+  node /tmp/patch-pause.js 2>&1
+  rm -f /tmp/patch-pause.js
+
+  if grep -q 'LINE-PAUSE' "$file" 2>/dev/null; then
+    log "Loader patched: pause enforcement active for LINE replies"
+  else
+    log "WARNING: pause enforcement patch may have failed"
+    return 1
+  fi
+}
+
 # --- Apply patches ---
 # Each patch runs independently — failure of one must not block the other.
 log "Applying LINE channel restrictions..."
 patch_coding_tools || log "WARNING: patch_coding_tools failed (continuing)"
 patch_push_api_all || log "WARNING: patch_push_api_all failed (continuing)"
 patch_pending_injection || log "WARNING: patch_pending_injection failed (continuing)"
+patch_pause_enforcement || log "WARNING: patch_pause_enforcement failed (continuing)"
 log "LINE channel restrictions applied."
