@@ -287,6 +287,114 @@ recover_interrupted_tasks() {
   return 0
 }
 
+# Expire LINE pending messages older than 12 hours.
+# Expired messages are removed and replaced with a notification so OpenClaw
+# can inform the user that the queued content was discarded.
+# Self-throttled to run at most once every 5 minutes.
+_PENDING_CLEANUP_LAST=0
+PENDING_EXPIRE_HOURS=12
+PENDING_CLEANUP_INTERVAL=300
+
+cleanup_expired_pending_messages() {
+  local now_epoch
+  now_epoch=$(date +%s)
+
+  # Throttle: run at most every 5 minutes
+  if (( now_epoch - _PENDING_CLEANUP_LAST < PENDING_CLEANUP_INTERVAL )); then
+    return 0
+  fi
+  _PENDING_CLEANUP_LAST=${now_epoch}
+
+  local pending_dir="${SHARED_DIR}/bot_commands"
+  local expire_seconds=$(( PENDING_EXPIRE_HOURS * 3600 ))
+
+  for pending_file in "${pending_dir}"/line_pending_*.json; do
+    [[ -f "${pending_file}" ]] || continue
+
+    local msg_count
+    msg_count=$(jq '.pending_messages | length' "${pending_file}" 2>/dev/null || echo 0)
+    [[ "${msg_count}" -eq 0 ]] && continue
+
+    # Check each message's created_at and collect expired ones
+    local expired_ids expired_summaries kept_messages
+    expired_ids=()
+    expired_summaries=()
+
+    while IFS= read -r line; do
+      local msg_id msg_created_at msg_source msg_text
+      msg_id=$(echo "${line}" | jq -r '.id // ""')
+      msg_created_at=$(echo "${line}" | jq -r '.created_at // ""')
+      msg_source=$(echo "${line}" | jq -r '.source // "unknown"')
+      msg_text=$(echo "${line}" | jq -r '.text // ""')
+
+      if [[ -z "${msg_created_at}" ]]; then
+        continue
+      fi
+
+      local msg_epoch
+      msg_epoch=$(date -d "${msg_created_at}" +%s 2>/dev/null || echo 0)
+      local age=$(( now_epoch - msg_epoch ))
+
+      if (( age > expire_seconds )); then
+        expired_ids+=("${msg_id}")
+        # Truncate text for summary (first 50 chars)
+        local summary="${msg_text:0:50}"
+        [[ ${#msg_text} -gt 50 ]] && summary="${summary}..."
+        expired_summaries+=("- [${msg_source}] ${summary}")
+      fi
+    done < <(jq -c '.pending_messages[]' "${pending_file}" 2>/dev/null)
+
+    [[ ${#expired_ids[@]} -eq 0 ]] && continue
+
+    local target_id
+    target_id=$(jq -r '.target_id // ""' "${pending_file}" 2>/dev/null)
+
+    log "Pending cleanup: expiring ${#expired_ids[@]} message(s) for ${target_id} (older than ${PENDING_EXPIRE_HOURS}h)"
+
+    # Remove expired messages from pending_messages
+    local id_filter
+    id_filter=$(printf '%s\n' "${expired_ids[@]}" | jq -R . | jq -s .)
+
+    local now_ts
+    now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local tmp
+    tmp=$(mktemp)
+
+    jq --argjson ids "${id_filter}" --arg ts "${now_ts}" '
+      .expired_messages = (.expired_messages // []) +
+        [.pending_messages[] | select(.id as $id | $ids | index($id))]
+        | .expired_messages[-1].expired_at = $ts
+      | .pending_messages = [.pending_messages[] | select(.id as $id | $ids | index($id) | not)]
+      | .updated_at = $ts
+    ' "${pending_file}" > "${tmp}" && chmod 666 "${tmp}" && mv "${tmp}" "${pending_file}"
+
+    # Add a notification message so OpenClaw tells the user
+    local notice_text
+    notice_text=$'【お知らせ】以下の配信予定メッセージが12時間以上未配信のため破棄されました：\n'
+    for s in "${expired_summaries[@]}"; do
+      notice_text+="${s}"$'\n'
+    done
+    notice_text+=$'\n最新情報が必要な場合は「ニュース教えて」と聞いてください。'
+
+    local notice_msg
+    notice_msg=$(jq -n \
+      --arg id "expire_notice_$(date +%s)_${RANDOM}" \
+      --arg text "${notice_text}" \
+      --arg source "system_expiry_notice" \
+      --arg created_at "${now_ts}" \
+      '{id: $id, text: $text, source: $source, created_at: $created_at}')
+
+    tmp=$(mktemp)
+    jq --argjson msg "${notice_msg}" --arg ts "${now_ts}" \
+      '.pending_messages += [$msg] | .updated_at = $ts' \
+      "${pending_file}" > "${tmp}" && chmod 666 "${tmp}" && mv "${tmp}" "${pending_file}"
+
+    log "Pending cleanup: expiry notice added for ${target_id}"
+  done
+
+  return 0
+}
+
 main_loop() {
   log "Soul daemon starting for node: ${NODE_NAME}"
   load_params
@@ -335,6 +443,9 @@ main_loop() {
 
     # 12. Stuck task recovery (triceratops only)
     check_stuck_tasks || log "WARN: check_stuck_tasks error"
+
+    # 13. Expire stale LINE pending messages (>12h)
+    cleanup_expired_pending_messages || log "WARN: cleanup_expired_pending_messages error"
 
     sleep "${POLL_INTERVAL}"
   done
