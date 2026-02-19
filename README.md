@@ -148,6 +148,33 @@ graph TB
 | **OpenClaw Gateway** | `openclaw-gateway/proxy.js` | LINE Webhook前段プロキシ（バッファ/リプレイ）+ 公開ステータスページ配信 |
 | **Personality Files** | `personality/` | Masaru-kunの人格・話し方・行動ルールを定義（SOUL.md, IDENTITY.md, AGENTS.md） |
 
+### Google Calendar連携
+
+OpenClawがGoogleカレンダーの予定を取得できる機能。iCal秘密URL方式を採用し、GCPプロジェクトやOAuth2は不要。
+
+#### セットアップ
+
+1. Googleカレンダー → 対象カレンダーの設定 → 「カレンダーの統合」
+2. 「iCal形式の非公開URL」をコピー
+3. `.env` に番号付きで登録（複数カレンダー対応）:
+   ```
+   GOOGLE_CALENDAR_1=献立|https://calendar.google.com/calendar/ical/.../basic.ics
+   GOOGLE_CALENDAR_2=メイン|https://calendar.google.com/calendar/ical/.../basic.ics
+   ```
+4. OpenClawコンテナをリビルド
+
+#### 動作フロー
+
+バックグラウンドの `gcal-sync.js` が5分間隔でiCalデータを取得し、2ヶ月前〜1ヶ月先の予定を `CALENDAR.md` に書き出す。エージェントはユーザーから予定を聞かれたとき `CALENDAR.md` をreadツールで毎回読み直して即座に回答できる（sessions_spawn不要、コンテキストキャッシュに依存しない）。
+
+| ファイル | 役割 |
+|---------|------|
+| `gcal-sync.js` | iCal取得・ICSパース・CALENDAR.md書き出し（5分間隔） |
+| `/app/gcal-calendars.json` | entrypoint.shが環境変数から生成するカレンダー設定 |
+| `CALENDAR.md` | ワークスペースに出力される予定一覧（JST、日別グループ化） |
+
+`GOOGLE_CALENDAR_*` が未設定の場合、`gcal-sync.js` は起動されない。
+
 ### LINE保留メッセージ方式
 
 LINE Messaging APIのPush API（無料枠200通/月）の消費を抑えるため、BrainノードおよびOpenClawからのLINEメッセージ送信を**保留ファイル方式**に変更している。

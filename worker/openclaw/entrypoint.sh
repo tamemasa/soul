@@ -89,6 +89,25 @@ log "OWNER_CONTEXT.md deployed to workspace."
 MCPORTER_DIR="${OPENCLAW_HOME}/mcporter"
 mkdir -p "${MCPORTER_DIR}"
 ln -sfn "${MCPORTER_DIR}" /home/openclaw/.mcporter
+# Build Google Calendar config from GOOGLE_CALENDAR_N env vars (name|url format)
+GCAL_CONFIG="/app/gcal-calendars.json"
+GCAL_FOUND=0
+echo "[" > "${GCAL_CONFIG}"
+for var in $(env | grep -oP '^GOOGLE_CALENDAR_\d+(?==)' | sort); do
+  val="$(printenv "$var")"
+  if [[ -n "$val" && "$val" == *"|"* ]]; then
+    cal_name="${val%%|*}"
+    cal_url="${val#*|}"
+    if [[ $GCAL_FOUND -gt 0 ]]; then
+      echo "," >> "${GCAL_CONFIG}"
+    fi
+    node -e "process.stdout.write(JSON.stringify({name:process.argv[1],url:process.argv[2]}))" "$cal_name" "$cal_url" >> "${GCAL_CONFIG}"
+    GCAL_FOUND=$((GCAL_FOUND + 1))
+    log "Google Calendar registered: ${cal_name}"
+  fi
+done
+echo "]" >> "${GCAL_CONFIG}"
+
 cat > "${MCPORTER_DIR}/mcporter.json" <<'MCPEOF'
 {
   "mcpServers": {
@@ -235,6 +254,14 @@ if [[ -f /app/command-watcher.sh ]]; then
   /app/command-watcher.sh &
   WATCHER_PID=$!
   log "Command watcher started (PID: ${WATCHER_PID})"
+fi
+
+# Start Google Calendar sync in background (fetches iCal → writes CALENDAR.md)
+if [[ $GCAL_FOUND -gt 0 && -f /app/gcal-sync.js ]]; then
+  log "Starting Google Calendar sync..."
+  node /app/gcal-sync.js &
+  GCAL_PID=$!
+  log "Google Calendar sync started (PID: ${GCAL_PID})"
 fi
 
 # Fix ownership before starting gateway (recovers from root-owned files
