@@ -543,12 +543,27 @@ _unified_check_abnormal_behavior() {
   fi
 
   # 2. Empty response check
+  # NOTE: Empty assistant responses between tool calls are normal (LLM emits empty text before tool_use).
+  # Only count truly orphaned empty responses (not preceded/followed by tool interactions).
   local empty_threshold
   empty_threshold=$(jq -r '.abnormal_behavior.empty_responses.threshold // 3' "${UNIFIED_POLICY_FILE}")
   local empty_count
   empty_count=$(echo "${messages}" | jq '[.[] | select(.role == "assistant" and (.content == "" or .content == null))] | length' 2>/dev/null || echo 0)
   empty_count=$(echo "${empty_count}" | tr -dc '0-9')
   empty_count=${empty_count:-0}
+  # Subtract tool-call empty responses (assistant empties followed by toolResult are normal)
+  local tool_empty_count
+  tool_empty_count=$(echo "${messages}" | jq '
+    [range(length - 1) as $i |
+      if (.[$i].role == "assistant" and (.[$i].content == "" or .[$i].content == null))
+         and (.[$i+1].role == "toolResult" or .[$i+1].role == "tool")
+      then 1 else empty end
+    ] | length
+  ' 2>/dev/null || echo 0)
+  tool_empty_count=$(echo "${tool_empty_count}" | tr -dc '0-9')
+  tool_empty_count=${tool_empty_count:-0}
+  empty_count=$((empty_count - tool_empty_count))
+  [[ ${empty_count} -lt 0 ]] && empty_count=0
 
   if [[ ${empty_count} -ge ${empty_threshold} ]]; then
     violations=$(echo "${violations}" | jq \
@@ -563,8 +578,18 @@ _unified_check_abnormal_behavior() {
   fi
 
   # 3. Error rate check from container logs
+  # Exclude false positives: "errors":0 (metrics), isError=false (agent runs),
+  # web_search/web_fetch errors (normal operation), MCP/tool errors (operational)
   local error_lines
-  error_lines=$(docker logs "${UNIFIED_OPENCLAW_CONTAINER}" --since "${UNIFIED_MONITOR_INTERVAL}s" 2>&1 | grep -ic "error\|exception\|fatal\|crash" 2>/dev/null || echo 0)
+  error_lines=$(docker logs "${UNIFIED_OPENCLAW_CONTAINER}" --since "${UNIFIED_MONITOR_INTERVAL}s" 2>&1 \
+    | grep -i "error\|exception\|fatal\|crash" \
+    | grep -v '"errors":0' \
+    | grep -v 'isError=false' \
+    | grep -v 'web_search\|web_fetch\|brave.*search' \
+    | grep -v 'ENOENT.*bot_commands\|ENOENT.*line_pending' \
+    | grep -v 'mcp\|mcporter\|sequential-thinking\|memory.*server' \
+    | grep -vi 'fetch.*error.*timeout\|search.*error' \
+    | wc -l 2>/dev/null || echo 0)
   error_lines=$(echo "${error_lines}" | tr -dc '0-9')
   error_lines=${error_lines:-0}
 
@@ -596,6 +621,8 @@ _unified_check_abnormal_behavior() {
   fi
 
   # 4. Response length check (SOUL.md: 長文は避ける)
+  # Exclude responses that are naturally long: news delivery, web search results,
+  # brain research responses, subagent task results, system notifications
   local warn_chars intervene_chars warn_sentences intervene_sentences
   warn_chars=$(jq -r '.abnormal_behavior.response_length.warn_chars // 200' "${UNIFIED_POLICY_FILE}")
   intervene_chars=$(jq -r '.abnormal_behavior.response_length.intervene_chars // 300' "${UNIFIED_POLICY_FILE}")
@@ -603,9 +630,25 @@ _unified_check_abnormal_behavior() {
   intervene_sentences=$(jq -r '.abnormal_behavior.response_length.intervene_sentences // 8' "${UNIFIED_POLICY_FILE}")
 
   # 直近のアシスタント応答の平均文字数・最大文字数・平均文数・最大文数を計算
+  # Filter out: news delivery (URLs + category patterns), web search results,
+  # research/subagent responses, HEARTBEAT/system responses, NO_REPLY markers
   local length_stats
   length_stats=$(echo "${messages}" | jq -r '
-    [.[] | select(.role == "assistant" and .content != null and .content != "")] |
+    [.[] | select(
+      .role == "assistant" and .content != null and .content != "" and
+      # Exclude news delivery (contains multiple URLs or news patterns)
+      (.content | test("https?://.*https?://"; "s") | not) and
+      # Exclude subagent task results
+      (.content | test("subagent task.*completed|Findings:"; "i") | not) and
+      # Exclude web search result summaries
+      (.content | test("検索結果|search result|web_search|web_fetch"; "i") | not) and
+      # Exclude system markers
+      (.content | test("^(NO_REPLY|HEARTBEAT_OK)$") | not) and
+      # Exclude safety mode / intervention notifications
+      (.content | test("セーフティモード|システム介入"; "i") | not) and
+      # Exclude personality improvement process
+      (.content | test("パーソナリティ改善|パーソナリティ分析|personality.*質問|番号付きで回答"; "i") | not)
+    )] |
     if length == 0 then "0 0 0 0"
     else
       [.[].content | length] as $lens |

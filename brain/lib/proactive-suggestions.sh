@@ -913,17 +913,71 @@ _extract_json_array() {
 
 # ---- Trending Content Discovery ----
 
-# Discover trending content: Yahoo News RSS (primary) with LLM curation
+# Search Brave API for dynamic queries to expand content pool with chat-context-specific articles
+_search_brave_for_queries() {
+  local queries_json="$1"
+  local brave_key="${BRAVE_API_KEY:-}"
+
+  if [[ -z "${brave_key}" || -z "${queries_json}" || "${queries_json}" == "[]" ]]; then
+    echo "[]"
+    return
+  fi
+
+  local count
+  count=$(echo "${queries_json}" | jq 'length' 2>/dev/null || echo 0)
+  if [[ ${count} -eq 0 ]]; then
+    echo "[]"
+    return
+  fi
+
+  local all_results="[]"
+
+  for ((i=0; i<count; i++)); do
+    local query
+    query=$(echo "${queries_json}" | jq -r ".[$i]" 2>/dev/null)
+    [[ -z "${query}" || "${query}" == "null" ]] && continue
+
+    local encoded_query
+    encoded_query=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${query}" 2>/dev/null || continue)
+
+    local search_resp
+    search_resp=$(curl -s --max-time 8 \
+      -H "Accept: application/json" \
+      -H "X-Subscription-Token: ${brave_key}" \
+      "https://api.search.brave.com/res/v1/web/search?q=${encoded_query}&count=3&freshness=pw&country=JP&search_lang=ja" 2>/dev/null)
+
+    if [[ -n "${search_resp}" ]]; then
+      local results
+      results=$(echo "${search_resp}" | jq -c --arg q "${query}" \
+        '[.web.results[]? | {title: .title, url: .url, category: "context", pubDate: "", source_query: $q}]' 2>/dev/null)
+
+      if [[ -n "${results}" && "${results}" != "[]" ]]; then
+        all_results=$(echo "${all_results}" "${results}" | jq -s 'add' 2>/dev/null)
+      fi
+    fi
+
+    sleep 0.3
+  done
+
+  local total
+  total=$(echo "${all_results}" | jq 'length' 2>/dev/null || echo 0)
+  log "Proactive engine: Brave Search returned ${total} items for ${count} dynamic queries"
+
+  echo "${all_results}"
+}
+
+# Discover trending content: Yahoo News RSS (primary) + Brave dynamic queries with LLM curation
 _discover_trending_content() {
   local trigger_json="$1"
   local dynamic_queries="${2:-}"
 
-  # Primary: Yahoo News RSS (no API key needed, always has URLs)
-  _discover_trending_content_rss
+  # Primary: Yahoo News RSS + optional Brave dynamic queries
+  _discover_trending_content_rss "${dynamic_queries}"
 }
 
-# Fallback: discover trending content via Yahoo News RSS (no API key needed)
+# Discover trending content via Yahoo News RSS + Brave dynamic queries
 _discover_trending_content_rss() {
+  local dynamic_queries="${1:-}"
   local categories=("top-picks" "domestic" "world" "business" "entertainment" "sports" "it" "science")
   local all_items=""
 
@@ -975,11 +1029,40 @@ except:
 
   log "Proactive engine: Yahoo News RSS collected ${total_count} items across ${#categories[@]} categories"
 
-  # Deduplicate by title
+  # Merge Brave Search results from dynamic queries (chat-context-specific articles)
+  local has_dynamic=false
+  if [[ -n "${dynamic_queries}" && "${dynamic_queries}" != "[]" ]]; then
+    local dq_count
+    dq_count=$(echo "${dynamic_queries}" | jq 'length' 2>/dev/null || echo 0)
+    if [[ ${dq_count} -gt 0 ]]; then
+      log "Proactive engine: Searching Brave for ${dq_count} dynamic queries to expand content pool..."
+      local brave_items
+      brave_items=$(_search_brave_for_queries "${dynamic_queries}")
+      if [[ -n "${brave_items}" && "${brave_items}" != "[]" ]]; then
+        all_items=$(echo "${all_items}" "${brave_items}" | jq -s 'add' 2>/dev/null)
+        local brave_count
+        brave_count=$(echo "${brave_items}" | jq 'length' 2>/dev/null || echo 0)
+        log "Proactive engine: Merged ${brave_count} Brave Search results into content pool"
+        has_dynamic=true
+      fi
+    fi
+  fi
+
+  # Deduplicate by title (normalize whitespace for comparison)
   all_items=$(echo "${all_items}" | jq '[group_by(.title)[] | first]' 2>/dev/null)
 
+  local deduped_count
+  deduped_count=$(echo "${all_items}" | jq 'length' 2>/dev/null || echo 0)
+  log "Proactive engine: Content pool after dedup: ${deduped_count} items"
+
+  # Select more items when dynamic queries expanded the pool (more options for per-chat differentiation)
+  local select_count=10
+  if [[ "${has_dynamic}" == "true" ]]; then
+    select_count=15
+  fi
+
   # Use LLM to curate and add summaries
-  local prompt="あなたはニュースキュレーターです。以下のYahoo Newsの記事一覧から、最も興味深く価値のある記事を**必ず10件**選んでください。10件に満たない場合でもできるだけ多く選んでください（最低8件）。
+  local prompt="あなたはニュースキュレーターです。以下の記事一覧から、最も興味深く価値のある記事を**必ず${select_count}件**選んでください。${select_count}件に満たない場合でもできるだけ多く選んでください（最低8件）。
 
 ## 記事一覧
 ${all_items}
@@ -992,6 +1075,7 @@ ${all_items}
 - 重複する話題は最も情報量の多いものを1つだけ選択
 - **多様なジャンルの記事を幅広く選定すること**
 - 異なるカテゴリ（例：経済、健康、文化、スポーツ、科学、政治、エンタメ等）から満遍なく選ぶこと
+- category が \"context\" の記事はチャットの会話コンテキストから検索されたものなので、積極的に含めること
 
 ## 重要
 - **urlフィールドは記事一覧に含まれるURLをそのまま使用すること（絶対に変更・省略しない）**
