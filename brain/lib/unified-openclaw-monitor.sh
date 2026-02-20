@@ -362,8 +362,38 @@ check_unified_openclaw_monitor() {
     ls -1t "${UNIFIED_REPORTS_DIR}"/report_*.json | tail -n +101 | xargs rm -f
   fi
 
-  # Update state
+  # Auto-resolve alerts: if a violation type was detected last check but not this check, resolve it
+  local current_violation_types="[]"
+  if [[ ${all_violations} -gt 0 ]]; then
+    current_violation_types=$(echo "${all_entries}" | jq -c '[.[].type] | unique' 2>/dev/null || echo "[]")
+  fi
+  local prev_violation_types="[]"
+  if [[ -f "${UNIFIED_STATE_FILE}" ]]; then
+    prev_violation_types=$(jq -c '.active_violation_types // []' "${UNIFIED_STATE_FILE}" 2>/dev/null || echo "[]")
+  fi
+  # Find types that were active last check but not this check → auto-resolve
+  local resolved_types
+  resolved_types=$(jq -n --argjson prev "${prev_violation_types}" --argjson curr "${current_violation_types}" \
+    '[$prev[] | select(. as $t | $curr | index($t) | not)]' 2>/dev/null || echo "[]")
+  local resolved_count
+  resolved_count=$(echo "${resolved_types}" | jq 'length' 2>/dev/null || echo 0)
+  if [[ ${resolved_count} -gt 0 ]]; then
+    local resolved_list
+    resolved_list=$(echo "${resolved_types}" | jq -r '.[]' 2>/dev/null)
+    log "Unified monitor: Auto-resolving ${resolved_count} violation types no longer detected: ${resolved_list}"
+    # shellcheck disable=SC2086
+    _unified_resolve_alerts ${resolved_list}
+  fi
+
+  # Update state (include active violation types for next check comparison)
   _unified_update_state "${now_epoch}" "${status}" "${msg_count}"
+  # Persist current violation types to state
+  if [[ -f "${UNIFIED_STATE_FILE}" ]]; then
+    local tmp_vt
+    tmp_vt=$(mktemp)
+    jq --argjson vt "${current_violation_types}" '.active_violation_types = $vt' \
+       "${UNIFIED_STATE_FILE}" > "${tmp_vt}" && mv "${tmp_vt}" "${UNIFIED_STATE_FILE}"
+  fi
 
   # kansai_violation フラグを更新（次回チェック時のエスカレーション判定用）
   if [[ -f "${UNIFIED_STATE_FILE}" ]]; then
