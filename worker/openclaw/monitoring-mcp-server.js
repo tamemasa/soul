@@ -135,13 +135,13 @@ async function main() {
       {
         name: "get_system_status",
         description:
-          "現在のシステム監視ステータスを取得する。ヘルスチェック結果、コンプライアンススコア等を含む。",
+          "現在のシステム監視ステータスを取得する。ヘルスチェック結果、コンプライアンススコア等を含む。【バディモード専用】オーナー確認済みの場合のみ使用すること。",
         inputSchema: { type: "object", properties: {} },
       },
       {
         name: "list_alerts",
         description:
-          "アラート一覧を取得する。severity/resolved でフィルタ可能。",
+          "アラート一覧を取得する。severity/resolved でフィルタ可能。【バディモード専用】オーナー確認済みの場合のみ使用すること。",
         inputSchema: {
           type: "object",
           properties: {
@@ -163,7 +163,7 @@ async function main() {
       },
       {
         name: "get_alert_detail",
-        description: "特定のアラートIDの詳細情報を取得する。",
+        description: "特定のアラートIDの詳細情報を取得する。【バディモード専用】オーナー確認済みの場合のみ使用すること。",
         inputSchema: {
           type: "object",
           properties: {
@@ -178,7 +178,7 @@ async function main() {
       {
         name: "get_latest_report",
         description:
-          "最新の監視レポートを取得する。違反詳細、コンプライアンス分析等を含む。",
+          "最新の監視レポートを取得する。違反詳細、コンプライアンス分析等を含む。【バディモード専用】オーナー確認済みの場合のみ使用すること。",
         inputSchema: { type: "object", properties: {} },
       },
     ],

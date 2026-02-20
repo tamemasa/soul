@@ -32,8 +32,8 @@ COPY gcal-sync.js /app/gcal-sync.js
 COPY monitoring-mcp-server.js /app/monitoring-mcp-server.js
 RUN chmod +x /app/entrypoint.sh /app/network-restrict.sh /app/suggest.sh /app/write-approval.sh /app/command-watcher.sh /app/research-request.sh /app/check-research-result.sh /app/patch-line-restrictions.sh
 
-# Install jq for JSON handling in suggest.sh
-RUN apt-get update && apt-get install -y --no-install-recommends jq \
+# Install jq and lsof (required by openclaw gateway --force)
+RUN apt-get update && apt-get install -y --no-install-recommends jq lsof \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copy Masaru personality files
