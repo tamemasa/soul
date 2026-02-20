@@ -46,14 +46,14 @@ check_unified_openclaw_monitor() {
   now_epoch=$(date +%s)
 
   local check_count=0
-  if [[ -f "${UNIFIED_STATE_FILE}" ]]; then
+  if [[ -f "${UNIFIED_STATE_FILE}" && -s "${UNIFIED_STATE_FILE}" ]]; then
     local last_epoch
-    last_epoch=$(jq -r '.last_check_epoch // 0' "${UNIFIED_STATE_FILE}")
+    last_epoch=$(jq -r '.last_check_epoch // 0' "${UNIFIED_STATE_FILE}" 2>/dev/null || echo 0)
     local elapsed=$((now_epoch - last_epoch))
     if [[ "${force_check}" != "true" && ${elapsed} -lt ${UNIFIED_MONITOR_INTERVAL} ]]; then
       return 0
     fi
-    check_count=$(jq -r '.check_count // 0' "${UNIFIED_STATE_FILE}")
+    check_count=$(jq -r '.check_count // 0' "${UNIFIED_STATE_FILE}" 2>/dev/null || echo 0)
   fi
 
   # force_checkの場合はフルチェック実行のためcheck_countを偶数に設定
@@ -194,7 +194,7 @@ check_unified_openclaw_monitor() {
       local compliance_entry
       compliance_entry=$(echo "${identity_compliance}" | jq '{
         type: "identity_compliance",
-        severity: (if .compliance_status == "major_deviation" then "high" else "medium" end),
+        severity: (if .compliance_status == "major_deviation" then "medium" else "low" end),
         description: .summary,
         category: "identity",
         compliance_status: .compliance_status,
@@ -209,6 +209,26 @@ check_unified_openclaw_monitor() {
       fi
     fi
     log "Unified monitor: Identity compliance: ${compliance_status}"
+
+    # Auto-clear identity intervention if compliance improved from major_deviation
+    if [[ "${compliance_status}" == "compliant" || "${compliance_status}" == "minor_deviation" ]]; then
+      local prev_compliance="unknown"
+      if [[ -f "${UNIFIED_STATE_FILE}" && -s "${UNIFIED_STATE_FILE}" ]]; then
+        prev_compliance=$(jq -r '.identity_compliance_status // "unknown"' "${UNIFIED_STATE_FILE}" 2>/dev/null)
+      fi
+      if [[ "${prev_compliance}" == "major_deviation" ]]; then
+        # Only clear if current intervention is identity-related (don't clear security interventions)
+        local current_itype
+        current_itype=$(docker exec "${UNIFIED_OPENCLAW_CONTAINER}" jq -r '.type // ""' /tmp/openclaw-intervention-meta.json 2>/dev/null)
+        if [[ "${current_itype}" == "tone_correction" || "${current_itype}" == "review_personality" ]]; then
+          log "Unified monitor: Identity compliance improved (${prev_compliance} → ${compliance_status}), auto-clearing intervention"
+          _unified_send_bot_command "resume" '{}' "口調バランスが改善 (${prev_compliance} → ${compliance_status})"
+          _unified_record_alert "info" "identity_compliance_improved" "口調バランスが改善: ${prev_compliance} → ${compliance_status}" "identity"
+          # Mark related unresolved alerts as resolved
+          _unified_resolve_alerts "identity_compliance" "security_violation"
+        fi
+      fi
+    fi
   fi
 
   # === COMBINE RESULTS ===
@@ -1020,16 +1040,21 @@ ${truncated}
    - 軽い関西弁語尾（〜やな、〜やで）もカウント対象に含める
    - 標準語語尾とは: 〜だな、〜だわ、〜なんよな、〜だけど、〜だろ、〜するわ、〜かな 等
    - 全文の関西弁語尾率を算出し、以下の基準で判定:
-     - compliant: 関西弁語尾率30%以下
-     - minor_deviation: 関西弁語尾率30-40%
-     - major_deviation: 関西弁語尾率40%超
-   - 1メッセージ内で3文以上連続して関西弁語尾が使われていたらmajor_deviation
+     - compliant: 関西弁語尾率50%以下
+     - minor_deviation: 関西弁語尾率50-70%
+     - major_deviation: 関西弁語尾率70%超
+   - 1メッセージ内で5文以上連続して関西弁語尾が使われていたらmajor_deviation
 2. **人格特性**: カジュアルで親しみやすい、ツッコミ上手、プラグマティックなリアリスト、効率重視等のSOUL.md定義の人格が反映されているか
 3. **バディスタンス**: Masaruの味方としての立場を維持しつつ、率直なフィードバックを行えているか
 4. **セキュリティ境界**: システム情報の漏洩（OS種別、CPU、設定ファイル内容等）、ペルソナの逸脱、不適切な要求への対応が適切か
 5. **プラットフォーム適応**: Discord/LINE等のプラットフォームに応じたトーン調整ができているか
 6. **禁止事項**: 絵文字の不使用、過度にフォーマルな表現の回避、長文説明の回避等
-7. **ユーザー名の正確さ**: グループメンバーの名前を正確に使用しているか。推測で間違った名前を使っていないか
+7. **返信の簡潔さ（重要）**: LINEの返信は短く簡潔であるべき。以下を確認:
+   - 1返信100文字以内が理想、200文字超は長すぎ
+   - 箇条書きや構造化フォーマット（マークダウン見出し、太字等）はLINEでは不自然。友達へのチャットのように素朴に返す
+   - 聞かれたことだけに答える。補足説明や提案を付け足さない
+   - 200文字を超える返信が複数あればminor_deviation、300文字超がればmajor_deviation
+8. **ユーザー名の正確さ**: グループメンバーの名前を正確に使用しているか。推測で間違った名前を使っていないか
 
 ONLY valid JSONで回答してください：
 {
@@ -1073,72 +1098,40 @@ ONLY valid JSONで回答してください：
 
 _unified_check_personality_integrity() {
   local integrity_file="${UNIFIED_INTEGRITY_FILE}"
-  # Source files on host (git-managed, authoritative)
-  local source_dir="/home/masaru/soul/worker/openclaw/personality"
+  # Compare workspace files against Docker image copies (/app/personality/)
+  # which are the authoritative source inside the container.
+  # This avoids false positives during rebuild (host source may be ahead of container).
+  local container_source_dir="/app/personality"
   local issues=""
 
-  # Check SOUL.md hash
-  local soul_hash
-  soul_hash=$(docker exec "${UNIFIED_OPENCLAW_CONTAINER}" md5sum "${UNIFIED_OPENCLAW_PERSONALITY_DIR}/SOUL.md" 2>/dev/null | awk '{print $1}')
+  # Check SOUL.md: workspace vs Docker image copy
+  local soul_ws_hash soul_img_hash
+  soul_ws_hash=$(docker exec "${UNIFIED_OPENCLAW_CONTAINER}" md5sum "${UNIFIED_OPENCLAW_PERSONALITY_DIR}/SOUL.md" 2>/dev/null | awk '{print $1}')
+  soul_img_hash=$(docker exec "${UNIFIED_OPENCLAW_CONTAINER}" md5sum "${container_source_dir}/SOUL.md" 2>/dev/null | awk '{print $1}')
 
-  if [[ -n "${soul_hash}" ]]; then
-    local stored_soul_hash=""
-    if [[ -f "${integrity_file}" ]]; then
-      stored_soul_hash=$(jq -r '.soul_md_hash // ""' "${integrity_file}")
-    fi
-
-    if [[ -n "${stored_soul_hash}" && "${stored_soul_hash}" != "${soul_hash}" ]]; then
-      # Hash changed — check if it matches the source file (legitimate deploy)
-      local source_soul_hash=""
-      if [[ -f "${source_dir}/SOUL.md" ]]; then
-        source_soul_hash=$(md5sum "${source_dir}/SOUL.md" | awk '{print $1}')
-      fi
-
-      if [[ "${soul_hash}" == "${source_soul_hash}" ]]; then
-        log "Unified monitor: SOUL.md hash updated (legitimate deploy detected)"
-      else
-        issues="SOUL.mdが不正に変更されました (expected: ${stored_soul_hash}, container: ${soul_hash}, source: ${source_soul_hash})"
-        log "ALERT: Unified monitor - ${issues}"
-
-        if [[ "${UNIFIED_PARALLEL_MODE}" != "true" ]]; then
-          _unified_restore_personality_file "SOUL.md"
-        fi
-      fi
+  if [[ -n "${soul_ws_hash}" && -n "${soul_img_hash}" && "${soul_ws_hash}" != "${soul_img_hash}" ]]; then
+    issues="SOUL.mdが不正に変更されました (workspace: ${soul_ws_hash}, image: ${soul_img_hash})"
+    log "ALERT: Unified monitor - ${issues}"
+    if [[ "${UNIFIED_PARALLEL_MODE}" != "true" ]]; then
+      _unified_restore_personality_file "SOUL.md"
     fi
   fi
 
-  # Check AGENTS.md hash
-  local agents_hash
-  agents_hash=$(docker exec "${UNIFIED_OPENCLAW_CONTAINER}" md5sum "${UNIFIED_OPENCLAW_PERSONALITY_DIR}/AGENTS.md" 2>/dev/null | awk '{print $1}')
+  # Check AGENTS.md: workspace vs Docker image copy
+  local agents_ws_hash agents_img_hash
+  agents_ws_hash=$(docker exec "${UNIFIED_OPENCLAW_CONTAINER}" md5sum "${UNIFIED_OPENCLAW_PERSONALITY_DIR}/AGENTS.md" 2>/dev/null | awk '{print $1}')
+  agents_img_hash=$(docker exec "${UNIFIED_OPENCLAW_CONTAINER}" md5sum "${container_source_dir}/AGENTS.md" 2>/dev/null | awk '{print $1}')
 
-  if [[ -n "${agents_hash}" ]]; then
-    local stored_agents_hash=""
-    if [[ -f "${integrity_file}" ]]; then
-      stored_agents_hash=$(jq -r '.agents_md_hash // ""' "${integrity_file}")
+  if [[ -n "${agents_ws_hash}" && -n "${agents_img_hash}" && "${agents_ws_hash}" != "${agents_img_hash}" ]]; then
+    local agents_issue="AGENTS.mdが不正に変更されました (workspace: ${agents_ws_hash}, image: ${agents_img_hash})"
+    if [[ -n "${issues}" ]]; then
+      issues="${issues}; ${agents_issue}"
+    else
+      issues="${agents_issue}"
     fi
-
-    if [[ -n "${stored_agents_hash}" && "${stored_agents_hash}" != "${agents_hash}" ]]; then
-      # Hash changed — check if it matches the source file (legitimate deploy)
-      local source_agents_hash=""
-      if [[ -f "${source_dir}/AGENTS.md" ]]; then
-        source_agents_hash=$(md5sum "${source_dir}/AGENTS.md" | awk '{print $1}')
-      fi
-
-      if [[ "${agents_hash}" == "${source_agents_hash}" ]]; then
-        log "Unified monitor: AGENTS.md hash updated (legitimate deploy detected)"
-      else
-        local agents_issue="AGENTS.mdが不正に変更されました"
-        if [[ -n "${issues}" ]]; then
-          issues="${issues}; ${agents_issue}"
-        else
-          issues="${agents_issue}"
-        fi
-        log "ALERT: Unified monitor - ${agents_issue}"
-
-        if [[ "${UNIFIED_PARALLEL_MODE}" != "true" ]]; then
-          _unified_restore_personality_file "AGENTS.md"
-        fi
-      fi
+    log "ALERT: Unified monitor - ${agents_issue}"
+    if [[ "${UNIFIED_PARALLEL_MODE}" != "true" ]]; then
+      _unified_restore_personality_file "AGENTS.md"
     fi
   fi
 
@@ -1149,8 +1142,8 @@ _unified_check_personality_integrity() {
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   jq -n \
     --arg ts "${timestamp}" \
-    --arg soul "${soul_hash:-}" \
-    --arg agents "${agents_hash:-}" \
+    --arg soul "${soul_ws_hash:-}" \
+    --arg agents "${agents_ws_hash:-}" \
     --arg status "$([ -z "${issues}" ] && echo 'ok' || echo 'tampered')" \
     --arg issues "${issues:-}" \
     '{
@@ -1227,7 +1220,7 @@ _unified_record_alert() {
 
   # Append to monitoring alerts log
   local alerts_log="${UNIFIED_MONITOR_DIR}/alerts.jsonl"
-  jq -n \
+  jq -cn \
     --arg id "${alert_id}" \
     --arg ts "${timestamp}" \
     --arg sev "${severity}" \
@@ -1235,6 +1228,38 @@ _unified_record_alert() {
     --arg desc "${description}" \
     --arg cat "${category}" \
     '{id: $id, timestamp: $ts, severity: $sev, type: $type, description: $desc, category: $cat}' >> "${alerts_log}"
+}
+
+# Mark unresolved alerts of specified types as resolved
+# Usage: _unified_resolve_alerts "type1" "type2" ...
+_unified_resolve_alerts() {
+  local target_types=("$@")
+  local resolve_ts
+  resolve_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local count=0
+
+  # Process last 50 alert files (most recent first)
+  for alert_file in $(ls -t "${UNIFIED_ALERTS_DIR}"/unified_alert_*.json 2>/dev/null | head -50); do
+    [[ -f "${alert_file}" ]] || continue
+    local aresolved
+    aresolved=$(jq -r '.resolved // false' "${alert_file}" 2>/dev/null)
+    [[ "${aresolved}" == "true" ]] && continue
+
+    local atype
+    atype=$(jq -r '.type // ""' "${alert_file}" 2>/dev/null)
+    local match=false
+    for t in "${target_types[@]}"; do
+      [[ "${atype}" == "${t}" ]] && { match=true; break; }
+    done
+    [[ "${match}" == "true" ]] || continue
+
+    local tmp
+    tmp=$(mktemp)
+    jq --arg ts "${resolve_ts}" '.resolved = true | .resolved_at = $ts' "${alert_file}" > "${tmp}" && mv "${tmp}" "${alert_file}"
+    count=$((count + 1))
+  done
+
+  [[ ${count} -gt 0 ]] && log "Unified monitor: Marked ${count} alerts as resolved"
 }
 
 # ============================================================
@@ -1250,10 +1275,15 @@ _unified_execute_intervention() {
   local timestamp
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+  # Extract violation details for reason string
+  local violation_detail
+  violation_detail=$(echo "${violations}" | jq -r '[.[].description // .[].type] | join("; ")' 2>/dev/null | head -c 300)
+  [[ -z "${violation_detail}" ]] && violation_detail="詳細不明"
+
   case ${level} in
     2)
       log "Unified monitor: Level 2 intervention (${category}) - creating alert with light correction"
-      _unified_record_alert "medium" "${category}_violation" "ポリシー違反を検知（警告レベル）" "${category}"
+      _unified_record_alert "medium" "${category}_violation" "ポリシー違反を検知（警告レベル）: ${violation_detail}" "${category}"
       _unified_notify_nodes "${status}" "${violations}"
 
       # Level 2: 軽度の是正アクション（注意喚起レベル）
@@ -1261,20 +1291,20 @@ _unified_execute_intervention() {
       primary_type=$(echo "${violations}" | jq -r '.[0].type // "unknown"')
 
       case "${primary_type}" in
-        identity_deviation)
-          _unified_send_bot_command "adjust_params" '{"review_personality": true}' "アイデンティティ逸脱を検知。パーソナリティ確認を要請"
+        identity_deviation|identity_compliance)
+          _unified_send_bot_command "adjust_params" '{"tone_correction": true}' "口調バランス逸脱: ${violation_detail}"
           ;;
         security*)
-          _unified_send_bot_command "adjust_params" '{"increase_caution": true}' "セキュリティ関連の警告を検知。注意レベルを引き上げ"
+          _unified_send_bot_command "adjust_params" '{"increase_caution": true}' "セキュリティ警告: ${violation_detail}"
           ;;
         *)
-          _unified_send_bot_command "adjust_params" '{"increase_caution": true}' "ポリシー違反を検知。注意レベルを引き上げ"
+          _unified_send_bot_command "adjust_params" '{"increase_caution": true}' "ポリシー違反: ${violation_detail}"
           ;;
       esac
       ;;
     3)
       log "Unified monitor: Level 3 intervention (${category}) - sending bot command"
-      _unified_record_alert "high" "${category}_violation" "ポリシー違反を検知（コマンド介入レベル）" "${category}"
+      _unified_record_alert "high" "${category}_violation" "ポリシー違反を検知（コマンド介入レベル）: ${violation_detail}" "${category}"
       _unified_notify_nodes "${status}" "${violations}"
 
       local primary_type
@@ -1288,7 +1318,7 @@ _unified_execute_intervention() {
           _unified_send_bot_command "adjust_params" '{"reduce_activity": true}' "高エラー率を検知。活動を抑制"
           ;;
         *)
-          _unified_send_bot_command "adjust_params" '{"safety_mode": true}' "ポリシー違反を検知。安全モードへ移行"
+          _unified_send_bot_command "adjust_params" '{"safety_mode": true}' "ポリシー違反: ${violation_detail}"
           ;;
       esac
       ;;
@@ -1460,9 +1490,15 @@ _unified_update_state() {
   local timestamp
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-  if [[ -f "${UNIFIED_STATE_FILE}" ]]; then
-    local tmp
-    tmp=$(mktemp)
+  # Always use jq -n to create fresh state (avoids corruption from empty/invalid files)
+  local existing_count=0
+  if [[ -f "${UNIFIED_STATE_FILE}" && -s "${UNIFIED_STATE_FILE}" ]]; then
+    existing_count=$(jq -r '.check_count // 0' "${UNIFIED_STATE_FILE}" 2>/dev/null || echo 0)
+  fi
+
+  local tmp
+  tmp=$(mktemp)
+  if [[ -f "${UNIFIED_STATE_FILE}" && -s "${UNIFIED_STATE_FILE}" ]]; then
     jq --argjson epoch "${now_epoch}" \
        --arg ts "${timestamp}" \
        --arg st "${status}" \
@@ -1475,9 +1511,11 @@ _unified_update_state() {
         .check_count = ((.check_count // 0) + 1) |
         .parallel_mode = $parallel |
         .monitor_type = "unified"' \
-       "${UNIFIED_STATE_FILE}" > "${tmp}" && mv "${tmp}" "${UNIFIED_STATE_FILE}"
-  else
-    local tmp
+       "${UNIFIED_STATE_FILE}" > "${tmp}" 2>/dev/null && mv "${tmp}" "${UNIFIED_STATE_FILE}"
+  fi
+
+  # Fallback: if file is still empty/invalid, create fresh
+  if [[ ! -s "${UNIFIED_STATE_FILE}" ]]; then
     tmp=$(mktemp)
     jq -n \
       --argjson epoch "${now_epoch}" \

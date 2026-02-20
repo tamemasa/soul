@@ -170,14 +170,14 @@ function renderMonitoringTab(state, summary, bySeverity, byCategory, pendingCoun
     </div>
 
     ${filteredAlerts.length > 0 ? filteredAlerts.map(a => `
-      <div class="card" style="border-left:3px solid ${severityColor(a.severity)}; margin-bottom:6px;">
+      <div class="card" style="border-left:3px solid ${a.resolved ? 'var(--success, #22c55e)' : severityColor(a.severity)}; margin-bottom:6px;${a.resolved ? ' opacity:0.65;' : ''}">
         <div class="card-header">
-          <span class="text-sm" style="color:${severityColor(a.severity)}; font-weight:600;">${(a.severity || 'info').toUpperCase()}</span>
+          <span class="text-sm" style="color:${a.resolved ? 'var(--success, #22c55e)' : severityColor(a.severity)}; font-weight:600;">${a.resolved ? '✓ 解決済み' : (a.severity || 'info').toUpperCase()}</span>
           <span class="badge badge-status">${escapeHtml(a.type || '')}</span>
           ${a.category ? `<span class="badge badge-status" style="opacity:0.7;">${a.category}</span>` : ''}
         </div>
         <div class="text-sm" style="margin:4px 0;">${escapeHtml(a.description || '')}</div>
-        <div class="text-sm text-dim">${formatTime(a.timestamp)}</div>
+        <div class="text-sm text-dim">${formatTime(a.timestamp)}${a.resolved_at ? ' → 解決: ' + formatTime(a.resolved_at) : ''}</div>
       </div>
     `).join('') : '<div class="empty-state">No alerts</div>'}
 

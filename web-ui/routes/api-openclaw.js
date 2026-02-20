@@ -64,6 +64,7 @@ module.exports = function (sharedDir) {
   router.get('/openclaw/alerts', async (req, res) => {
     const limit = parseInt(req.query.limit || '50', 10);
     const category = req.query.category || null; // filter: policy, security, integrity
+    const alertsDir = path.join(sharedDir, 'alerts');
     const content = await tailFile(path.join(monitorDir, 'alerts.jsonl'), limit * 2);
     let alerts = content.split('\n')
       .filter(l => l.trim())
@@ -75,7 +76,20 @@ module.exports = function (sharedDir) {
       alerts = alerts.filter(a => a.category === category);
     }
 
-    res.json(alerts.slice(0, limit));
+    // Enrich with resolved status from individual alert files
+    const sliced = alerts.slice(0, limit);
+    const enriched = await Promise.all(sliced.map(async (a) => {
+      if (a.id) {
+        const detail = await readJson(path.join(alertsDir, `${a.id}.json`));
+        if (detail) {
+          a.resolved = detail.resolved || false;
+          if (detail.resolved_at) a.resolved_at = detail.resolved_at;
+        }
+      }
+      return a;
+    }));
+
+    res.json(enriched);
   });
 
   // GET /api/openclaw/integrity - Personality integrity state
