@@ -179,9 +179,16 @@ _check_alert_notifications() {
     return 0
   fi
 
-  # Initialize state file
+  # Initialize state file — on first run, mark all existing alerts as already notified
+  # to avoid flooding Discord with historical alerts
   if [[ ! -f "${ALERT_NOTIFY_STATE}" ]]; then
-    echo '{"notified_ids":[],"resolved_ids":[]}' > "${ALERT_NOTIFY_STATE}"
+    local existing_ids
+    existing_ids=$(ls -t "${ALERTS_DIR}"/unified_alert_*.json 2>/dev/null | head -100 | while read -r f; do
+      jq -r '.id // empty' "$f" 2>/dev/null
+    done | jq -R . | jq -s .)
+    jq -n --argjson ids "${existing_ids:-[]}" '{"notified_ids": $ids, "resolved_ids": []}' > "${ALERT_NOTIFY_STATE}"
+    log "Proactive engine: Alert notify state initialized with $(echo "${existing_ids}" | jq 'length') existing alerts"
+    return 0
   fi
 
   local notified_ids resolved_ids
