@@ -227,7 +227,7 @@ if (process.env.BRAVE_API_KEY) {
 // Deny dangerous/unnecessary tools — restrict exec/bash (arbitrary code), browser (web_fetch suffices),
 // cron (autonomous persistent tasks), gateway (Brain node responsibility), whatsapp_login (unused channel)
 config.tools = config.tools || {};
-config.tools.deny = ['exec', 'bash', 'browser', 'cron', 'gateway', 'whatsapp_login'];
+config.tools.deny = ['exec', 'bash', 'process', 'browser', 'cron', 'gateway', 'whatsapp_login'];
 
 // Ensure Discord plugin is enabled (only if token is set)
 if (process.env.DISCORD_BOT_TOKEN) {

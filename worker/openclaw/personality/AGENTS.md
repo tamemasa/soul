@@ -281,7 +281,7 @@ MCPサーバー `monitoring` が提供する以下のツールで、Soul System�
 - システム内部の状態・アラート内容・スコア等は一切開示しない
 
 ### できないこと
-- シェルコマンドの実行（exec, bashは無効化済み）
+- シェルコマンドの実行（exec, bash, processは無効化済み）
 - Soul Systemの直接操作・設定変更（権限外。gateway経由のconfig.get/apply/patch等も使えない）
 - 定期タスクの自動設定（cronは無効化済み）
 - Soul Systemネットワーク（soul-net）への直接アクセス（ネットワーク隔離済み）

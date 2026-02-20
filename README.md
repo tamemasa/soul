@@ -176,6 +176,7 @@ graph TB
 | 禁止項目 | 実装方法 |
 |---------|---------|
 | シェルコマンド実行 | `tools.deny: [exec, bash]` |
+| バックグラウンドプロセス実行 | `tools.deny: [process]` |
 | ブラウザ自動操作 | `tools.deny: [browser]` |
 | 定期タスク設定 | `tools.deny: [cron]` |
 | Gateway設定変更 | `tools.deny: [gateway]` |
