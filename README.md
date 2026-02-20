@@ -148,6 +148,57 @@ graph TB
 | **OpenClaw Gateway** | `openclaw-gateway/proxy.js` | LINE Webhook前段プロキシ（バッファ/リプレイ）+ 公開ステータスページ配信 |
 | **Personality Files** | `personality/` | Masaru-kunの人格・話し方・行動ルールを定義（SOUL.md, IDENTITY.md, AGENTS.md） |
 
+### Botの能力と制限
+
+#### できること
+
+| カテゴリ | 能力 | 制限条件 |
+|---------|------|---------|
+| **メッセージング** | Discord全ギルド・DM・スレッド送受信、リアクション付与 | — |
+| **メッセージング** | LINE Reply応答、保留メッセージ自動配信 | Push API不可（Reply APIのみ） |
+| **Web検索** | Brave Search API (`web_search`) | LINE メインセッションでは不可 |
+| **Webページ取得** | URL指定でページ取得・解析 (`web_fetch`) | LINE メインセッションでは不可 |
+| **ファイル操作** | read/write/edit（ワークスペース内） | コンテナ外・システムファイルは不可 |
+| **画像解析** | 送信された画像の内容を分析・説明 | — |
+| **Canvas描画** | SVG/HTMLコンテンツの生成 | — |
+| **音声合成** | テキストを音声に変換 (TTS) | — |
+| **セッション管理** | サブエージェント起動・通信 (`sessions_spawn`) | — |
+| **メモリ** | Knowledge Graphへの記録・検索（MCP: memory） | — |
+| **思考** | 段階的推論（MCP: sequential-thinking） | — |
+| **監視データ参照** | システムステータス・アラート・レポート取得（MCP: monitoring） | **バディモード専用** |
+| **Soul System連携** | 提言送信（`suggest.sh`） | Masaruの事前承認必須 |
+| **Soul System連携** | 調査依頼送信（`research-request.sh`） | research/designのみ、承認不要 |
+| **Google Calendar** | iCal経由で予定参照 (`CALENDAR.md`) | — |
+| **Evolution** | Claude Opus昇格（「Masaru-kun進化！」） | オーナーID必須、30分限定 |
+
+#### できないこと
+
+| 禁止項目 | 実装方法 |
+|---------|---------|
+| シェルコマンド実行 | `tools.deny: [exec, bash]` |
+| ブラウザ自動操作 | `tools.deny: [browser]` |
+| 定期タスク設定 | `tools.deny: [cron]` |
+| Gateway設定変更 | `tools.deny: [gateway]` |
+| LINE Push送信 | ランタイムパッチで全6種のPush API関数をブロック |
+| LAN/プライベートネットワークアクセス | iptablesでRFC1918・リンクローカルをDROP |
+| Soul System内部ネットワーク通信 | Dockerネットワーク分離（`br-openclaw` vs `br-soul`） |
+| Discord モデレーション・ロール操作 | `actions: { moderation: false, roles: false }` |
+| プレゼンス変更 | `actions: { presence: false }` |
+| システム再起動・設定変更 | `/restart` 無効、`gateway` ツール禁止 |
+
+#### Brain → Bot 制御（HEARTBEAT.md介入）
+
+Brainノードは `bot-commands` 共有ボリューム経由で以下の制御を実行できる:
+
+| 介入タイプ | 効果 | 期間 |
+|-----------|------|------|
+| `pause` | 「メンテ中」メッセージのみ返す | 明示的解除まで |
+| `tone_correction` | 標準語/関西弁バランス修正 | 30分（自動解除） |
+| `review_personality` | SOUL.md準拠を強化 | 30分（自動解除） |
+| `increase_caution` | 個人情報・機密情報の制限強化 | 30分（自動解除） |
+| `safety_mode` | ツール使用を最小化 | 明示的解除まで |
+| `reduce_activity` | 応答を簡潔化 | 30分（自動解除） |
+
 ### Google Calendar連携
 
 OpenClawがGoogleカレンダーの予定を取得できる機能。iCal秘密URL方式を採用し、GCPプロジェクトやOAuth2は不要。
