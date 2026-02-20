@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install OpenClaw and mcporter globally
-RUN npm install -g openclaw@latest mcporter
+# Install OpenClaw, mcporter, and MCP SDK globally
+RUN npm install -g openclaw@latest mcporter @modelcontextprotocol/sdk
 
 # Create non-root user
 RUN groupadd -r openclaw && useradd -r -g openclaw -m -d /home/openclaw -s /bin/bash openclaw
@@ -29,6 +29,7 @@ COPY research-request.sh /app/research-request.sh
 COPY check-research-result.sh /app/check-research-result.sh
 COPY patch-line-restrictions.sh /app/patch-line-restrictions.sh
 COPY gcal-sync.js /app/gcal-sync.js
+COPY monitoring-mcp-server.js /app/monitoring-mcp-server.js
 RUN chmod +x /app/entrypoint.sh /app/network-restrict.sh /app/suggest.sh /app/write-approval.sh /app/command-watcher.sh /app/research-request.sh /app/check-research-result.sh /app/patch-line-restrictions.sh
 
 # Install jq for JSON handling in suggest.sh
@@ -42,5 +43,6 @@ COPY personality/AGENTS.md /app/personality/AGENTS.md
 
 # Start as root so we can apply iptables rules, then drop to openclaw via gosu
 ENV HOME=/home/openclaw
+ENV NODE_PATH=/usr/local/lib/node_modules
 
 ENTRYPOINT ["/app/entrypoint.sh"]

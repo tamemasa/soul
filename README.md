@@ -297,6 +297,22 @@ LLMによるアイデンティティ準拠チェック:
 | **Level 3** (介入) | high severity | Level 2 + botを一時停止（pause 5分）またはセーフティモード有効化 |
 | **Level 4** (緊急) | critical severity | pending_actionを作成し人間の承認を待機 → 承認後にコンテナ再起動 |
 
+#### Discordアラート通知
+
+medium以上のアラートをDiscord専用チャンネルにEmbed形式でリアルタイム通知する。Triceratopsの`proactive-suggestions`エンジン内で60秒間隔でチェックし、未通知のアラートを検出次第送信する。
+
+- **severity色**: critical=暗赤、high=赤、medium=黄
+- **解決通知**: 通知済みアラートがresolvedになった場合、緑色のEmbedで解決を通知
+- **会話対応**: OpenClawが同チャンネル内のメッセージに応答し、MCPツール（`monitoring`サーバー）で監視データを直接参照・分析可能
+
+MCPツール:
+| ツール | 説明 |
+|--------|------|
+| `get_system_status` | 現在の監視ステータス（latest.json） |
+| `list_alerts` | アラート一覧（severity/resolved フィルタ対応） |
+| `get_alert_detail` | 特定アラートの詳細 |
+| `get_latest_report` | 最新の監視レポート |
+
 #### 監視データの出力先
 
 ```

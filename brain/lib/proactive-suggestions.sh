@@ -15,11 +15,246 @@ PROACTIVE_DRYRUN_DIR="${PROACTIVE_DIR}/dryrun"
 PROACTIVE_SUGGESTIONS_DIR="${PROACTIVE_DIR}/suggestions"
 PROACTIVE_BROADCAST_DIR="${PROACTIVE_DIR}/broadcasts"
 
+# Alert notification state
+ALERT_NOTIFY_STATE="${PROACTIVE_DIR}/alert_notify_state.json"
+ALERTS_DIR="${SHARED_DIR}/alerts"
+
 # Check interval: every 60 seconds (self-throttled within daemon's 10s loop)
 PROACTIVE_CHECK_INTERVAL=60
 
 # JST offset in seconds (+9 hours)
 JST_OFFSET=32400
+
+# ---- Alert Notification Functions ----
+
+_send_discord_alert_embed() {
+  local alert_json="$1"
+  local channel_id="${DISCORD_ALERT_CHANNEL_ID:-}"
+  local bot_token="${DISCORD_BOT_TOKEN:-}"
+
+  if [[ -z "${channel_id}" || -z "${bot_token}" ]]; then
+    return 1
+  fi
+
+  local severity description category alert_id created_at alert_type
+  severity=$(echo "${alert_json}" | jq -r '.severity // "medium"')
+  description=$(echo "${alert_json}" | jq -r '.description // "No description"')
+  category=$(echo "${alert_json}" | jq -r '.category // "unknown"')
+  alert_id=$(echo "${alert_json}" | jq -r '.id // "unknown"')
+  created_at=$(echo "${alert_json}" | jq -r '.created_at // ""')
+  alert_type=$(echo "${alert_json}" | jq -r '.type // "unknown"')
+
+  # Severity color mapping
+  local color
+  case "${severity}" in
+    critical) color=2829099 ;;   # dark red
+    high)     color=15548997 ;;  # red
+    medium)   color=16776960 ;;  # yellow
+    *)        color=8421504 ;;   # gray
+  esac
+
+  # Severity emoji
+  local severity_label
+  case "${severity}" in
+    critical) severity_label="CRITICAL" ;;
+    high)     severity_label="HIGH" ;;
+    medium)   severity_label="MEDIUM" ;;
+    *)        severity_label="${severity}" ;;
+  esac
+
+  # Truncate description for embed
+  if [[ ${#description} -gt 1024 ]]; then
+    description="${description:0:1021}..."
+  fi
+
+  local payload
+  payload=$(jq -n \
+    --argjson color "${color}" \
+    --arg title "[${severity_label}] ${alert_type}" \
+    --arg desc "${description}" \
+    --arg cat "${category}" \
+    --arg sev "${severity_label}" \
+    --arg footer "Soul Unified Monitor" \
+    --arg ts "${created_at}" \
+    --arg aid "${alert_id}" \
+    '{
+      embeds: [{
+        title: $title,
+        description: $desc,
+        color: $color,
+        fields: [
+          { name: "Category", value: $cat, inline: true },
+          { name: "Severity", value: $sev, inline: true }
+        ],
+        footer: { text: ("\($footer) | \($aid)") },
+        timestamp: $ts
+      }]
+    }')
+
+  local http_code response_body
+  response_body=$(mktemp)
+  http_code=$(curl -s -o "${response_body}" -w "%{http_code}" \
+    -H "Authorization: Bot ${bot_token}" \
+    -H "Content-Type: application/json" \
+    -d "${payload}" \
+    "https://discord.com/api/v10/channels/${channel_id}/messages" 2>/dev/null) || {
+    rm -f "${response_body}"
+    return 1
+  }
+
+  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
+    log "Proactive engine: Alert embed sent to Discord (${alert_id}, severity=${severity})"
+    rm -f "${response_body}"
+    return 0
+  else
+    log "ERROR: Proactive engine: Discord alert embed failed (HTTP ${http_code})"
+    rm -f "${response_body}"
+    return 1
+  fi
+}
+
+_send_discord_resolved_embed() {
+  local alert_json="$1"
+  local channel_id="${DISCORD_ALERT_CHANNEL_ID:-}"
+  local bot_token="${DISCORD_BOT_TOKEN:-}"
+
+  if [[ -z "${channel_id}" || -z "${bot_token}" ]]; then
+    return 1
+  fi
+
+  local alert_id alert_type description resolved_at
+  alert_id=$(echo "${alert_json}" | jq -r '.id // "unknown"')
+  alert_type=$(echo "${alert_json}" | jq -r '.type // "unknown"')
+  description=$(echo "${alert_json}" | jq -r '.description // ""')
+  resolved_at=$(echo "${alert_json}" | jq -r '.resolved_at // ""')
+
+  if [[ ${#description} -gt 512 ]]; then
+    description="${description:0:509}..."
+  fi
+
+  local payload
+  payload=$(jq -n \
+    --arg title "[RESOLVED] ${alert_type}" \
+    --arg desc "${description}" \
+    --arg footer "Soul Unified Monitor | ${alert_id}" \
+    --arg ts "${resolved_at}" \
+    '{
+      embeds: [{
+        title: $title,
+        description: $desc,
+        color: 5763719,
+        footer: { text: $footer },
+        timestamp: $ts
+      }]
+    }')
+
+  local http_code response_body
+  response_body=$(mktemp)
+  http_code=$(curl -s -o "${response_body}" -w "%{http_code}" \
+    -H "Authorization: Bot ${bot_token}" \
+    -H "Content-Type: application/json" \
+    -d "${payload}" \
+    "https://discord.com/api/v10/channels/${channel_id}/messages" 2>/dev/null) || {
+    rm -f "${response_body}"
+    return 1
+  }
+
+  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
+    log "Proactive engine: Resolved embed sent to Discord (${alert_id})"
+    rm -f "${response_body}"
+    return 0
+  else
+    log "ERROR: Proactive engine: Discord resolved embed failed (HTTP ${http_code})"
+    rm -f "${response_body}"
+    return 1
+  fi
+}
+
+_check_alert_notifications() {
+  local channel_id="${DISCORD_ALERT_CHANNEL_ID:-}"
+  local bot_token="${DISCORD_BOT_TOKEN:-}"
+
+  # Skip if not configured
+  if [[ -z "${channel_id}" || -z "${bot_token}" ]]; then
+    return 0
+  fi
+
+  # Initialize state file
+  if [[ ! -f "${ALERT_NOTIFY_STATE}" ]]; then
+    echo '{"notified_ids":[],"resolved_ids":[]}' > "${ALERT_NOTIFY_STATE}"
+  fi
+
+  local notified_ids resolved_ids
+  notified_ids=$(jq -r '.notified_ids // []' "${ALERT_NOTIFY_STATE}")
+  resolved_ids=$(jq -r '.resolved_ids // []' "${ALERT_NOTIFY_STATE}")
+
+  # Scan recent alert files (newest 20)
+  local alert_files
+  alert_files=$(ls -t "${ALERTS_DIR}"/unified_alert_*.json 2>/dev/null | head -20)
+
+  if [[ -z "${alert_files}" ]]; then
+    return 0
+  fi
+
+  local new_notified_ids=()
+  local new_resolved_ids=()
+
+  while IFS= read -r alert_file; do
+    [[ -f "${alert_file}" ]] || continue
+
+    local alert_json alert_id severity resolved
+    alert_json=$(cat "${alert_file}" 2>/dev/null) || continue
+    alert_id=$(echo "${alert_json}" | jq -r '.id // ""')
+    severity=$(echo "${alert_json}" | jq -r '.severity // "low"')
+    resolved=$(echo "${alert_json}" | jq -r '.resolved // false')
+
+    [[ -n "${alert_id}" ]] || continue
+
+    # Check if already notified
+    local is_notified
+    is_notified=$(echo "${notified_ids}" | jq --arg id "${alert_id}" 'any(. == $id)')
+
+    if [[ "${is_notified}" != "true" ]]; then
+      # New alert: notify if medium or above
+      case "${severity}" in
+        critical|high|medium)
+          if _send_discord_alert_embed "${alert_json}"; then
+            new_notified_ids+=("${alert_id}")
+          fi
+          # Rate limit: small delay between sends
+          sleep 0.5
+          ;;
+      esac
+    else
+      # Already notified: check if resolved
+      local is_resolved_notified
+      is_resolved_notified=$(echo "${resolved_ids}" | jq --arg id "${alert_id}" 'any(. == $id)')
+
+      if [[ "${resolved}" == "true" && "${is_resolved_notified}" != "true" ]]; then
+        if _send_discord_resolved_embed "${alert_json}"; then
+          new_resolved_ids+=("${alert_id}")
+        fi
+        sleep 0.5
+      fi
+    fi
+  done <<< "${alert_files}"
+
+  # Update state file with new IDs (keep latest 100)
+  if [[ ${#new_notified_ids[@]} -gt 0 || ${#new_resolved_ids[@]} -gt 0 ]]; then
+    local add_notified add_resolved
+    add_notified=$(printf '%s\n' "${new_notified_ids[@]}" | jq -R . | jq -s .)
+    add_resolved=$(printf '%s\n' "${new_resolved_ids[@]}" | jq -R . | jq -s .)
+
+    local tmp
+    tmp=$(mktemp)
+    jq --argjson nn "${add_notified:-[]}" --argjson nr "${add_resolved:-[]}" '
+      .notified_ids = ((.notified_ids + $nn) | .[-100:]) |
+      .resolved_ids = ((.resolved_ids + $nr) | .[-100:])
+    ' "${ALERT_NOTIFY_STATE}" > "${tmp}" && mv "${tmp}" "${ALERT_NOTIFY_STATE}"
+
+    log "Proactive engine: Alert notifications sent (new=${#new_notified_ids[@]}, resolved=${#new_resolved_ids[@]})"
+  fi
+}
 
 # ---- Initialization ----
 
@@ -2521,6 +2756,8 @@ check_proactive_suggestions() {
           _notify_ondemand_cooldown "${req_target_id}" "${req_platform}"
         fi
       fi
+      # Check alert notifications even during throttle
+      _check_alert_notifications
       return 0
     fi
   fi
@@ -2589,6 +2826,9 @@ check_proactive_suggestions() {
       _notify_ondemand_cooldown "${req_target_id}" "${req_platform}"
     fi
   fi
+
+  # Check alert notifications
+  _check_alert_notifications
 
   # Iterate over configured triggers
   local trigger_names

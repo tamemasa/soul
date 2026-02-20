@@ -121,12 +121,21 @@ cat > "${MCPORTER_DIR}/mcporter.json" <<'MCPEOF'
     "sequential-thinking": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    },
+    "monitoring": {
+      "command": "node",
+      "args": ["/app/monitoring-mcp-server.js"],
+      "env": {
+        "NODE_PATH": "/usr/local/lib/node_modules",
+        "MONITORING_DIR": "/shared/monitoring",
+        "ALERTS_DIR": "/shared/alerts"
+      }
     }
   },
   "imports": []
 }
 MCPEOF
-log "mcporter MCP servers configured (memory + sequential-thinking)."
+log "mcporter MCP servers configured (memory + sequential-thinking + monitoring)."
 
 # Set up suggestions directory and owner ID file
 mkdir -p /suggestions
