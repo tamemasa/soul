@@ -1015,6 +1015,58 @@ ${all_items}
   fi
 }
 
+# Supplement null URLs in content array via Brave Search API
+_supplement_urls_via_brave() {
+  local content_json="$1"
+  local brave_key="${BRAVE_API_KEY:-}"
+
+  if [[ -z "${brave_key}" ]]; then
+    echo "${content_json}"
+    return
+  fi
+
+  local count
+  count=$(echo "${content_json}" | jq 'length' 2>/dev/null || echo 0)
+
+  local result="${content_json}"
+  local supplemented=0
+
+  for ((i=0; i<count; i++)); do
+    local url title
+    url=$(echo "${result}" | jq -r ".[$i].url // \"null\"")
+    [[ "${url}" != "null" && -n "${url}" ]] && continue
+
+    title=$(echo "${result}" | jq -r ".[$i].title // \"\"")
+    [[ -z "${title}" ]] && continue
+
+    local encoded_title
+    encoded_title=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''${title}'''))" 2>/dev/null || continue)
+
+    local search_resp
+    search_resp=$(curl -s --max-time 5 \
+      -H "Accept: application/json" \
+      -H "X-Subscription-Token: ${brave_key}" \
+      "https://api.search.brave.com/res/v1/web/search?q=${encoded_title}&count=1&freshness=pw&country=JP&search_lang=ja" 2>/dev/null)
+
+    if [[ -n "${search_resp}" ]]; then
+      local found_url
+      found_url=$(echo "${search_resp}" | jq -r '.web.results[0].url // empty' 2>/dev/null)
+      if [[ -n "${found_url}" ]]; then
+        result=$(echo "${result}" | jq --arg url "${found_url}" --argjson i "$i" '.[$i].url = $url')
+        supplemented=$((supplemented + 1))
+      fi
+    fi
+
+    sleep 0.3
+  done
+
+  if [[ ${supplemented} -gt 0 ]]; then
+    log "Proactive engine: Brave Search supplemented ${supplemented}/${count} URLs"
+  fi
+
+  echo "${result}"
+}
+
 # Fallback: generate trending content using LLM knowledge only
 _discover_trending_content_llm_only() {
   local today
@@ -1049,6 +1101,8 @@ _discover_trending_content_llm_only() {
   parsed=$(_extract_json_array "${response}")
 
   if [[ -n "${parsed}" ]]; then
+    # Supplement URLs via Brave Search if available
+    parsed=$(_supplement_urls_via_brave "${parsed}")
     echo "${parsed}"
   else
     log "WARN: Proactive engine: LLM fallback also failed to produce valid JSON"

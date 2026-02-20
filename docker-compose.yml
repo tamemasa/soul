@@ -68,6 +68,7 @@ services:
       - PI_EXTERNAL_AUTHORIZED_IDS=${PI_EXTERNAL_AUTHORIZED_IDS}
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
       - DISCORD_ALERT_CHANNEL_ID=${DISCORD_ALERT_CHANNEL_ID}
+      - BRAVE_API_KEY=${BRAVE_API_KEY}
     volumes:
       - shared:/shared
       - ./brain/nodes/triceratops/CLAUDE.md:/brain/CLAUDE.md:ro
