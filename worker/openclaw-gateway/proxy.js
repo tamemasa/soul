@@ -217,13 +217,57 @@ function extractOutboundMessages(content, afterTimestamp) {
       }
       if (texts.length === 0) continue;
 
+      const combined = texts.join("\n");
+      if (isHeartbeatSystemResponse(combined)) continue;
+
       messages.push({
         timestamp: obj.timestamp,
-        content: texts.join("\n"),
+        content: combined,
       });
     } catch {}
   }
   return messages;
+}
+
+// Detect internal HEARTBEAT/intervention responses that should never appear in conversation logs.
+// Uses compound conditions (start marker + intervention-specific phrases) to avoid false positives
+// on normal conversation containing generic words like "システム".
+function isHeartbeatSystemResponse(text) {
+  if (!text) return false;
+  const trimmed = text.trim();
+
+  // Exact match: heartbeat acknowledgment
+  if (/^HEARTBEAT[_\s]?OK$/i.test(trimmed)) return true;
+
+  // Compound: starts with alert emoji AND contains intervention-template-specific phrases
+  // These multi-word phrases are unique to HEARTBEAT.md intervention templates
+  const startsWithAlert = /^[🚨⚠️]/.test(trimmed);
+  if (startsWithAlert) {
+    const interventionPhrases = [
+      "セーフティモード発動",
+      "セーフティモード継続",
+      "ポリシー違反検知により",
+      "オーナーからの明示的な解除指示",
+      "オーナーによる明示的な解除指示",
+      "システム介入が継続中",
+      "口調バランス修正",
+      "注意レベル引き上げ",
+      "活動抑制",
+      "パーソナリティ再確認",
+    ];
+    if (interventionPhrases.some((p) => trimmed.includes(p))) return true;
+  }
+
+  // Compound: structured intervention report (bullet-point restriction list)
+  // Pattern: contains BOTH a mode status AND restriction list items
+  if (
+    trimmed.includes("安全モードで動作") &&
+    (trimmed.includes("ツール使用を最小限") || trimmed.includes("応答を最小限"))
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 // Track the latest outbound timestamp per platform to avoid duplicates
