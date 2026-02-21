@@ -252,13 +252,9 @@ function renderBroadcastSection(bs) {
   const statusLabel = broadcast.status || 'not_started';
   const statusBadge = statusLabel === 'completed' ? 'approved'
     : statusLabel === 'delivering' ? 'discussing'
-    : statusLabel === 'scheduled' ? 'discussing'
     : statusLabel === 'error' ? 'rejected'
     : 'discussing';
 
-  const nextScheduled = broadcast.next_scheduled_at
-    ? formatTime(broadcast.next_scheduled_at)
-    : '--';
   const lastDelivered = broadcast.last_delivered_at
     ? formatTime(broadcast.last_delivered_at)
     : '--';
@@ -281,9 +277,7 @@ function renderBroadcastSection(bs) {
         <span class="badge" style="margin-left:4px;">${engine.mode || 'unknown'}</span>
       </div>
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:12px;">
-        <div class="text-sm"><span class="text-dim">Next</span> ${nextScheduled}</div>
         <div class="text-sm"><span class="text-dim">Last</span> ${lastDelivered}</div>
-        <div class="text-sm"><span class="text-dim">Window</span> ${trigger.window || '--'}</div>
         <div class="text-sm"><span class="text-dim">Dest</span> ${destinations}</div>
         <div class="text-sm"><span class="text-dim">Active</span> ${activeChats} chats</div>
       </div>

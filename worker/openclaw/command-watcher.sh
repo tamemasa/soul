@@ -486,9 +486,10 @@ process_discord_push() {
   local push_file="$1"
   [[ -f "${push_file}" ]] || return 0
 
-  local channel_id text
+  local channel_id text source
   channel_id=$(jq -r '.channel_id // ""' "${push_file}" 2>/dev/null)
   text=$(jq -r '.text // ""' "${push_file}" 2>/dev/null)
+  source=$(jq -r '.source // "unknown"' "${push_file}" 2>/dev/null)
 
   if [[ -z "${channel_id}" || -z "${text}" ]]; then
     log "ERROR: Discord push file missing channel_id or text: ${push_file}"
@@ -496,14 +497,38 @@ process_discord_push() {
     return 1
   fi
 
-  log "Sending Discord push to channel ${channel_id} (${push_file})"
+  # Resolve session ID from sessions.json
+  local sessions_file="/home/openclaw/.openclaw/agents/main/sessions/sessions.json"
+  local session_key="agent:main:discord:channel:${channel_id}"
+  local session_id
+  session_id=$(jq -r --arg key "${session_key}" '.[$key].sessionId // ""' \
+    "${sessions_file}" 2>/dev/null)
 
-  if openclaw message send --channel discord --target "${channel_id}" -m "${text}" 2>&1; then
-    log "Discord push sent successfully to channel ${channel_id}"
+  if [[ -z "${session_id}" ]]; then
+    log "WARN: No session for Discord channel ${channel_id}, falling back to message send"
+    if openclaw message send --channel discord --target "${channel_id}" -m "${text}" 2>&1; then
+      rm -f "${push_file}"
+      return 0
+    fi
+    return 1
+  fi
+
+  # Build instruction for the agent
+  local instruction
+  instruction=$(printf '[情報配信リクエスト]\n以下のニュース情報をこのDiscordチャンネルに投稿してください。内容を省略せず、あなたの言葉で自然に届けてください。\n\n%s' "${text}")
+
+  log "Sending Discord push via agent (session: ${session_id}, channel: ${channel_id})"
+
+  if openclaw agent \
+    --session-id "${session_id}" \
+    -m "${instruction}" \
+    --deliver \
+    --thinking minimal 2>&1; then
+    log "Discord push sent via agent to channel ${channel_id}"
     rm -f "${push_file}"
     return 0
   else
-    log "ERROR: Discord push failed for channel ${channel_id}, will retry next cycle"
+    log "ERROR: Discord agent push failed for channel ${channel_id}, will retry next cycle"
     return 1
   fi
 }

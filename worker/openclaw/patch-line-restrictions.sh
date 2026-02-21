@@ -448,6 +448,80 @@ NODEOF
   fi
 }
 
+# --- Patch 7: Fix LINE provider crash-loop ---
+# OpenClaw's LINE plugin startAccount returns monitorLineProvider() which resolves immediately
+# (webhook-based provider, no long-running connection). The gateway treats the resolved promise
+# as "stopped" and triggers auto-restart in a loop. Fix: wrap in a Promise that waits on abortSignal.
+patch_line_startup_keepalive() {
+  local file="/usr/local/lib/node_modules/openclaw/extensions/line/src/channel.ts"
+  if [[ ! -f "$file" ]]; then
+    log "WARNING: LINE channel.ts not found"
+    return 1
+  fi
+
+  if grep -q 'Keep the task alive until abortSignal' "$file" 2>/dev/null; then
+    log "LINE channel.ts already patched (startup keepalive)"
+    return 0
+  fi
+
+  cat > /tmp/patch-line-startup.js << 'NODEOF'
+const fs = require("fs");
+const file = "/usr/local/lib/node_modules/openclaw/extensions/line/src/channel.ts";
+let code = fs.readFileSync(file, "utf8");
+
+const oldCode = `      return getLineRuntime().channel.line.monitorLineProvider({
+        channelAccessToken: token,
+        channelSecret: secret,
+        accountId: account.accountId,
+        config: ctx.cfg,
+        runtime: ctx.runtime,
+        abortSignal: ctx.abortSignal,
+        webhookPath: account.config.webhookPath,
+      });`;
+
+const newCode = `      // Start LINE provider (webhook-based, returns immediately)
+      const providerResult = await getLineRuntime().channel.line.monitorLineProvider({
+        channelAccessToken: token,
+        channelSecret: secret,
+        accountId: account.accountId,
+        config: ctx.cfg,
+        runtime: ctx.runtime,
+        abortSignal: ctx.abortSignal,
+        webhookPath: account.config.webhookPath,
+      });
+
+      // Keep the task alive until abortSignal fires. LINE webhook provider
+      // returns immediately after registering routes — without this wait,
+      // the gateway treats the resolved promise as "stopped" and triggers
+      // an infinite auto-restart loop.
+      await new Promise<void>((resolve) => {
+        if (ctx.abortSignal?.aborted) { resolve(); return; }
+        ctx.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+
+      return providerResult;`;
+
+if (!code.includes("monitorLineProvider(")) {
+  console.log("ERROR: monitorLineProvider not found in channel.ts");
+  process.exit(1);
+}
+
+code = code.replace(oldCode, newCode);
+fs.writeFileSync(file, code);
+console.log("LINE startup keepalive patch applied");
+NODEOF
+
+  node /tmp/patch-line-startup.js 2>&1
+  rm -f /tmp/patch-line-startup.js
+
+  if grep -q 'Keep the task alive until abortSignal' "$file" 2>/dev/null; then
+    log "LINE channel.ts patched: startup keepalive active (prevents crash-loop)"
+  else
+    log "WARNING: LINE startup keepalive patch may have failed"
+    return 1
+  fi
+}
+
 # --- Apply patches ---
 # Each patch runs independently — failure of one must not block the other.
 log "Applying channel restrictions..."
@@ -457,4 +531,5 @@ patch_pending_injection || log "WARNING: patch_pending_injection failed (continu
 patch_pause_enforcement || log "WARNING: patch_pause_enforcement failed (continuing)"
 patch_discord_pause_enforcement || log "WARNING: patch_discord_pause_enforcement failed (continuing)"
 patch_evolution_trigger || log "WARNING: patch_evolution_trigger failed (continuing)"
+patch_line_startup_keepalive || log "WARNING: patch_line_startup_keepalive failed (continuing)"
 log "Channel restrictions applied."

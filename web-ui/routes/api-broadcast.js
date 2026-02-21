@@ -41,8 +41,6 @@ module.exports = function (sharedDir) {
         daily_counts: engineState ? engineState.daily_counts : null
       },
       trigger: triggerConfig ? {
-        enabled: triggerConfig.enabled,
-        window: `${triggerConfig.window_start_hour_jst || 12}:00 - ${triggerConfig.window_end_hour_jst || 24}:00 JST`,
         destinations: (triggerConfig.destinations || []).map(d => d.type)
       } : null
     });

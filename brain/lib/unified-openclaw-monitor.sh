@@ -449,11 +449,11 @@ _unified_get_recent_messages() {
   }
 
   # Select the most recently updated session across all channels
-  # (LINE DM may appear as "whatsapp" in OpenClaw's session registry)
+  # Exclude subagent sessions (their responses are research reports, not user-facing conversation)
   local latest_session
   latest_session=$(echo "${sessions_json}" | jq -r '
     to_entries |
-    map(select(.value.sessionFile != null)) |
+    map(select(.value.sessionFile != null and (.key | test("subagent") | not))) |
     sort_by(.value.updatedAt) | reverse |
     .[0].value.sessionFile // empty
   ' 2>/dev/null)
@@ -670,8 +670,10 @@ _unified_check_abnormal_behavior() {
       (.content | test("https?://.*https?://"; "s") | not) and
       # Exclude subagent task results
       (.content | test("subagent task.*completed|Findings:"; "i") | not) and
-      # Exclude web search result summaries
+      # Exclude web search result summaries and research reports
       (.content | test("検索結果|search result|web_search|web_fetch"; "i") | not) and
+      # Exclude subagent web search responses (structured research with headers/bullets)
+      (.content | test("## .*調査結果|## .*トレンド|## .*ニュース|## .*最新"; "i") | not) and
       # Exclude system markers
       (.content | test("^(NO_REPLY|HEARTBEAT_OK)$") | not) and
       # Exclude safety mode / intervention notifications

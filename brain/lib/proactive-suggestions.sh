@@ -2,17 +2,13 @@
 # proactive-suggestions.sh - Proactive Suggestion Engine
 #
 # Discovers trending content and delivers to multiple destinations.
-# Scheduled (automatic) broadcasts are DISABLED by default (config enabled=false).
-# Broadcasts are triggered manually via dashboard force_trigger or
-# on-demand via OpenClaw broadcast_request.
+# Manual trigger (dashboard force_trigger) and on-demand (OpenClaw broadcast_request) only.
 #
 # Only triceratops runs this engine (as executor node).
 
 PROACTIVE_DIR="${SHARED_DIR}/workspace/proactive-suggestions"
 PROACTIVE_CONFIG="${PROACTIVE_DIR}/config.json"
 PROACTIVE_STATE="${PROACTIVE_DIR}/state/engine.json"
-PROACTIVE_DRYRUN_DIR="${PROACTIVE_DIR}/dryrun"
-PROACTIVE_SUGGESTIONS_DIR="${PROACTIVE_DIR}/suggestions"
 PROACTIVE_BROADCAST_DIR="${PROACTIVE_DIR}/broadcasts"
 
 # Alert notification state
@@ -274,34 +270,13 @@ _init_proactive_engine() {
 {
   "mode": "dryrun",
   "discord_webhook_url": "",
-  "triggers": {
-    "daily_asset_summary": {
-      "enabled": false,
-      "type": "time",
-      "schedule_hour_jst": 9,
-      "schedule_minute": 0,
-      "category": "info",
-      "title_template": "日次資産サマリー",
-      "description": "ポートフォリオ概況、前日比、注目銘柄"
-    },
-    "weekly_report": {
-      "enabled": false,
-      "type": "time",
-      "schedule_day_of_week": 1,
-      "schedule_hour_jst": 9,
-      "schedule_minute": 0,
-      "category": "info",
-      "title_template": "週次レポート",
-      "description": "週間パフォーマンス、トレンド分析、来週の注目イベント"
-    }
-  },
+  "triggers": {},
   "rate_limits": {
     "info": 3,
     "suggestion": 2,
     "alert": -1,
     "daily_total_excluding_alert": 10
-  },
-  "dryrun_started_at": null
+  }
 }
 CFGEOF
   fi
@@ -315,8 +290,6 @@ CFGEOF
   "status": "initialized",
   "mode": "dryrun",
   "last_check_at": null,
-  "last_trigger_checks": {},
-  "random_window_schedule": {},
   "daily_counts": {
     "date": null,
     "info": 0,
@@ -329,20 +302,6 @@ CFGEOF
   "total_suggestions_generated": 0
 }
 EOF
-  fi
-
-  # Log scheduled broadcast status
-  local _any_scheduled_enabled=false
-  for _tname in $(jq -r '.triggers | keys[]' "${PROACTIVE_CONFIG}" 2>/dev/null); do
-    local _tenabled
-    _tenabled=$(jq -r ".triggers.\"${_tname}\".enabled // false" "${PROACTIVE_CONFIG}" 2>/dev/null)
-    if [[ "${_tenabled}" == "true" ]]; then
-      _any_scheduled_enabled=true
-      break
-    fi
-  done
-  if [[ "${_any_scheduled_enabled}" == "false" ]]; then
-    log "Proactive engine: All scheduled broadcasts are DISABLED. Manual trigger and on-demand only."
   fi
 
   # Load credentials from secrets file
@@ -418,9 +377,9 @@ _reset_daily_counts_if_needed() {
   if [[ "${state_date}" != "${today}" ]]; then
     local tmp
     tmp=$(mktemp)
-    jq --arg d "${today}" '.daily_counts = {"date": $d, "info": 0, "suggestion": 0, "alert": 0, "total": 0} | .random_window_schedule = {}' \
+    jq --arg d "${today}" '.daily_counts = {"date": $d, "info": 0, "suggestion": 0, "alert": 0, "total": 0}' \
       "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
-    log "Proactive engine: Daily counters and random schedules reset for ${today}"
+    log "Proactive engine: Daily counters reset for ${today}"
   fi
 }
 
@@ -471,146 +430,11 @@ _increment_daily_count() {
     "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
 }
 
-# ---- Trigger Evaluation ----
-
-# Check if a time-based trigger should fire right now
-# Returns 0 if trigger should fire, 1 otherwise
-_should_fire_time_trigger() {
-  local trigger_name="$1"
-  local trigger_json="$2"
-
-  local enabled
-  enabled=$(echo "${trigger_json}" | jq -r '.enabled // false')
-  if [[ "${enabled}" != "true" ]]; then
-    return 1
-  fi
-
-  local schedule_hour schedule_minute
-  schedule_hour=$(echo "${trigger_json}" | jq -r '.schedule_hour_jst // -1')
-  schedule_minute=$(echo "${trigger_json}" | jq -r '.schedule_minute // 0')
-
-  local current_hour current_minute
-  current_hour=$(_get_jst_hour)
-  current_minute=$(_get_jst_minute)
-
-  # Check hour and minute match (within a 5-minute window to handle polling gaps)
-  if [[ ${current_hour} -ne ${schedule_hour} ]]; then
-    return 1
-  fi
-
-  local minute_diff=$(( current_minute - schedule_minute ))
-  if [[ ${minute_diff} -lt 0 ]]; then
-    minute_diff=$(( -minute_diff ))
-  fi
-  if [[ ${minute_diff} -gt 5 ]]; then
-    return 1
-  fi
-
-  # For weekly triggers, check day of week
-  local dow_filter
-  dow_filter=$(echo "${trigger_json}" | jq -r '.schedule_day_of_week // null')
-  if [[ "${dow_filter}" != "null" ]]; then
-    local current_dow
-    current_dow=$(_get_jst_dow)
-    if [[ ${current_dow} -ne ${dow_filter} ]]; then
-      return 1
-    fi
-  fi
-
-  # Check if we already fired this trigger today (prevent duplicate fires)
-  local today
-  today=$(_get_jst_date)
-  local last_fired
-  last_fired=$(jq -r ".last_trigger_checks.\"${trigger_name}\" // \"\"" "${PROACTIVE_STATE}")
-
-  if [[ "${last_fired}" == "${today}" ]]; then
-    return 1
-  fi
-
-  return 0
-}
-
-# Check if a random_window trigger should fire
-# Generates a random time on first check within window, then fires at that time
-_should_fire_random_window_trigger() {
-  local trigger_name="$1"
-  local trigger_json="$2"
-
-  local enabled
-  enabled=$(echo "${trigger_json}" | jq -r '.enabled // false')
-  if [[ "${enabled}" != "true" ]]; then
-    return 1
-  fi
-
-  # Check if already fired today
-  local today
-  today=$(_get_jst_date)
-  local last_fired
-  last_fired=$(jq -r ".last_trigger_checks.\"${trigger_name}\" // \"\"" "${PROACTIVE_STATE}")
-  if [[ "${last_fired}" == "${today}" ]]; then
-    return 1
-  fi
-
-  local window_start window_end
-  window_start=$(echo "${trigger_json}" | jq -r '.window_start_hour_jst // 12')
-  window_end=$(echo "${trigger_json}" | jq -r '.window_end_hour_jst // 24')
-  local window_start_min=$(( window_start * 60 ))
-  local window_end_min=$(( window_end * 60 ))
-
-  local current_min
-  current_min=$(_get_jst_total_minutes)
-
-  # Not yet in the window
-  if [[ ${current_min} -lt ${window_start_min} ]]; then
-    return 1
-  fi
-
-  # Check if we have a scheduled fire time for today
-  local scheduled_min
-  scheduled_min=$(jq -r ".random_window_schedule.\"${trigger_name}\" // \"\"" "${PROACTIVE_STATE}")
-
-  if [[ -z "${scheduled_min}" || "${scheduled_min}" == "null" ]]; then
-    # Generate random fire time within remaining window
-    local remaining_start=${current_min}
-    if [[ ${remaining_start} -lt ${window_start_min} ]]; then
-      remaining_start=${window_start_min}
-    fi
-    local range=$(( window_end_min - remaining_start ))
-    if [[ ${range} -le 0 ]]; then
-      # Window has passed, skip for today
-      return 1
-    fi
-    scheduled_min=$(( remaining_start + (RANDOM % range) ))
-    # Save scheduled time to state
-    local tmp
-    tmp=$(mktemp)
-    jq --arg name "${trigger_name}" --argjson min "${scheduled_min}" \
-      '.random_window_schedule[$name] = $min' \
-      "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
-    local sched_h=$(( scheduled_min / 60 ))
-    local sched_m=$(( scheduled_min % 60 ))
-    log "Proactive engine: Scheduled ${trigger_name} for today at JST ${sched_h}:$(printf '%02d' ${sched_m})"
-    # Update broadcast state for UI
-    _update_broadcast_state "scheduled" "${scheduled_min}"
-  fi
-
-  # Check if current time has reached the scheduled time (within 2 min tolerance)
-  local diff=$(( current_min - scheduled_min ))
-  if [[ ${diff} -ge 0 && ${diff} -le 2 ]]; then
-    return 0
-  fi
-
-  return 1
-}
-
 # Update broadcast state file for UI consumption
 _update_broadcast_state() {
   local status="$1"
-  local scheduled_min="${2:-}"
   local now_ts
   now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  local today
-  today=$(_get_jst_date)
 
   local state_file="${PROACTIVE_DIR}/state/broadcast.json"
   local broadcast_json
@@ -622,31 +446,10 @@ _update_broadcast_state() {
 
   local tmp
   tmp=$(mktemp)
-  if [[ "${status}" == "scheduled" && -n "${scheduled_min}" ]]; then
-    # Count active chats when schedule is set (once per day)
-    local trigger_cfg activity_window active_count
-    trigger_cfg=$(jq '.triggers.trending_news' "${PROACTIVE_CONFIG}" 2>/dev/null)
-    activity_window=$(echo "${trigger_cfg}" | jq -r '.activity_window_hours // 72' 2>/dev/null)
-    local active_chats_json
-    active_chats_json=$(_get_active_chats "${activity_window}" 2>/dev/null)
-    active_count=$(echo "${active_chats_json}" | jq 'length' 2>/dev/null || echo 0)
-
-    local sched_h=$(( scheduled_min / 60 ))
-    local sched_m=$(( scheduled_min % 60 ))
-    local sched_time="${today}T$(printf '%02d' ${sched_h}):$(printf '%02d' ${sched_m}):00+09:00"
-    echo "${broadcast_json}" | jq \
-      --arg s "${status}" --arg t "${sched_time}" --arg u "${now_ts}" --argjson ac "${active_count}" \
-      '. + {status: $s, next_scheduled_at: $t, active_chats: $ac, updated_at: $u}' \
-      > "${tmp}" && mv "${tmp}" "${state_file}"
-  elif [[ "${status}" == "delivering" ]]; then
+  if [[ "${status}" == "completed" ]]; then
     echo "${broadcast_json}" | jq \
       --arg s "${status}" --arg u "${now_ts}" \
-      '. + {status: $s, updated_at: $u}' \
-      > "${tmp}" && mv "${tmp}" "${state_file}"
-  elif [[ "${status}" == "completed" ]]; then
-    echo "${broadcast_json}" | jq \
-      --arg s "${status}" --arg u "${now_ts}" \
-      '. + {status: $s, last_delivered_at: $u, next_scheduled_at: null, updated_at: $u}' \
+      '. + {status: $s, last_delivered_at: $u, updated_at: $u}' \
       > "${tmp}" && mv "${tmp}" "${state_file}"
   else
     echo "${broadcast_json}" | jq \
@@ -654,18 +457,6 @@ _update_broadcast_state() {
       '. + {status: $s, updated_at: $u}' \
       > "${tmp}" && mv "${tmp}" "${state_file}"
   fi
-}
-
-# Mark a trigger as fired today
-_mark_trigger_fired() {
-  local trigger_name="$1"
-  local today
-  today=$(_get_jst_date)
-  local tmp
-  tmp=$(mktemp)
-  jq --arg name "${trigger_name}" --arg date "${today}" \
-    '.last_trigger_checks[$name] = $date' \
-    "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
 }
 
 # ---- Dynamic Query Generation ----
@@ -1323,153 +1114,6 @@ _generate_suggestion_id() {
   ts=$(date +%s)
   rand=$((RANDOM % 9000 + 1000))
   echo "suggestion_${ts}_${rand}"
-}
-
-# Generate a suggestion using Claude
-_generate_suggestion_content() {
-  local trigger_name="$1"
-  local trigger_json="$2"
-
-  local title_template description category
-  title_template=$(echo "${trigger_json}" | jq -r '.title_template // "提言"')
-  description=$(echo "${trigger_json}" | jq -r '.description // ""')
-  category=$(echo "${trigger_json}" | jq -r '.category // "info"')
-
-  local today
-  today=$(_get_jst_date)
-  local dow_name
-  case $(_get_jst_dow) in
-    1) dow_name="月曜日" ;; 2) dow_name="火曜日" ;; 3) dow_name="水曜日" ;;
-    4) dow_name="木曜日" ;; 5) dow_name="金曜日" ;; 6) dow_name="土曜日" ;; 7) dow_name="日曜日" ;;
-  esac
-
-  local prompt="あなたはSoul Systemの提言エンジンです。ミッション「Masaru Tamegaiとその家族の幸福化、および資産拡大」に基づき、以下のトリガーに対応する提言を生成してください。
-
-## トリガー情報
-- トリガー名: ${trigger_name}
-- タイトル: ${title_template}
-- 説明: ${description}
-- カテゴリ: ${category}
-- 日付: ${today} (${dow_name})
-
-## 指示
-現在は**Phase 1ドライランモード**です。実際のデータソースにはまだ接続されていません。
-トリガーの種類に応じた**サンプル提言**を生成してください。実際のデータがない部分は、リアルな仮想データで埋めてください。
-
-以下のJSON形式で回答してください（コードフェンスなし、JSONのみ）：
-{
-  \"title\": \"${title_template} (${today})\",
-  \"rationale\": \"この提言の根拠データと分析\",
-  \"risk_assessment\": {
-    \"level\": \"low\",
-    \"description\": \"リスクの説明\"
-  },
-  \"expected_impact\": \"期待される効果\",
-  \"recommended_action\": \"推奨アクション\",
-  \"data_sources\": [\"使用したデータソース\"]
-}"
-
-  local response
-  response=$(invoke_claude "${prompt}")
-
-  # Strip markdown code fences
-  response=$(echo "${response}" | sed '/^```\(json\)\?$/d')
-
-  # Validate JSON
-  if echo "${response}" | jq . > /dev/null 2>&1; then
-    echo "${response}"
-  else
-    # Try to extract JSON from response
-    local json_part
-    json_part=$(echo "${response}" | sed -n '/^[[:space:]]*{/,/^[[:space:]]*}/p')
-    if [[ -n "${json_part}" ]] && echo "${json_part}" | jq . > /dev/null 2>&1; then
-      echo "${json_part}"
-    else
-      log "WARN: Proactive engine: Failed to parse suggestion content as JSON"
-      echo '{"title": "'"${title_template} (${today})"'", "rationale": "生成エラー", "risk_assessment": {"level": "low", "description": "N/A"}, "expected_impact": "N/A", "recommended_action": "再試行してください", "data_sources": []}'
-    fi
-  fi
-}
-
-# Build a full suggestion record
-_build_suggestion_record() {
-  local suggestion_id="$1"
-  local trigger_name="$2"
-  local trigger_json="$3"
-  local content_json="$4"
-
-  local category now_ts trigger_type
-  category=$(echo "${trigger_json}" | jq -r '.category // "info"')
-  trigger_type=$(echo "${trigger_json}" | jq -r '.type // "time"')
-  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-  jq -n \
-    --arg id "${suggestion_id}" \
-    --arg cat "${category}" \
-    --arg trigger_name "${trigger_name}" \
-    --arg trigger_type "${trigger_type}" \
-    --arg detected_at "${now_ts}" \
-    --arg created_at "${now_ts}" \
-    --argjson content "${content_json}" \
-    '{
-      id: $id,
-      category: $cat,
-      title: $content.title,
-      trigger: {
-        type: $trigger_type,
-        source: $trigger_name,
-        detected_at: $detected_at
-      },
-      rationale: $content.rationale,
-      risk_assessment: $content.risk_assessment,
-      expected_impact: $content.expected_impact,
-      recommended_action: $content.recommended_action,
-      data_sources: ($content.data_sources // []),
-      created_at: $created_at
-    }'
-}
-
-# ---- Delivery ----
-
-# Deliver suggestion (dryrun: log only, live: Discord/inbox)
-_deliver_suggestion() {
-  local suggestion_json="$1"
-  local mode
-  mode=$(jq -r '.mode // "dryrun"' "${PROACTIVE_CONFIG}")
-
-  local suggestion_id category title
-  suggestion_id=$(echo "${suggestion_json}" | jq -r '.id')
-  category=$(echo "${suggestion_json}" | jq -r '.category')
-  title=$(echo "${suggestion_json}" | jq -r '.title')
-
-  if [[ "${mode}" == "dryrun" ]]; then
-    # Save to dryrun directory
-    local dryrun_file="${PROACTIVE_DRYRUN_DIR}/${suggestion_id}.json"
-    local tmp
-    tmp=$(mktemp)
-    echo "${suggestion_json}" | jq '. + {"delivery_mode": "dryrun"}' > "${tmp}" && mv "${tmp}" "${dryrun_file}"
-    log "Proactive engine [DRYRUN]: Generated suggestion ${suggestion_id}: ${title} (category: ${category})"
-  else
-    # Live mode delivery based on category
-    case "${category}" in
-      info)
-        _deliver_discord "${suggestion_json}"
-        ;;
-      suggestion)
-        _deliver_to_inbox "${suggestion_json}"
-        ;;
-      alert)
-        _deliver_discord "${suggestion_json}"
-        ;;
-    esac
-
-    # Also save to suggestions archive
-    local archive_file="${PROACTIVE_SUGGESTIONS_DIR}/${suggestion_id}.json"
-    local tmp
-    tmp=$(mktemp)
-    echo "${suggestion_json}" | jq '. + {"delivery_mode": "live", "delivered_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "${tmp}" && mv "${tmp}" "${archive_file}"
-    log "Proactive engine [LIVE]: Delivered suggestion ${suggestion_id}: ${title} (category: ${category})"
-  fi
 }
 
 # Send suggestion to Discord via webhook
@@ -2388,14 +2032,13 @@ ${trends_hint:-なし}
       last_delivered_at: $delivered_at,
       last_deliveries: $deliveries,
       active_chats: $active_chats,
-      next_scheduled_at: null,
       updated_at: $delivered_at
     }' > "${tmp}" && mv "${tmp}" "${state_file}"
 
   log "Proactive engine: Broadcast ${broadcast_id} completed (${dest_count} destinations)"
 
   # Save broadcast content to OpenClaw memory for later reference
-  _save_broadcast_to_openclaw_memory "${content_json}" "${broadcast_id}" "scheduled"
+  _save_broadcast_to_openclaw_memory "${content_json}" "${broadcast_id}" "manual"
 
   set_activity "idle"
   return 0
@@ -2788,7 +2431,7 @@ ${trends_hint:-なし}
   jq -n \
     --arg status "completed" --arg last_id "${broadcast_id}" \
     --arg delivered_at "${now_ts}" --argjson deliveries "${delivery_results}" \
-    '{status: $status, last_broadcast_id: $last_id, last_delivered_at: $delivered_at, last_deliveries: $deliveries, next_scheduled_at: null, updated_at: $delivered_at}' \
+    '{status: $status, last_broadcast_id: $last_id, last_delivered_at: $delivered_at, last_deliveries: $deliveries, updated_at: $delivered_at}' \
     > "${tmp}" && mv "${tmp}" "${state_file}"
 
   log "Proactive engine: On-demand broadcast ${broadcast_id} completed"
@@ -2858,11 +2501,7 @@ check_proactive_suggestions() {
         local trigger_json
         trigger_json=$(jq ".triggers.\"${force_trigger}\"" "${PROACTIVE_CONFIG}" 2>/dev/null)
         if [[ -n "${trigger_json}" && "${trigger_json}" != "null" ]]; then
-          local trigger_type
-          trigger_type=$(echo "${trigger_json}" | jq -r '.type // "unknown"')
-          if [[ "${trigger_type}" == "random_window" ]]; then
-            _execute_trending_broadcast "${force_trigger}" "${trigger_json}"
-          fi
+          _execute_trending_broadcast "${force_trigger}" "${trigger_json}"
         fi
       fi
       # Also check for on-demand broadcast request during throttle
@@ -2905,16 +2544,6 @@ check_proactive_suggestions() {
   jq --arg ts "${now_ts}" '.last_check_at = $ts | .status = "running"' \
     "${PROACTIVE_STATE}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_STATE}"
 
-  # Ensure dryrun_started_at is set on first run
-  local dryrun_started
-  dryrun_started=$(jq -r '.dryrun_started_at // null' "${PROACTIVE_CONFIG}")
-  if [[ "${dryrun_started}" == "null" ]]; then
-    tmp=$(mktemp)
-    jq --arg ts "${now_ts}" '.dryrun_started_at = $ts' \
-      "${PROACTIVE_CONFIG}" > "${tmp}" && mv "${tmp}" "${PROACTIVE_CONFIG}"
-    log "Proactive engine: Dry-run mode started at ${now_ts}"
-  fi
-
   # Check for force trigger
   local force_trigger
   force_trigger=$(_check_force_trigger)
@@ -2923,14 +2552,9 @@ check_proactive_suggestions() {
     local trigger_json
     trigger_json=$(jq ".triggers.\"${force_trigger}\"" "${PROACTIVE_CONFIG}" 2>/dev/null)
     if [[ -n "${trigger_json}" && "${trigger_json}" != "null" ]]; then
-      local trigger_type
-      trigger_type=$(echo "${trigger_json}" | jq -r '.type // "unknown"')
-      if [[ "${trigger_type}" == "random_window" ]]; then
-        _execute_trending_broadcast "${force_trigger}" "${trigger_json}"
-        _increment_daily_count "info"
-        _mark_trigger_fired "${force_trigger}"
-        return 0
-      fi
+      _execute_trending_broadcast "${force_trigger}" "${trigger_json}"
+      _increment_daily_count "info"
+      return 0
     fi
   fi
 
@@ -2964,70 +2588,6 @@ check_proactive_suggestions() {
 
   # Check alert notifications
   _check_alert_notifications
-
-  # Iterate over configured triggers
-  local trigger_names
-  trigger_names=$(jq -r '.triggers | keys[]' "${PROACTIVE_CONFIG}" 2>/dev/null)
-
-  for trigger_name in ${trigger_names}; do
-    local trigger_json
-    trigger_json=$(jq ".triggers.\"${trigger_name}\"" "${PROACTIVE_CONFIG}")
-
-    local trigger_type
-    trigger_type=$(echo "${trigger_json}" | jq -r '.type // "unknown"')
-
-    case "${trigger_type}" in
-      time)
-        if _should_fire_time_trigger "${trigger_name}" "${trigger_json}"; then
-          local category
-          category=$(echo "${trigger_json}" | jq -r '.category // "info"')
-
-          if ! _check_rate_limit "${category}"; then
-            log "Proactive engine: Trigger ${trigger_name} rate-limited, skipping"
-            _mark_trigger_fired "${trigger_name}"
-            continue
-          fi
-
-          log "Proactive engine: Trigger fired: ${trigger_name}"
-          set_activity "generating_suggestion" "\"trigger\":\"${trigger_name}\","
-
-          local content_json
-          content_json=$(_generate_suggestion_content "${trigger_name}" "${trigger_json}")
-
-          local suggestion_id
-          suggestion_id=$(_generate_suggestion_id)
-          local suggestion_record
-          suggestion_record=$(_build_suggestion_record "${suggestion_id}" "${trigger_name}" "${trigger_json}" "${content_json}")
-
-          _deliver_suggestion "${suggestion_record}"
-          _increment_daily_count "${category}"
-          _mark_trigger_fired "${trigger_name}"
-
-          set_activity "idle"
-        fi
-        ;;
-      random_window)
-        if _should_fire_random_window_trigger "${trigger_name}" "${trigger_json}"; then
-          local category
-          category=$(echo "${trigger_json}" | jq -r '.category // "info"')
-
-          if ! _check_rate_limit "${category}"; then
-            log "Proactive engine: Trigger ${trigger_name} rate-limited, skipping"
-            _mark_trigger_fired "${trigger_name}"
-            continue
-          fi
-
-          log "Proactive engine: Random window trigger fired: ${trigger_name}"
-          _execute_trending_broadcast "${trigger_name}" "${trigger_json}"
-          _increment_daily_count "${category}"
-          _mark_trigger_fired "${trigger_name}"
-        fi
-        ;;
-      *)
-        continue
-        ;;
-    esac
-  done
 
   return 0
 }

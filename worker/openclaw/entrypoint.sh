@@ -51,6 +51,15 @@ if [[ ${PATCH_COUNT} -gt 0 ]]; then
   log "Gateway security patch applied to ${PATCH_COUNT} file(s) (allow Docker internal network IPs)."
 fi
 
+# Ensure paired devices have operator.read scope (required for subagent announce)
+PAIRED_FILE="${OPENCLAW_HOME}/devices/paired.json"
+if [[ -f "${PAIRED_FILE}" ]]; then
+  if ! jq -e 'to_entries | all(.value.scopes | index("operator.read"))' "${PAIRED_FILE}" >/dev/null 2>&1; then
+    jq 'to_entries | map(.value.scopes += ["operator.read"] | .value.scopes |= unique | .value.tokens |= with_entries(.value.scopes += ["operator.read"] | .value.scopes |= unique)) | from_entries' "${PAIRED_FILE}" > "${PAIRED_FILE}.tmp" && mv "${PAIRED_FILE}.tmp" "${PAIRED_FILE}"
+    log "Added operator.read scope to paired devices (required for subagent announce)."
+  fi
+fi
+
 # Clean up stale lock/intervention files from previous runs
 rm -rf /tmp/openclaw-* /tmp/heartbeat-original.md /tmp/openclaw-intervention-meta.json 2>/dev/null || true
 
@@ -174,6 +183,10 @@ if [[ -n "${OWNER_DISCORD_ID:-}" ]]; then
   chmod 444 /suggestions/.owner_id
   log "OWNER_DISCORD_ID written to /suggestions/.owner_id"
 fi
+# Link workspace/suggestions → /suggestions so the bot's write tool
+# (sandboxed to workspace) can create files visible to Brain via the named volume
+rm -rf "${OPENCLAW_HOME}/workspace/suggestions" 2>/dev/null || true
+ln -sfn /suggestions "${OPENCLAW_HOME}/workspace/suggestions"
 log "Suggestions directory ready."
 
 # Check required env vars — at least one channel must be configured
