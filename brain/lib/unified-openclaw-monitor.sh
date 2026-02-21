@@ -669,7 +669,7 @@ _unified_check_abnormal_behavior() {
       # Exclude news delivery (contains multiple URLs or news patterns)
       (.content | test("https?://.*https?://"; "s") | not) and
       # Exclude subagent task results
-      (.content | test("subagent task.*completed|Findings:"; "i") | not) and
+      (.content | test("subagent task.*completed|Subagent.*finished|Findings:"; "i") | not) and
       # Exclude web search result summaries and research reports
       (.content | test("検索結果|search result|web_search|web_fetch"; "i") | not) and
       # Exclude subagent web search responses (structured research with headers/bullets)
