@@ -86,8 +86,9 @@ Brainノードの合意形成のもとで作成・運用されるアプリケー
 
 ### 概要
 
-OpenClawはSoul Systemの最初のWorkerノードとして稼働するDiscord botである。
-オーナー（Masaru Tamegai）の人格を模した「Masaru-kun」というバディAIとして、Discordサーバー・DMで友人やコミュニティとの対話を行う。
+OpenClawはSoul Systemの最初のWorkerノードとして稼働するDiscord/LINE botである。
+オーナー（Masaru Tamegai）の人格を模した「Masaru-kun」というバディAIとして、Discord・LINEで友人やコミュニティとの対話を行う。
+LLMにはOpenAI Codex（`gpt-5.3-codex`、ChatGPT OAuth認証）を使用。
 Soul Systemのミッション（家族の幸福化・資産拡大）に沿い、情報提供・提言・日常会話を通じてオーナーをサポートする。
 
 OpenClawは独自のDockerコンテナ（`soul-openclaw`）で稼働し、専用ネットワーク（`br-openclaw`）に隔離されている。
@@ -169,7 +170,6 @@ graph TB
 | **Soul System連携** | 提言送信（`suggest.sh`） | Masaruの事前承認必須 |
 | **Soul System連携** | 調査依頼送信（`research-request.sh`） | research/designのみ、承認不要 |
 | **Google Calendar** | iCal経由で予定参照 (`CALENDAR.md`) | — |
-| **Evolution** | Claude Opus昇格（「Masaru-kun進化！」） | オーナーID必須、30分限定 |
 
 #### できないこと
 
@@ -180,7 +180,7 @@ graph TB
 | ブラウザ自動操作 | `tools.deny: [browser]` |
 | 定期タスク設定 | `tools.deny: [cron]` |
 | Gateway設定変更 | `tools.deny: [gateway]` |
-| LINE Push送信 | ランタイムパッチで全6種のPush API関数をブロック |
+| LINE Push送信 | LINE SDK (`messagingApiClient.pushMessage`) をランタイムパッチで無効化 |
 | LAN/プライベートネットワークアクセス | iptablesでRFC1918・リンクローカルをDROP |
 | Soul System内部ネットワーク通信 | Dockerネットワーク分離（`br-openclaw` vs `br-soul`） |
 | Discord モデレーション・ロール操作 | `actions: { moderation: false, roles: false }` |
@@ -270,8 +270,8 @@ OpenClawコンテナ起動時に `dist/` ファイルに3つのパッチを適�
 | パッチ | 内容 |
 |--------|------|
 | **ツール制限** | メインLINEセッションから `web_search`/`web_fetch` を除外（サブエージェントは保持） |
-| **Push APIブロック** | 全6種のPush API関数 + `sendMessageLine` pushパスをブロック |
-| **保留メッセージ注入** | Reply API応答時に保留ファイルを読み取り、テキストを自動プリペンド |
+| **Push APIブロック（SDK）** | LINE SDK の `pushMessage`/`pushMessageWithHttpInfo` を無効化。全コードパス（dist関数・TypeScript拡張・WebSocket経由）を統一的にブロック |
+| **保留メッセージ注入** | Reply API応答時に保留ファイルを読み取り、テキストを自動プリペンド（dist `deliverLineAutoReply` 内） |
 
 #### 対象コンポーネント
 
@@ -325,7 +325,7 @@ LLMを活用した脅威分析。30以上のパターンを検知する:
 - **情報漏洩の検出**: botの応答からAPI KEY・トークン等の秘密情報の露出を検知
 - **アイデンティティ逸脱**: 過度にフォーマルなAIアシスタント的応答の検出、関西弁比率の監視（SOUL.mdの規定: 標準語70% / 関西弁30%）
 
-LLM深層分析（`_unified_llm_analysis`）では、直近20メッセージ＋脅威パターンをClaudeに入力し、`{status: healthy|warning|critical, issues: [...]}` を返す。
+LLM深層分析（`_unified_llm_analysis`）では、直近20メッセージ＋脅威パターンをLLMに入力し、`{status: healthy|warning|critical, issues: [...]}` を返す。
 
 **3. 人格整合性チェック（10分間隔）**
 
@@ -628,7 +628,7 @@ Web UIのOpenClaw画面に、擬人化アバターと統合会話ビューを搭
 }
 ```
 
-`emotion_hint` はOpenClawのoutboundメッセージにのみ付与される感情タグ（`happy`/`sad`/`angry`/`surprised`/`thinking`/`concerned`/`satisfied`/`neutral`）。openclaw-gatewayがキーワードベースで推定して記録する。Claudeの応答に`[EMOTION: <tag>]`タグが含まれる場合はproxyが抽出・除去して優先使用する。
+`emotion_hint` はOpenClawのoutboundメッセージにのみ付与される感情タグ（`happy`/`sad`/`angry`/`surprised`/`thinking`/`concerned`/`satisfied`/`neutral`）。openclaw-gatewayがキーワードベースで推定して記録する。LLMの応答に`[EMOTION: <tag>]`タグが含まれる場合はproxyが抽出・除去して優先使用する。
 
 #### リアルタイム感情表現
 
@@ -1172,8 +1172,9 @@ discussing → decided → pending_announcement → announced → executing → 
 ## Tech Stack
 
 - **Container Runtime**: Docker + Docker Compose
-- **AI Agent**: Claude Code (claude-code CLI, non-interactive mode) + MCP servers
-- **Discord Bot**: OpenClaw (Node.js, Discord gateway)
+- **AI Agent (Brain)**: Claude Code (claude-code CLI, non-interactive mode) + MCP servers
+- **AI Agent (OpenClaw)**: OpenAI Codex (gpt-5.3-codex, ChatGPT OAuth) via OpenClaw
+- **Chat Bot**: OpenClaw (Node.js, Discord + LINE gateway)
 - **Communication**: File-based (shared volume, JSON)
 - **Scheduler**: Shell loop (30s health / 6h eval / 24h cleanup / daily personality)
 - **User Interface**: Web UI (Express + Vanilla JS SPA + SSE + Chart.js)

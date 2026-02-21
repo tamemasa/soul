@@ -195,11 +195,7 @@ if [[ -z "${DISCORD_BOT_TOKEN:-}" && -z "${LINE_CHANNEL_ACCESS_TOKEN:-}" ]]; the
   exit 1
 fi
 
-if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  log "WARNING: ANTHROPIC_API_KEY is not set."
-fi
-
-MODEL="${OPENCLAW_MODEL:-anthropic/claude-sonnet-4-20250514}"
+MODEL="${OPENCLAW_MODEL:-openai-codex/gpt-5.3-codex}"
 GW_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-}"
 
 # Write config directly via node (fast, no CLI overhead)
@@ -215,7 +211,7 @@ try { config = JSON.parse(fs.readFileSync('${CONFIG_FILE}', 'utf8')); } catch(e)
 // Merge agent model config
 config.agents = config.agents || {};
 config.agents.defaults = config.agents.defaults || {};
-config.agents.defaults.model = { primary: process.env.OPENCLAW_MODEL || 'anthropic/claude-sonnet-4-20250514' };
+config.agents.defaults.model = { primary: process.env.OPENCLAW_MODEL || 'openai-codex/gpt-5.3-codex' };
 
 // Merge Discord channel config (only if token is set)
 config.channels = config.channels || {};
