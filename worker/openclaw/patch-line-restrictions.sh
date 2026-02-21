@@ -2,8 +2,8 @@
 # patch-line-restrictions.sh
 # Patches OpenClaw to enforce LINE channel restrictions:
 #   1. Remove web_search/web_fetch tools from main LINE sessions (sub-agents keep them)
-#   2. Block ALL Push API functions across all dist files
-#   3. Block sendMessageLine push path (direct client.pushMessage fallback)
+#   2. Block Push API at LINE SDK level (messagingApiClient.pushMessage)
+#   3. Inject pending messages into LINE replies (dist deliverLineAutoReply)
 #
 # Applied at container startup (entrypoint.sh) after npm install,
 # because openclaw is installed globally and the dist files are overwritten on rebuild.
@@ -62,73 +62,91 @@ console.log('Patch applied successfully');
   fi
 }
 
-# --- Patch 2: Block ALL Push API functions across all dist/*.js files ---
-# Blocks: pushMessageLine, pushMessagesLine, pushTextMessageWithQuickReplies,
-#         pushFlexMessage, pushLocationMessage, pushTemplateMessage
-# Also blocks sendMessageLine push path (direct client.pushMessage fallback)
-patch_push_api_all() {
-  # Write patch script to temp file (avoids shell quoting issues)
-  cat > /tmp/patch-push-all.js << 'NODEOF'
+# --- Patch 2: Block Push API at LINE SDK level ---
+# Instead of patching individual dist push functions, block at the SDK layer:
+#   MessagingApiClient.pushMessage() → no-op with log
+#   MessagingApiClient.pushMessageWithHttpInfo() → no-op with log
+# This catches ALL code paths: dist functions, TypeScript extensions, WebSocket chat.send, etc.
+# Reply API (replyMessage/replyMessageWithHttpInfo) is unaffected.
+patch_push_api_sdk() {
+  local sdk_file="/usr/local/lib/node_modules/openclaw/node_modules/@line/bot-sdk/dist/messaging-api/api/messagingApiClient.js"
+  if [[ ! -f "$sdk_file" ]]; then
+    log "WARNING: LINE SDK messagingApiClient.js not found, skipping push API patch"
+    return 1
+  fi
+
+  if grep -q 'LINE-PUSH-BLOCKED' "$sdk_file" 2>/dev/null; then
+    log "SDK already patched (push API blocked)"
+    return 0
+  fi
+
+  cat > /tmp/patch-push-sdk.js << 'NODEOF'
 const fs = require("fs");
-const distDir = "/usr/local/lib/node_modules/openclaw/dist";
-const allFiles = fs.readdirSync(distDir).filter(function(f) { return f.endsWith(".js"); });
+const file = "/usr/local/lib/node_modules/openclaw/node_modules/@line/bot-sdk/dist/messaging-api/api/messagingApiClient.js";
+let code = fs.readFileSync(file, "utf8");
 
-// --- Part A: Block push function definitions ---
-const pushFunctions = [
-  { sig: 'async function pushMessageLine(to, text, opts = {}) {', block: '\tconsole.log("[LINE-PUSH-BLOCKED] pushMessageLine dropped: to=" + to); return { messageId: "push-blocked", chatId: to };' },
-  { sig: 'async function pushMessagesLine(to, messages, opts = {}) {', block: '\tconsole.log("[LINE-PUSH-BLOCKED] pushMessagesLine dropped: to=" + to); return { messageId: "push-blocked", chatId: to };' },
-  { sig: 'async function pushTextMessageWithQuickReplies(to, text, quickReplyLabels, opts = {}) {', block: '\tconsole.log("[LINE-PUSH-BLOCKED] pushTextMessageWithQuickReplies dropped: to=" + to); return { messageId: "push-blocked", chatId: to };' },
-  { sig: 'async function pushFlexMessage(to, altText, contents, opts = {}) {', block: '\tconsole.log("[LINE-PUSH-BLOCKED] pushFlexMessage dropped: to=" + to); return { messageId: "push-blocked", chatId: to };' },
-  { sig: 'async function pushLocationMessage(to, location, opts = {}) {', block: '\tconsole.log("[LINE-PUSH-BLOCKED] pushLocationMessage dropped: to=" + to); return { messageId: "push-blocked", chatId: to };' },
-  { sig: 'async function pushTemplateMessage(to, template, opts = {}) {', block: '\tconsole.log("[LINE-PUSH-BLOCKED] pushTemplateMessage dropped: to=" + to); return { messageId: "push-blocked", chatId: to };' },
-];
+// --- Block pushMessage() ---
+const pushOld = [
+  "    async pushMessage(pushMessageRequest, xLineRetryKey) {",
+  "        return (await this.pushMessageWithHttpInfo(pushMessageRequest, xLineRetryKey)).body;",
+  "    }"
+].join("\n");
 
-// --- Part B: Block sendMessageLine push path ---
-const sendMsgOld = '\tawait client.pushMessage({\n\t\tto: chatId,\n\t\tmessages\n\t});\n\trecordChannelActivity({\n\t\tchannel: "line",\n\t\taccountId: account.accountId,\n\t\tdirection: "outbound"\n\t});\n\tif (opts.verbose) logVerbose(`line: pushed message to ${chatId}`);\n\treturn {\n\t\tmessageId: "push",\n\t\tchatId\n\t};';
-const sendMsgGuard = '\tconsole.log("[LINE-PUSH-BLOCKED] sendMessageLine push path blocked: to=" + chatId); return { messageId: "push-blocked", chatId };\n';
+const pushNew = [
+  "    async pushMessage(pushMessageRequest, xLineRetryKey) {",
+  "        // [LINE-PUSH-BLOCKED]",
+  '        console.log("[LINE-PUSH-BLOCKED] pushMessage blocked: to=" + (pushMessageRequest && pushMessageRequest.to || "unknown"));',
+  "        return {};",
+  "    }"
+].join("\n");
 
-let totalPatched = 0;
-for (const fname of allFiles) {
-  const fpath = distDir + "/" + fname;
-  let code;
-  try { code = fs.readFileSync(fpath, "utf8"); } catch(e) { continue; }
-  if (code.includes("LINE-PUSH-BLOCKED")) continue;
-
-  let patched = false;
-
-  // Part A: Block push functions
-  for (const pf of pushFunctions) {
-    if (code.includes(pf.sig)) {
-      code = code.replace(pf.sig, pf.sig + "\n" + pf.block);
-      patched = true;
-    }
-  }
-
-  // Part B: Block sendMessageLine push path
-  if (code.includes(sendMsgOld) && !code.includes("sendMessageLine push path blocked")) {
-    code = code.replace(sendMsgOld, sendMsgGuard + sendMsgOld);
-    patched = true;
-  }
-
-  if (patched) {
-    fs.writeFileSync(fpath, code);
-    const count = (code.match(/LINE-PUSH-BLOCKED/g) || []).length;
-    console.log("Patched " + fname + " (" + count + " push paths blocked)");
-    totalPatched++;
-  }
+if (!code.includes(pushOld)) {
+  console.log("ERROR: pushMessage pattern not found in SDK");
+  process.exit(1);
 }
-console.log("Total files patched: " + totalPatched);
+code = code.replace(pushOld, pushNew);
+console.log("Blocked: pushMessage()");
+
+// --- Block pushMessageWithHttpInfo() ---
+const withInfoOld = [
+  "    async pushMessageWithHttpInfo(pushMessageRequest, xLineRetryKey) {",
+  "        const params = pushMessageRequest;",
+  "        const headerParams = {",
+  '            ...(xLineRetryKey != null ? { "X-Line-Retry-Key": xLineRetryKey } : {}),',
+  "        };",
+  '        const res = await this.httpClient.post("/v2/bot/message/push", params, { headers: headerParams });',
+  "        const text = await res.text();",
+  "        const parsedBody = text ? JSON.parse(text) : null;",
+  "        return { httpResponse: res, body: parsedBody };",
+  "    }"
+].join("\n");
+
+const withInfoNew = [
+  "    async pushMessageWithHttpInfo(pushMessageRequest, xLineRetryKey) {",
+  "        // [LINE-PUSH-BLOCKED]",
+  '        console.log("[LINE-PUSH-BLOCKED] pushMessageWithHttpInfo blocked: to=" + (pushMessageRequest && pushMessageRequest.to || "unknown"));',
+  "        return { httpResponse: {}, body: {} };",
+  "    }"
+].join("\n");
+
+if (!code.includes(withInfoOld)) {
+  console.log("ERROR: pushMessageWithHttpInfo pattern not found in SDK");
+  process.exit(1);
+}
+code = code.replace(withInfoOld, withInfoNew);
+console.log("Blocked: pushMessageWithHttpInfo()");
+
+fs.writeFileSync(file, code);
+console.log("SDK push API patch complete");
 NODEOF
 
-  node /tmp/patch-push-all.js 2>&1
-  rm -f /tmp/patch-push-all.js
+  node /tmp/patch-push-sdk.js 2>&1
+  rm -f /tmp/patch-push-sdk.js
 
-  local total
-  total=$(grep -rl 'LINE-PUSH-BLOCKED' "$OPENCLAW_DIST"/*.js 2>/dev/null | wc -l)
-  if [[ "$total" -gt 0 ]]; then
-    log "Push API blocked in $total dist files"
+  if grep -q 'LINE-PUSH-BLOCKED' "$sdk_file" 2>/dev/null; then
+    log "SDK patched: pushMessage + pushMessageWithHttpInfo blocked at SDK level"
   else
-    log "WARNING: Push API patch may have failed"
+    log "WARNING: SDK push API patch may have failed"
     return 1
   fi
 }
@@ -136,68 +154,85 @@ NODEOF
 # --- Patch 3: Inject pending messages into LINE replies ---
 # When replying to a LINE message, check /bot_commands/line_pending_{userId}.json
 # and prepend any pending messages to the reply text automatically.
-# Uses existsSync/readFileSync/writeFileSync already imported in the ESM loader.
+# Targets dist files containing deliverLineAutoReply (not loader-*.js which no longer exists).
+# Uses existsSync/readFileSync/writeFileSync from top-level ESM import (node:fs).
 patch_pending_injection() {
-  local file
-  file=$(find "$OPENCLAW_DIST" -name 'loader-*.js' -print -quit 2>/dev/null || true)
-  if [[ -z "$file" || ! -f "$file" ]]; then
-    log "WARNING: loader file not found, skipping pending injection patch"
+  # Find dist files containing the marker
+  local marker_files
+  marker_files=$(grep -rl 'let replyTokenUsed = params.replyTokenUsed' "$OPENCLAW_DIST" 2>/dev/null || true)
+  if [[ -z "$marker_files" ]]; then
+    log "WARNING: pending injection marker not found in dist, skipping"
     return 1
   fi
 
-  if grep -q 'LINE-PENDING' "$file" 2>/dev/null; then
-    log "Loader already patched (LINE pending injection)"
+  # Check if already patched (LINE-PENDING marker present in all matching files)
+  local needs_patch=false
+  for f in $marker_files; do
+    if ! grep -q 'LINE-PENDING' "$f" 2>/dev/null; then
+      needs_patch=true
+      break
+    fi
+  done
+
+  if ! $needs_patch; then
+    log "Dist already patched (LINE pending injection)"
     return 0
   fi
 
-  cat > /tmp/patch-pending.js << 'NODEOF'
+  cat > /tmp/patch-pending-dist.js << 'NODEOF'
 const fs = require("fs");
 const distDir = "/usr/local/lib/node_modules/openclaw/dist";
-const loaderFiles = fs.readdirSync(distDir).filter(function(f) { return f.startsWith("loader-") && f.endsWith(".js"); });
-if (loaderFiles.length === 0) { console.log("ERROR: no loader file found"); process.exit(1); }
-const fpath = distDir + "/" + loaderFiles[0];
-let code = fs.readFileSync(fpath, "utf8");
+const allFiles = fs.readdirSync(distDir).filter(function(f) { return f.endsWith(".js"); });
 
 const marker = "let replyTokenUsed = params.replyTokenUsed;";
-if (!code.includes(marker)) {
-  console.log("ERROR: marker not found in " + loaderFiles[0]);
-  process.exit(1);
+let patchedCount = 0;
+
+for (const fname of allFiles) {
+  const fpath = distDir + "/" + fname;
+  let code;
+  try { code = fs.readFileSync(fpath, "utf8"); } catch(e) { continue; }
+  if (!code.includes(marker)) continue;
+  if (code.includes("LINE-PENDING")) { console.log("Already patched: " + fname); continue; }
+
+  // Injection code — uses existsSync/readFileSync/writeFileSync from top-level ESM import
+  var injection = [
+    "",
+    "\t// [LINE-PENDING] Prepend pending messages to LINE reply",
+    "\ttry {",
+    "\t\tvar _toId = to.replace(/^line:group:/, '').replace(/^line:room:/, '').replace(/^line:/, '');",
+    "\t\tvar _pp = '/bot_commands/line_pending_' + _toId + '.json';",
+    "\t\tif (existsSync(_pp)) {",
+    "\t\t\tvar _pd = JSON.parse(readFileSync(_pp, 'utf8'));",
+    "\t\t\tif (_pd.pending_messages && _pd.pending_messages.length > 0) {",
+    "\t\t\t\tvar _pt = _pd.pending_messages.map(function(m){ return m.text; }).join('\\n\\n---\\n\\n');",
+    "\t\t\t\tpayload.text = _pt + (payload.text ? '\\n\\n---\\n\\n' + payload.text : '');",
+    "\t\t\t\t_pd.delivered_messages = (_pd.delivered_messages || []).concat(",
+    "\t\t\t\t\t_pd.pending_messages.map(function(m){ m.delivered_at = new Date().toISOString().replace(/\\.\\d{3}Z$/, 'Z'); return m; })",
+    "\t\t\t\t);",
+    "\t\t\t\t_pd.pending_messages = [];",
+    "\t\t\t\t_pd.updated_at = new Date().toISOString().replace(/\\.\\d{3}Z$/, 'Z');",
+    "\t\t\t\twriteFileSync(_pp, JSON.stringify(_pd, null, 2));",
+    "\t\t\t\tconsole.log('[LINE-PENDING] Injected ' + _pt.length + ' chars for ' + _toId);",
+    "\t\t\t}",
+    "\t\t}",
+    "\t} catch(_e) { console.log('[LINE-PENDING] Error: ' + _e.message); }",
+  ].join("\n");
+
+  code = code.replace(marker, marker + injection);
+  fs.writeFileSync(fpath, code);
+  patchedCount++;
+  console.log("Patched: " + fname);
 }
-
-// Injection uses existsSync/readFileSync/writeFileSync from the ESM import already in scope
-// (imported as: import fs, { existsSync, ..., readFileSync, ..., writeFileSync } from "node:fs")
-// `to` has format "line:userId" or "line:group:groupId" — strip prefix to match pending file names
-var injection = [
-  "",
-  "\ttry {",
-  "\t\tvar _toId = to.replace(/^line:group:/, '').replace(/^line:room:/, '').replace(/^line:/, '');",
-  "\t\tvar _pp = '/bot_commands/line_pending_' + _toId + '.json';",
-  "\t\tconsole.log('[LINE-PENDING] checking ' + _pp);",
-  "\t\tif (existsSync(_pp)) {",
-  "\t\t\tvar _pd = JSON.parse(readFileSync(_pp, 'utf8'));",
-  "\t\t\tif (_pd.pending_messages && _pd.pending_messages.length > 0) {",
-  "\t\t\t\tvar _pt = _pd.pending_messages.map(function(m){ return m.text; }).join('\\n\\n---\\n\\n');",
-  "\t\t\t\tpayload.text = _pt + (payload.text ? '\\n\\n---\\n\\n' + payload.text : '');",
-  "\t\t\t\t_pd.delivered_messages = _pd.pending_messages.map(function(m){ m.delivered_at = new Date().toISOString().replace(/\\.\\d{3}Z$/, 'Z'); return m; });",
-  "\t\t\t\t_pd.pending_messages = [];",
-  "\t\t\t\t_pd.updated_at = new Date().toISOString().replace(/\\.\\d{3}Z$/, 'Z');",
-  "\t\t\t\twriteFileSync(_pp, JSON.stringify(_pd, null, 2));",
-  "\t\t\t\tconsole.log('[LINE-PENDING] Injected ' + _pt.length + ' chars of pending messages for ' + _toId);",
-  "\t\t\t}",
-  "\t\t}",
-  "\t} catch(_e) { console.log('[LINE-PENDING] Error: ' + _e.message); }",
-].join("\n");
-
-code = code.replace(marker, marker + injection);
-fs.writeFileSync(fpath, code);
-console.log("Pending injection patch applied to " + loaderFiles[0]);
+console.log("Total files patched: " + patchedCount);
 NODEOF
 
-  node /tmp/patch-pending.js 2>&1
-  rm -f /tmp/patch-pending.js
+  node /tmp/patch-pending-dist.js 2>&1
+  rm -f /tmp/patch-pending-dist.js
 
-  if grep -q 'LINE-PENDING' "$file" 2>/dev/null; then
-    log "Loader patched: pending messages injected into LINE replies"
+  local total
+  total=$(grep -rl 'LINE-PENDING' "$OPENCLAW_DIST"/*.js 2>/dev/null | wc -l)
+  if [[ "$total" -gt 0 ]]; then
+    log "Pending injection applied in $total dist files"
   else
     log "WARNING: pending injection patch may have failed"
     return 1
@@ -526,7 +561,7 @@ NODEOF
 # Each patch runs independently — failure of one must not block the other.
 log "Applying channel restrictions..."
 patch_coding_tools || log "WARNING: patch_coding_tools failed (continuing)"
-patch_push_api_all || log "WARNING: patch_push_api_all failed (continuing)"
+patch_push_api_sdk || log "WARNING: patch_push_api_sdk failed (continuing)"
 patch_pending_injection || log "WARNING: patch_pending_injection failed (continuing)"
 patch_pause_enforcement || log "WARNING: patch_pause_enforcement failed (continuing)"
 patch_discord_pause_enforcement || log "WARNING: patch_discord_pause_enforcement failed (continuing)"
