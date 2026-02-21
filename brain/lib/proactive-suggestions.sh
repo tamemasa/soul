@@ -1551,46 +1551,36 @@ _deliver_discord() {
   fi
 }
 
-# Send message to Discord channel via Bot API
+# Write Discord push file (picked up by OpenClaw command-watcher for delivery via openclaw message send)
 _deliver_discord_bot() {
   local channel_id="$1"
   local message_text="$2"
-
-  local bot_token="${DISCORD_BOT_TOKEN:-}"
-  if [[ -z "${bot_token}" ]]; then
-    log "WARN: Proactive engine: DISCORD_BOT_TOKEN not set, skipping Discord delivery"
-    return 1
-  fi
 
   # Truncate to Discord's 2000 char limit
   if [[ ${#message_text} -gt 2000 ]]; then
     message_text="${message_text:0:1997}..."
   fi
 
-  local payload
-  payload=$(jq -n --arg content "${message_text}" '{content: $content}')
+  local now_ts
+  now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local ts rand
+  ts=$(date +%s)
+  rand=$((RANDOM % 9000 + 1000))
 
-  local http_code response_body
-  response_body=$(mktemp)
-  http_code=$(curl -s -o "${response_body}" -w "%{http_code}" \
-    -H "Authorization: Bot ${bot_token}" \
-    -H "Content-Type: application/json" \
-    -d "${payload}" \
-    "https://discord.com/api/v10/channels/${channel_id}/messages" 2>/dev/null) || {
-    log "ERROR: Proactive engine: Discord Bot API request failed"
-    rm -f "${response_body}"
-    return 1
-  }
+  local push_file="/shared/bot_commands/discord_push_${channel_id}_${ts}_${rand}.json"
+  local tmp
+  tmp=$(mktemp)
 
-  if [[ "${http_code}" -ge 200 && "${http_code}" -lt 300 ]]; then
-    log "Proactive engine: Discord message sent to channel ${channel_id} (HTTP ${http_code})"
-    rm -f "${response_body}"
-    return 0
-  else
-    log "ERROR: Proactive engine: Discord Bot API returned HTTP ${http_code}: $(cat "${response_body}")"
-    rm -f "${response_body}"
-    return 1
-  fi
+  jq -n \
+    --arg channel_id "${channel_id}" \
+    --arg text "${message_text}" \
+    --arg source "proactive_news" \
+    --arg created_at "${now_ts}" \
+    '{channel_id: $channel_id, text: $text, source: $source, created_at: $created_at}' \
+    > "${tmp}" && chmod 666 "${tmp}" && mv "${tmp}" "${push_file}"
+
+  log "Proactive engine: Discord push file written for channel ${channel_id} (${push_file})"
+  return 0
 }
 
 # Write pending LINE message to file (picked up by OpenClaw on next user message)

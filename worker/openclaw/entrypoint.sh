@@ -25,6 +25,32 @@ if [[ -f /app/patch-line-restrictions.sh ]]; then
   /app/patch-line-restrictions.sh
 fi
 
+# Patch gateway security check to allow Docker internal network IPs (ws://)
+# When bind="lan", the gateway URL resolves to the container's LAN IP (e.g. 172.20.0.3),
+# which fails the ws:// loopback-only security check. Docker bridge networks are isolated
+# and safe for plaintext ws://, so we extend the check to allow RFC1918 private IPs.
+OPENCLAW_DIST="/usr/local/lib/node_modules/openclaw/dist"
+PATCH_COUNT=0
+for target in $(find "${OPENCLAW_DIST}" -name "*.js" -exec grep -l 'return isLoopbackHost(parsed.hostname);' {} \; 2>/dev/null); do
+  sed -i '/^function isSecureWebSocketUrl/i\
+function isPrivateNetworkHost(host) {\
+	if (!host) return false;\
+	const parts = host.split(".");\
+	if (parts.length !== 4) return false;\
+	const first = parseInt(parts[0], 10);\
+	const second = parseInt(parts[1], 10);\
+	if (first === 10) return true;\
+	if (first === 172 \&\& second >= 16 \&\& second <= 31) return true;\
+	if (first === 192 \&\& second === 168) return true;\
+	return false;\
+}' "${target}"
+  sed -i 's/return isLoopbackHost(parsed.hostname);/return isLoopbackHost(parsed.hostname) || isPrivateNetworkHost(parsed.hostname);/g' "${target}"
+  PATCH_COUNT=$((PATCH_COUNT + 1))
+done
+if [[ ${PATCH_COUNT} -gt 0 ]]; then
+  log "Gateway security patch applied to ${PATCH_COUNT} file(s) (allow Docker internal network IPs)."
+fi
+
 # Clean up stale lock/intervention files from previous runs
 rm -rf /tmp/openclaw-* /tmp/heartbeat-original.md /tmp/openclaw-intervention-meta.json 2>/dev/null || true
 

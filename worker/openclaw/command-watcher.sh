@@ -6,6 +6,11 @@
 COMMANDS_DIR="/bot_commands"
 POLL_INTERVAL=10
 
+# Use /bot_commands for temp files to avoid /tmp (tmpfs) space issues
+safe_mktemp() {
+  mktemp -p "${COMMANDS_DIR}" ".tmp.XXXXXX" 2>/dev/null || mktemp 2>/dev/null
+}
+
 # HEARTBEAT.md intervention paths
 WORKSPACE_DIR="/home/openclaw/.openclaw/workspace"
 HEARTBEAT_FILE="${WORKSPACE_DIR}/HEARTBEAT.md"
@@ -145,7 +150,7 @@ write_heartbeat_intervention() {
 
   # Write intervention metadata
   local tmp
-  tmp=$(mktemp)
+  tmp=$(safe_mktemp)
   jq -n \
     --arg type "${intervention_type}" \
     --arg reason "${reason}" \
@@ -214,7 +219,7 @@ check_intervention_expiry() {
         if [[ ${now_epoch} -ge ${evo_epoch} ]]; then
           log "Evolution expired for session ${evo_key}, removing entry"
           local evo_tmp
-          evo_tmp=$(mktemp)
+          evo_tmp=$(safe_mktemp)
           jq --arg k "${evo_key}" 'del(.[$k])' /tmp/openclaw-evolution.json > "${evo_tmp}" && mv "${evo_tmp}" /tmp/openclaw-evolution.json
           evo_updated=true
         fi
@@ -271,7 +276,7 @@ process_command() {
   local basename
   basename=$(basename "${cmd_file}")
   case "${basename}" in
-    personality_manual_trigger*.json|personality_rollback_trigger*.json|personality_answer*.json|personality_external_trigger*.json|personality_external_answer*.json|personality_freeform_trigger*.json|personality_external_freeform_trigger*.json|line_pending_*.json)
+    personality_manual_trigger*.json|personality_rollback_trigger*.json|personality_answer*.json|personality_external_trigger*.json|personality_external_answer*.json|personality_freeform_trigger*.json|personality_external_freeform_trigger*.json|line_pending_*.json|discord_push_*.json)
       return 0
       ;;
   esac
@@ -363,7 +368,7 @@ process_command() {
 
   # Mark command as processed
   local tmp
-  tmp=$(mktemp)
+  tmp=$(safe_mktemp)
   local ts
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   jq --arg st "processed" --arg ts "${ts}" --arg res "${result}" --arg det "${result_detail}" \
@@ -434,7 +439,7 @@ process_personality_questions() {
     '{id: $id, text: $text, source: $source, created_at: $created_at}')
 
   local tmp
-  tmp=$(mktemp)
+  tmp=$(safe_mktemp)
 
   if [[ -f "${line_pending}" ]]; then
     jq --argjson new_msg "${new_msg}" --arg ts "${now_ts}" \
@@ -453,7 +458,7 @@ process_personality_questions() {
 
   # Write a marker file so Brain knows questions are pending delivery
   local marker_tmp
-  marker_tmp=$(mktemp)
+  marker_tmp=$(safe_mktemp)
   jq -n \
     --arg ts "${now_ts}" \
     --arg pending_file "${pending_file}" \
@@ -469,6 +474,38 @@ process_personality_questions() {
     }' > "${marker_tmp}" && mv "${marker_tmp}" "${COMMANDS_DIR}/personality_q_status.json"
 
   return 0
+}
+
+# ============================================================
+# Discord Push Handler
+# ============================================================
+# Sends Discord messages via openclaw message send
+# Push files are created by Brain's _deliver_discord_bot()
+
+process_discord_push() {
+  local push_file="$1"
+  [[ -f "${push_file}" ]] || return 0
+
+  local channel_id text
+  channel_id=$(jq -r '.channel_id // ""' "${push_file}" 2>/dev/null)
+  text=$(jq -r '.text // ""' "${push_file}" 2>/dev/null)
+
+  if [[ -z "${channel_id}" || -z "${text}" ]]; then
+    log "ERROR: Discord push file missing channel_id or text: ${push_file}"
+    rm -f "${push_file}"
+    return 1
+  fi
+
+  log "Sending Discord push to channel ${channel_id} (${push_file})"
+
+  if openclaw message send --channel discord --target "${channel_id}" -m "${text}" 2>&1; then
+    log "Discord push sent successfully to channel ${channel_id}"
+    rm -f "${push_file}"
+    return 0
+  else
+    log "ERROR: Discord push failed for channel ${channel_id}, will retry next cycle"
+    return 1
+  fi
 }
 
 main() {
@@ -515,8 +552,16 @@ HBEOF
       process_command "${cmd_file}"
     done
 
-    # Clean up old processed commands (older than 1 hour, except status and pending files)
-    find "${COMMANDS_DIR}" -name "*.json" ! -name "*_status.json" ! -name "line_pending_*.json" -mmin +60 -exec rm -f {} \; 2>/dev/null || true
+    # Process Discord push files
+    for push_file in "${COMMANDS_DIR}"/discord_push_*.json; do
+      [[ -f "${push_file}" ]] || continue
+      process_discord_push "${push_file}"
+    done
+
+    # Clean up old processed commands (older than 1 hour, except status, pending, and push files)
+    find "${COMMANDS_DIR}" -name "*.json" ! -name "*_status.json" ! -name "line_pending_*.json" ! -name "discord_push_*.json" -mmin +60 -exec rm -f {} \; 2>/dev/null || true
+    # Clean up stale safe_mktemp files (older than 5 minutes)
+    find "${COMMANDS_DIR}" -name ".tmp.*" -mmin +5 -exec rm -f {} \; 2>/dev/null || true
 
     sleep "${POLL_INTERVAL}"
   done

@@ -128,6 +128,8 @@ services:
       - ./.env
     environment:
       - TZ=Asia/Tokyo
+      - NODE_COMPILE_CACHE=/app/data/.node-compile-cache
+      - JITI_CACHE_DIR=/app/data/.jiti-cache
     volumes:
       - openclaw-data:/app/data
       - openclaw-home:/home/openclaw/.openclaw
@@ -148,7 +150,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:size=64m
+      - /tmp:size=128m
     cpus: 1.0
 
   openclaw-gateway:
